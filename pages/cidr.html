@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="CIDR to Subnet Mask Converter Tool">
+    <title>CIDR Converter - NetMaster Toolkit</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <!-- Navigation Bar -->
+    <nav class="navbar">
+        <div class="nav-container">
+            <a href="../index.html" class="logo">
+                <span class="logo-icon">⚙️</span>
+                <span class="logo-text">NetMaster Toolkit</span>
+            </a>
+            <ul class="nav-menu">
+                <li class="nav-item"><a href="../index.html" class="nav-link">Home</a></li>
+                <li class="nav-item"><a href="subnet.html" class="nav-link">Subnet Calculator</a></li>
+                <li class="nav-item"><a href="binary.html" class="nav-link">IPv4 to Binary</a></li>
+                <li class="nav-item"><a href="cidr.html" class="nav-link">CIDR Converter</a></li>
+            </ul>
+            <div class="hamburger">
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="container">
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1>🔗 CIDR to Subnet Mask Converter</h1>
+            <p>Convert between CIDR notation and traditional subnet mask notation effortlessly</p>
+        </div>
+
+        <!-- Converter Forms -->
+        <div class="converter-grid">
+            <!-- CIDR to Subnet Mask -->
+            <div class="form-container">
+                <h2>CIDR to Subnet Mask</h2>
+                
+                <div class="form-group">
+                    <label for="cidrInput">CIDR Prefix:</label>
+                    <input 
+                        type="number" 
+                        id="cidrInput" 
+                        min="0" 
+                        max="32"
+                        placeholder="Example: 24"
+                        autocomplete="off"
+                    >
+                    <small style="color: var(--text-secondary); margin-top: 5px; display: block;">
+                        Enter CIDR prefix value (0-32)
+                    </small>
+                </div>
+
+                <div class="form-group">
+                    <button class="btn" onclick="convertCIDRtoMask()">Convert to Subnet Mask</button>
+                </div>
+
+                <div id="cidrToMaskResult" class="result-container">
+                    <div class="result-item">
+                        <span class="result-label">CIDR Notation</span>
+                        <span class="result-value" id="cidrDisplay">-</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="result-label">Subnet Mask</span>
+                        <span class="result-value" id="maskDisplay">-</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="result-label">Wildcard Mask</span>
+                        <span class="result-value" id="wildcardDisplay">-</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="result-label">Network Bits</span>
+                        <span class="result-value" id="networkBits">-</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="result-label">Host Bits</span>
+                        <span class="result-value" id="hostBits">-</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="result-label">Total Usable Hosts</span>
+                        <span class="result-value" id="totalHostsCIDR">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Subnet Mask to CIDR -->
+            <div class="form-container">
+                <h2>Subnet Mask to CIDR</h2>
+                
+                <div class="form-group">
+                    <label for="maskInput">Subnet Mask:</label>
+                    <input 
+                        type="text" 
+                        id="maskInput" 
+                        placeholder="Example: 255.255.255.0"
+                        autocomplete="off"
+                    >
+                    <small style="color: var(--text-secondary); margin-top: 5px; display: block;">
+                        Enter subnet mask in dotted decimal notation
+                    </small>
+                </div>
+
+                <div class="form-group">
+                    <button class="btn" onclick="convertMasktoCIDR()">Convert to CIDR</button>
+                </div>
+
+                <div id="maskToCIDRResult" class="result-container">
+                    <div class="result-item">
+                        <span class="result-label">Subnet Mask</span>
+                        <span class="result-value" id="maskDisplayReverse">-</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="result-label">CIDR Notation</span>
+                        <span class="result-value" id="cidrDisplayReverse">-</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="result-label">Binary Representation</span>
+                        <span class="result-value" id="maskBinaryReverse">-</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="result-label">Wildcard Mask</span>
+                        <span class="result-value" id="wildcardDisplayReverse">-</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- CIDR Reference Table -->
+        <div class="reference-section">
+            <h2>CIDR Reference Table</h2>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>CIDR</th>
+                            <th>Subnet Mask</th>
+                            <th>Wildcard</th>
+                            <th>Usable Hosts</th>
+                            <th>Class</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>/8</td>
+                            <td>255.0.0.0</td>
+                            <td>0.255.255.255</td>
+                            <td>16,777,214</td>
+                            <td>Class A</td>
+                        </tr>
+                        <tr>
+                            <td>/16</td>
+                            <td>255.255.0.0</td>
+                            <td>0.0.255.255</td>
+                            <td>65,534</td>
+                            <td>Class B</td>
+                        </tr>
+                        <tr>
+                            <td>/17</td>
+                            <td>255.255.128.0</td>
+                            <td>0.0.127.255</td>
+                            <td>32,766</td>
+                            <td>Class B</td>
+                        </tr>
+                        <tr>
+                            <td>/24</td>
+                            <td>255.255.255.0</td>
+                            <td>0.0.0.255</td>
+                            <td>254</td>
+                            <td>Class C</td>
+                        </tr>
+                        <tr>
+                            <td>/25</td>
+                            <td>255.255.255.128</td>
+                            <td>0.0.0.127</td>
+                            <td>126</td>
+                            <td>Class C</td>
+                        </tr>
+                        <tr>
+                            <td>/26</td>
+                            <td>255.255.255.192</td>
+                            <td>0.0.0.63</td>
+                            <td>62</td>
+                            <td>Class C</td>
+                        </tr>
+                        <tr>
+                            <td>/27</td>
+                            <td>255.255.255.224</td>
+                            <td>0.0.0.31</td>
+                            <td>30</td>
+                            <td>Class C</td>
+                        </tr>
+                        <tr>
+                            <td>/28</td>
+                            <td>255.255.255.240</td>
+                            <td>0.0.0.15</td>
+                            <td>14</td>
+                            <td>Class C</td>
+                        </tr>
+                        <tr>
+                            <td>/29</td>
+                            <td>255.255.255.248</td>
+                            <td>0.0.0.7</td>
+                            <td>6</td>
+                            <td>Class C</td>
+                        </tr>
+                        <tr>
+                            <td>/30</td>
+                            <td>255.255.255.252</td>
+                            <td>0.0.0.3</td>
+                            <td>2</td>
+                            <td>Class C</td>
+                        </tr>
+                        <tr>
+                            <td>/31</td>
+                            <td>255.255.255.254</td>
+                            <td>0.0.0.1</td>
+                            <td>0</td>
+                            <td>Point-to-Point</td>
+                        </tr>
+                        <tr>
+                            <td>/32</td>
+                            <td>255.255.255.255</td>
+                            <td>0.0.0.0</td>
+                            <td>1 (Host)</td>
+                            <td>Single Host</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Information Section -->
+        <div class="info-section">
+            <h2>Understanding CIDR Notation</h2>
+            <div class="info-grid">
+                <div class="info-card">
+                    <h3>What is CIDR?</h3>
+                    <p>CIDR (Classless Inter-Domain Routing) is a notation for representing IP addresses and their associated network masks. Format: IP_ADDRESS/PREFIX where PREFIX (0-32) is the number of bits used for the network.</p>
+                </div>
+                <div class="info-card">
+                    <h3>CIDR Prefix</h3>
+                    <p>The prefix number indicates how many bits from the left are used for the network portion. For example, /24 means the first 24 bits are the network, leaving 8 bits (256 addresses) for hosts.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Subnet Mask</h3>
+                    <p>Traditional notation showing network and host portions in dotted decimal. Each octet (8 bits) can be 0-255. Network bits are represented as 1s, host bits as 0s in binary.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Wildcard Mask</h3>
+                    <p>Inverse of subnet mask. Where subnet mask has 1s, wildcard has 0s, and vice versa. Used in access control lists and some routing protocols.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Network Size</h3>
+                    <p>Total addresses = 2^(32-PREFIX). For /24: 2^(32-24) = 2^8 = 256 total addresses. Usable hosts = total - 2 (network and broadcast).</p>
+                </div>
+                <div class="info-card">
+                    <h3>Common Uses</h3>
+                    <p>CIDR is used in routing protocols (BGP, OSPF), AWS subnetting, DNS, firewall rules, and modern network design for efficient IP allocation.</p>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="footer-content">
+            <p>&copy; 2024 NetMaster Toolkit. Professional Network Engineering Solutions.</p>
+            <p>Built with ❤️ for Network Engineers</p>
+        </div>
+    </footer>
+
+    <!-- Scripts -->
+    <script src="../js/script.js"></script>
+    <script>
+        /* =====================================================
+           CIDR Converter - Tool Specific JavaScript
+           ===================================================== */
+
+        /**
+         * Convert CIDR prefix to subnet mask
+         * Triggered by user input in CIDR form
+         */
+        function convertCIDRtoMask() {
+            const cidr = document.getElementById('cidrInput').value.trim();
+            const formContainer = document.querySelector('.converter-grid .form-container');
+
+            // Clear previous alerts
+            NetMasterUtils.clearAlerts(formContainer);
+
+            // Validate input
+            if (cidr === '') {
+                NetMasterUtils.showAlert(
+                    'Please enter a CIDR prefix (0-32)',
+                    'error',
+                    formContainer
+                );
+                return;
+            }
+
+            const cidrNum = parseInt(cidr);
+            if (isNaN(cidrNum) || cidrNum < 0 || cidrNum > 32) {
+                NetMasterUtils.showAlert(
+                    'Invalid CIDR prefix. Please enter a value between 0 and 32',
+                    'error',
+                    formContainer
+                );
+                return;
+            }
+
+            // Convert and display
+            displayCIDRtoMaskResults(cidrNum);
+
+            // Show success message
+            NetMasterUtils.showAlert(
+                'CIDR converted to subnet mask successfully!',
+                'success',
+                formContainer,
+                3000
+            );
+        }
+
+        /**
+         * Display CIDR to Subnet Mask conversion results
+         * @param {number} cidr - CIDR prefix value
+         */
+        function displayCIDRtoMaskResults(cidr) {
+            const subnetMask = NetMasterUtils.cidrToSubnetMask(cidr);
+            const wildcardNum = ~(NetMasterUtils.ipToNumber(subnetMask)) >>> 0;
+            const wildcardMask = NetMasterUtils.numberToIP(wildcardNum);
+            const hostBitsCount = 32 - cidr;
+            const totalHosts = Math.pow(2, hostBitsCount);
+            const usableHosts = Math.max(0, totalHosts - 2);
+
+            // Display results
+            document.getElementById('cidrDisplay').textContent = `/${cidr}`;
+            document.getElementById('maskDisplay').textContent = subnetMask;
+            document.getElementById('wildcardDisplay').textContent = wildcardMask;
+            document.getElementById('networkBits').textContent = cidr;
+            document.getElementById('hostBits').textContent = hostBitsCount;
+            document.getElementById('totalHostsCIDR').textContent = NetMasterUtils.formatNumber(
+                Math.max(1, usableHosts)
+            );
+
+            // Show result container
+            document.getElementById('cidrToMaskResult').classList.add('show');
+
+            // Scroll to results
+            setTimeout(() => {
+                document.getElementById('cidrToMaskResult').scrollIntoView({ 
+                    behavior: 'smooth',
+                    block: 'nearest'
+                });
+            }, 100);
+        }
+
+        /**
+         * Convert subnet mask to CIDR prefix
+         * Triggered by user input in subnet mask form
+         */
+        function convertMasktoCIDR() {
+            const mask = document.getElementById('maskInput').value.trim();
+            const formContainer = document.querySelector('.converter-grid .form-container:nth-child(2)');
+
+            // Clear previous alerts
+            NetMasterUtils.clearAlerts(formContainer);
+
+            // Validate input
+            if (!mask) {
+                NetMasterUtils.showAlert(
+                    'Please enter a subnet mask',
+                    'error',
+                    formContainer
+                );
+                return;
+            }
+
+            if (!NetMasterUtils.isValidSubnetMask(mask)) {
+                NetMasterUtils.showAlert(
+                    'Invalid subnet mask format. Use format: 255.255.255.0',
+                    'error',
+                    formContainer
+                );
+                return;
+            }
+
+            // Convert subnet mask
+            const cidr = NetMasterUtils.subnetMaskToCIDR(mask);
+
+            if (cidr === null) {
+                NetMasterUtils.showAlert(
+                    'Invalid subnet mask. Please enter a valid mask.',
+                    'error',
+                    formContainer
+                );
+                return;
+            }
+
+            // Display results
+            displayMasktoCIDRResults(mask, cidr);
+
+            // Show success message
+            NetMasterUtils.showAlert(
+                'Subnet mask converted to CIDR successfully!',
+                'success',
+                formContainer,
+                3000
+            );
+        }
+
+        /**
+         * Display Subnet Mask to CIDR conversion results
+         * @param {string} mask - Subnet mask
+         * @param {number} cidr - CIDR prefix
+         */
+        function displayMasktoCIDRResults(mask, cidr) {
+            const maskNum = NetMasterUtils.ipToNumber(mask);
+            const wildcardNum = ~maskNum >>> 0;
+            const wildcardMask = NetMasterUtils.numberToIP(wildcardNum);
+
+            // Convert mask to binary for display
+            const maskParts = mask.split('.');
+            const binaryParts = maskParts.map(part => 
+                NetMasterUtils.decToBinary8Bit(parseInt(part))
+            );
+            const binaryMask = binaryParts.join('.');
+
+            // Display results
+            document.getElementById('maskDisplayReverse').textContent = mask;
+            document.getElementById('cidrDisplayReverse').textContent = `/${cidr}`;
+            document.getElementById('maskBinaryReverse').textContent = binaryMask;
+            document.getElementById('wildcardDisplayReverse').textContent = wildcardMask;
+
+            // Show result container
+            document.getElementById('maskToCIDRResult').classList.add('show');
+
+            // Scroll to results
+            setTimeout(() => {
+                document.getElementById('maskToCIDRResult').scrollIntoView({ 
+                    behavior: 'smooth',
+                    block: 'nearest'
+                });
+            }, 100);
+        }
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('cidrInput').focus();
+
+            // Allow Enter key for conversions
+            document.getElementById('cidrInput').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    convertCIDRtoMask();
+                }
+            });
+
+            document.getElementById('maskInput').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    convertMasktoCIDR();
+                }
+            });
+
+            // Quick convert on input change for CIDR (optional)
+            // Uncomment below for real-time conversion
+            /*
+            document.getElementById('cidrInput').addEventListener('change', () => {
+                convertCIDRtoMask();
+            });
+            */
+        });
+    </script>
+
+    <!-- Additional Styles for CIDR Converter -->
+    <style>
+        .page-header {
+            text-align: center;
+            margin-bottom: var(--spacing-xl);
+            animation: slideDown 0.6s ease;
+        }
+
+        .page-header h1 {
+            font-size: var(--font-size-lg);
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: var(--spacing-sm);
+        }
+
+        .page-header p {
+            color: var(--text-secondary);
+            font-size: var(--font-size-sm);
+        }
+
+        .converter-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: var(--spacing-xl);
+            margin-bottom: var(--spacing-xl);
+        }
+
+        .reference-section {
+            margin: var(--spacing-xl) 0;
+            padding: var(--spacing-lg) 0;
+        }
+
+        .reference-section h2 {
+            font-size: var(--font-size-lg);
+            margin-bottom: var(--spacing-lg);
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .info-section {
+            margin-top: var(--spacing-xl);
+            padding-top: var(--spacing-xl);
+            border-top: 1px solid var(--border-color);
+        }
+
+        .info-section h2 {
+            font-size: var(--font-size-lg);
+            margin-bottom: var(--spacing-lg);
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: var(--spacing-lg);
+        }
+
+        .info-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: var(--spacing-lg);
+            transition: var(--transition);
+        }
+
+        .info-card:hover {
+            border-color: var(--primary-color);
+            transform: translateY(-4px);
+        }
+
+        .info-card h3 {
+            color: var(--primary-color);
+            margin-bottom: var(--spacing-md);
+            font-size: var(--font-size-sm);
+        }
+
+        .info-card p {
+            color: var(--text-secondary);
+            font-size: var(--font-size-xs);
+            line-height: 1.7;
+        }
+
+        @media (max-width: 768px) {
+            .page-header h1 {
+                font-size: 1.5rem;
+            }
+
+            .converter-grid {
+                grid-template-columns: 1fr;
+                gap: var(--spacing-lg);
+            }
+
+            .info-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .table-wrapper table {
+                font-size: 0.75rem;
+            }
+
+            table th,
+            table td {
+                padding: var(--spacing-sm);
+            }
+        }
+
+        @media (max-width: 480px) {
+            .converter-grid {
+                gap: var(--spacing-md);
+            }
+
+            .table-wrapper {
+                overflow-x: auto;
+            }
+
+            table {
+                font-size: 0.7rem;
+                min-width: 400px;
+            }
+        }
+    </style>
+</body>
+</html>

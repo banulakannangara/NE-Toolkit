@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="IPv4 to Binary Converter Tool">
+    <title>IPv4 to Binary Converter - NetMaster Toolkit</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <!-- Navigation Bar -->
+    <nav class="navbar">
+        <div class="nav-container">
+            <a href="../index.html" class="logo">
+                <span class="logo-icon">⚙️</span>
+                <span class="logo-text">NetMaster Toolkit</span>
+            </a>
+            <ul class="nav-menu">
+                <li class="nav-item"><a href="../index.html" class="nav-link">Home</a></li>
+                <li class="nav-item"><a href="subnet.html" class="nav-link">Subnet Calculator</a></li>
+                <li class="nav-item"><a href="binary.html" class="nav-link">IPv4 to Binary</a></li>
+                <li class="nav-item"><a href="cidr.html" class="nav-link">CIDR Converter</a></li>
+            </ul>
+            <div class="hamburger">
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="container">
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1>🔢 IPv4 to Binary Converter</h1>
+            <p>Convert IPv4 addresses to binary representation and understand network structure at the bit level</p>
+        </div>
+
+        <!-- Converter Form -->
+        <div class="form-container">
+            <h2>Enter IPv4 Address</h2>
+            
+            <div class="form-group">
+                <label for="binaryIpInput">IPv4 Address:</label>
+                <input 
+                    type="text" 
+                    id="binaryIpInput" 
+                    placeholder="Example: 192.168.1.100"
+                    autocomplete="off"
+                >
+                <small style="color: var(--text-secondary); margin-top: 5px; display: block;">
+                    Enter a valid IPv4 address (e.g., 10.0.0.1, 172.16.0.1, 192.168.1.1)
+                </small>
+            </div>
+
+            <div class="form-group">
+                <button class="btn" onclick="convertIPToBinary()">Convert</button>
+                <button class="btn btn-secondary" onclick="clearBinaryForm()">Clear</button>
+            </div>
+        </div>
+
+        <!-- Results Section -->
+        <div id="binaryResultContainer" class="result-container">
+            <h2>Conversion Results</h2>
+            
+            <!-- Binary Representation -->
+            <div class="result-item">
+                <span class="result-label">IPv4 Address (Decimal)</span>
+                <span class="result-value" id="decimalIP">-</span>
+            </div>
+
+            <!-- Full Binary -->
+            <div class="result-item">
+                <span class="result-label">Full Binary Representation (32 bits)</span>
+                <div class="binary-container">
+                    <code class="binary-full" id="binaryFull">00000000.00000000.00000000.00000000</code>
+                    <button class="copy-btn" onclick="copyToClipboardBinary()">Copy</button>
+                </div>
+            </div>
+
+            <!-- Octet Breakdown -->
+            <div class="result-item">
+                <span class="result-label">Breakdown by Octet</span>
+                <div class="octets-breakdown">
+                    <div class="octet">
+                        <div class="octet-decimal" id="octet1-dec">0</div>
+                        <div class="octet-binary" id="octet1-bin">00000000</div>
+                        <div class="octet-label">Octet 1</div>
+                    </div>
+                    <div class="octet">
+                        <div class="octet-decimal" id="octet2-dec">0</div>
+                        <div class="octet-binary" id="octet2-bin">00000000</div>
+                        <div class="octet-label">Octet 2</div>
+                    </div>
+                    <div class="octet">
+                        <div class="octet-decimal" id="octet3-dec">0</div>
+                        <div class="octet-binary" id="octet3-bin">00000000</div>
+                        <div class="octet-label">Octet 3</div>
+                    </div>
+                    <div class="octet">
+                        <div class="octet-decimal" id="octet4-dec">0</div>
+                        <div class="octet-binary" id="octet4-bin">00000000</div>
+                        <div class="octet-label">Octet 4</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Bit Position Analysis -->
+            <div class="result-item">
+                <span class="result-label">Bit Position Analysis (32-bit)</span>
+                <div class="bit-visualization">
+                    <div id="bitGrid" class="bit-grid"></div>
+                </div>
+            </div>
+
+            <!-- IP Analysis -->
+            <div class="result-item">
+                <span class="result-label">IP Address Classification</span>
+                <table style="width: 100%;">
+                    <tr>
+                        <td style="width: 50%;">
+                            <strong style="color: var(--primary-color);">Class:</strong> <span id="ipClass">-</span>
+                        </td>
+                        <td style="width: 50%;">
+                            <strong style="color: var(--primary-color);">Type:</strong> <span id="ipType">-</span>
+                        </td>
+                    </tr>
+                </table>
+            </div>
+
+            <!-- Copy Results -->
+            <div class="result-item" style="text-align: center; margin-top: var(--spacing-lg);">
+                <button class="btn" onclick="copyAllResults()">📋 Copy All Results</button>
+            </div>
+        </div>
+
+        <!-- Information Section -->
+        <div class="info-section">
+            <h2>Understanding Binary IP Addresses</h2>
+            <div class="info-grid">
+                <div class="info-card">
+                    <h3>IPv4 Structure</h3>
+                    <p>An IPv4 address consists of 32 bits divided into 4 octets (8 bits each). Each octet can represent values from 0-255 in decimal or 00000000-11111111 in binary.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Binary to Decimal</h3>
+                    <p>Each bit position represents a power of 2: positions 7-0 represent 2^7 through 2^0 (128, 64, 32, 16, 8, 4, 2, 1). Sum the values where bits are 1.</p>
+                </div>
+                <div class="info-card">
+                    <h3>IP Classification</h3>
+                    <p>Class A: 1-126 | Class B: 128-191 | Class C: 192-223 | Class D: 224-239 (Multicast) | Class E: 240-255 (Reserved)</p>
+                </div>
+                <div class="info-card">
+                    <h3>Special Addresses</h3>
+                    <p>Loopback (127.0.0.0/8), Private (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16), Link-local (169.254.0.0/16)</p>
+                </div>
+                <div class="info-card">
+                    <h3>Common Examples</h3>
+                    <p>192.168.1.1 = 11000000.10101000.00000001.00000001 | 127.0.0.1 = 01111111.00000000.00000000.00000001</p>
+                </div>
+                <div class="info-card">
+                    <h3>Practical Use</h3>
+                    <p>Understanding binary helps with subnetting, CIDR notation, and network mask calculations. Essential for network engineers and IT professionals.</p>
+                </div>
+            </div>
+
+            <!-- Conversion Table -->
+            <div class="conversion-table">
+                <h3>Quick Reference: Decimal to Binary</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Decimal</th>
+                            <th>Binary</th>
+                            <th>Decimal</th>
+                            <th>Binary</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>0</td>
+                            <td>00000000</td>
+                            <td>128</td>
+                            <td>10000000</td>
+                        </tr>
+                        <tr>
+                            <td>1</td>
+                            <td>00000001</td>
+                            <td>192</td>
+                            <td>11000000</td>
+                        </tr>
+                        <tr>
+                            <td>127</td>
+                            <td>01111111</td>
+                            <td>255</td>
+                            <td>11111111</td>
+                        </tr>
+                        <tr>
+                            <td>64</td>
+                            <td>01000000</td>
+                            <td>224</td>
+                            <td>11100000</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="footer-content">
+            <p>&copy; 2024 NetMaster Toolkit. Professional Network Engineering Solutions.</p>
+            <p>Built with ❤️ for Network Engineers</p>
+        </div>
+    </footer>
+
+    <!-- Scripts -->
+    <script src="../js/script.js"></script>
+    <script>
+        /* =====================================================
+           IPv4 to Binary Converter - Tool Specific JavaScript
+           ===================================================== */
+
+        /**
+         * Convert IP address to binary and display results
+         * Main conversion function triggered by user input
+         */
+        function convertIPToBinary() {
+            const ip = document.getElementById('binaryIpInput').value.trim();
+            const formContainer = document.querySelector('.form-container');
+
+            // Clear previous alerts
+            NetMasterUtils.clearAlerts(formContainer);
+
+            // Validate input
+            if (!ip) {
+                NetMasterUtils.showAlert(
+                    'Please enter an IPv4 address',
+                    'error',
+                    formContainer
+                );
+                return;
+            }
+
+            if (!NetMasterUtils.isValidIPv4(ip)) {
+                NetMasterUtils.showAlert(
+                    'Invalid IPv4 address format. Use format: 192.168.1.1',
+                    'error',
+                    formContainer
+                );
+                return;
+            }
+
+            // Convert and display
+            displayBinaryConversion(ip);
+
+            // Show success message
+            NetMasterUtils.showAlert(
+                'IPv4 converted to binary successfully!',
+                'success',
+                formContainer,
+                3000
+            );
+        }
+
+        /**
+         * Display binary conversion results
+         * @param {string} ip - IPv4 address to convert
+         */
+        function displayBinaryConversion(ip) {
+            const parts = ip.split('.');
+            const octets = parts.map(p => parseInt(p));
+
+            // Display decimal IP
+            document.getElementById('decimalIP').textContent = ip;
+
+            // Build binary representation
+            const binaryParts = octets.map(octet => 
+                NetMasterUtils.decToBinary8Bit(octet)
+            );
+            const fullBinary = binaryParts.join('.');
+
+            // Display full binary
+            document.getElementById('binaryFull').textContent = fullBinary;
+
+            // Display individual octets
+            octets.forEach((octet, index) => {
+                const binary = NetMasterUtils.decToBinary8Bit(octet);
+                document.getElementById(`octet${index + 1}-dec`).textContent = octet;
+                document.getElementById(`octet${index + 1}-bin`).textContent = binary;
+            });
+
+            // Display bit visualization
+            displayBitVisualization(fullBinary.replace(/\./g, ''));
+
+            // Display IP classification
+            displayIPClassification(octets[0]);
+
+            // Show result container
+            document.getElementById('binaryResultContainer').classList.add('show');
+
+            // Scroll to results
+            setTimeout(() => {
+                document.getElementById('binaryResultContainer').scrollIntoView({ 
+                    behavior: 'smooth', 
+                    block: 'start' 
+                });
+            }, 100);
+        }
+
+        /**
+         * Display bit-by-bit visualization
+         * @param {string} binaryString - 32-bit binary string (without dots)
+         */
+        function displayBitVisualization(binaryString) {
+            const bitGrid = document.getElementById('bitGrid');
+            bitGrid.innerHTML = '';
+
+            for (let i = 0; i < 32; i++) {
+                const bit = binaryString[i];
+                const bitElement = document.createElement('div');
+                bitElement.className = `bit-box ${bit === '1' ? 'bit-one' : 'bit-zero'}`;
+                bitElement.title = `Bit ${i}: ${bit} (Position ${31 - i}, Value: 2^${31 - i})`;
+                bitElement.innerHTML = `
+                    <div class="bit-value">${bit}</div>
+                    <div class="bit-position">P${31 - i}</div>
+                `;
+                bitGrid.appendChild(bitElement);
+            }
+        }
+
+        /**
+         * Classify IP address based on first octet
+         * @param {number} firstOctet - First octet value
+         */
+        function displayIPClassification(firstOctet) {
+            let ipClass = '-';
+            let ipType = '-';
+
+            // Determine class
+            if (firstOctet >= 1 && firstOctet <= 126) {
+                ipClass = 'Class A';
+                ipType = firstOctet === 127 ? 'Loopback' : 'Public/Private';
+            } else if (firstOctet >= 128 && firstOctet <= 191) {
+                ipClass = 'Class B';
+                ipType = 'Public/Private';
+            } else if (firstOctet >= 192 && firstOctet <= 223) {
+                ipClass = 'Class C';
+                ipType = 'Public/Private';
+            } else if (firstOctet >= 224 && firstOctet <= 239) {
+                ipClass = 'Class D';
+                ipType = 'Multicast';
+            } else if (firstOctet >= 240 && firstOctet <= 255) {
+                ipClass = 'Class E';
+                ipType = 'Reserved';
+            } else if (firstOctet === 0) {
+                ipClass = 'Special';
+                ipType = 'This Network';
+            }
+
+            document.getElementById('ipClass').textContent = ipClass;
+            document.getElementById('ipType').textContent = ipType;
+        }
+
+        /**
+         * Copy binary representation to clipboard
+         */
+        function copyToClipboardBinary() {
+            const binaryFull = document.getElementById('binaryFull').textContent;
+            NetMasterUtils.copyToClipboard(binaryFull);
+        }
+
+        /**
+         * Copy all results as formatted text
+         */
+        function copyAllResults() {
+            const ip = document.getElementById('decimalIP').textContent;
+            const binary = document.getElementById('binaryFull').textContent;
+            const ipClass = document.getElementById('ipClass').textContent;
+            const ipType = document.getElementById('ipType').textContent;
+
+            const results = `IPv4 Address: ${ip}
+Binary: ${binary}
+Class: ${ipClass}
+Type: ${ipType}`;
+
+            NetMasterUtils.copyToClipboard(results);
+            NetMasterUtils.showAlert(
+                'All results copied to clipboard!',
+                'success',
+                document.querySelector('.form-container'),
+                2000
+            );
+        }
+
+        /**
+         * Clear converter form and results
+         */
+        function clearBinaryForm() {
+            document.getElementById('binaryIpInput').value = '';
+            document.getElementById('binaryResultContainer').classList.remove('show');
+            NetMasterUtils.clearAlerts(document.querySelector('.form-container'));
+            document.getElementById('binaryIpInput').focus();
+        }
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('binaryIpInput').focus();
+
+            // Allow Enter key to convert
+            document.getElementById('binaryIpInput').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    convertIPToBinary();
+                }
+            });
+        });
+    </script>
+
+    <!-- Additional Styles for Binary Converter -->
+    <style>
+        .page-header {
+            text-align: center;
+            margin-bottom: var(--spacing-xl);
+            animation: slideDown 0.6s ease;
+        }
+
+        .page-header h1 {
+            font-size: var(--font-size-lg);
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: var(--spacing-sm);
+        }
+
+        .page-header p {
+            color: var(--text-secondary);
+            font-size: var(--font-size-sm);
+        }
+
+        .binary-container {
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-md);
+            background: rgba(0, 212, 255, 0.05);
+            padding: var(--spacing-md);
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            flex-wrap: wrap;
+        }
+
+        .binary-full {
+            font-family: 'Courier New', monospace;
+            font-size: 1.1rem;
+            color: var(--primary-color);
+            flex: 1;
+            min-width: 250px;
+            word-break: break-all;
+        }
+
+        .octets-breakdown {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: var(--spacing-lg);
+            margin: var(--spacing-lg) 0;
+        }
+
+        .octet {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: var(--spacing-md);
+            text-align: center;
+            transition: var(--transition);
+        }
+
+        .octet:hover {
+            border-color: var(--primary-color);
+            transform: translateY(-4px);
+        }
+
+        .octet-decimal {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--primary-color);
+            margin-bottom: var(--spacing-sm);
+        }
+
+        .octet-binary {
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+            color: var(--text-primary);
+            background: rgba(0, 212, 255, 0.1);
+            padding: var(--spacing-sm);
+            border-radius: 4px;
+            margin-bottom: var(--spacing-sm);
+            word-break: break-all;
+        }
+
+        .octet-label {
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .bit-visualization {
+            overflow-x: auto;
+            margin: var(--spacing-lg) 0;
+        }
+
+        .bit-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(45px, 1fr));
+            gap: 4px;
+            min-width: 600px;
+        }
+
+        .bit-box {
+            background: var(--card-bg);
+            border: 2px solid var(--border-color);
+            border-radius: 6px;
+            padding: var(--spacing-sm);
+            text-align: center;
+            cursor: pointer;
+            transition: var(--transition);
+            min-height: 70px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .bit-box:hover {
+            transform: scale(1.1);
+        }
+
+        .bit-box.bit-one {
+            background: rgba(81, 207, 102, 0.15);
+            border-color: var(--success-color);
+            box-shadow: 0 0 10px rgba(81, 207, 102, 0.2);
+        }
+
+        .bit-box.bit-zero {
+            background: rgba(255, 107, 107, 0.1);
+            border-color: var(--error-color);
+        }
+
+        .bit-value {
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: var(--primary-color);
+            margin-bottom: 4px;
+        }
+
+        .bit-position {
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+        }
+
+        .info-section {
+            margin-top: var(--spacing-xl);
+            padding-top: var(--spacing-xl);
+            border-top: 1px solid var(--border-color);
+        }
+
+        .info-section h2 {
+            font-size: var(--font-size-lg);
+            margin-bottom: var(--spacing-lg);
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: var(--spacing-lg);
+            margin-bottom: var(--spacing-xl);
+        }
+
+        .info-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: var(--spacing-lg);
+            transition: var(--transition);
+        }
+
+        .info-card:hover {
+            border-color: var(--primary-color);
+            transform: translateY(-4px);
+        }
+
+        .info-card h3 {
+            color: var(--primary-color);
+            margin-bottom: var(--spacing-md);
+            font-size: var(--font-size-sm);
+        }
+
+        .info-card p {
+            color: var(--text-secondary);
+            font-size: var(--font-size-xs);
+            line-height: 1.7;
+        }
+
+        .conversion-table {
+            margin-top: var(--spacing-xl);
+            padding: var(--spacing-lg);
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+        }
+
+        .conversion-table h3 {
+            color: var(--primary-color);
+            margin-bottom: var(--spacing-lg);
+            font-size: var(--font-size-md);
+        }
+
+        @media (max-width: 768px) {
+            .page-header h1 {
+                font-size: 1.5rem;
+            }
+
+            .octets-breakdown {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .bit-grid {
+                grid-template-columns: repeat(8, 1fr);
+                min-width: auto;
+            }
+
+            .bit-box {
+                min-height: 60px;
+                padding: var(--spacing-xs);
+            }
+
+            .bit-value {
+                font-size: 1.2rem;
+            }
+
+            .bit-position {
+                font-size: 0.6rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .octets-breakdown {
+                grid-template-columns: 1fr;
+            }
+
+            .bit-grid {
+                grid-template-columns: repeat(4, 1fr);
+            }
+        }
+    </style>
+</body>
+</html>

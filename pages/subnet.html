@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Professional Subnet Calculator Tool">
+    <title>Subnet Calculator - NetMaster Toolkit</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <!-- Navigation Bar -->
+    <nav class="navbar">
+        <div class="nav-container">
+            <a href="../index.html" class="logo">
+                <span class="logo-icon">⚙️</span>
+                <span class="logo-text">NetMaster Toolkit</span>
+            </a>
+            <ul class="nav-menu">
+                <li class="nav-item"><a href="../index.html" class="nav-link">Home</a></li>
+                <li class="nav-item"><a href="subnet.html" class="nav-link">Subnet Calculator</a></li>
+                <li class="nav-item"><a href="binary.html" class="nav-link">IPv4 to Binary</a></li>
+                <li class="nav-item"><a href="cidr.html" class="nav-link">CIDR Converter</a></li>
+            </ul>
+            <div class="hamburger">
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="container">
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1>📊 Subnet Calculator</h1>
+            <p>Calculate network information, host ranges, and subnet details</p>
+        </div>
+
+        <!-- Subnet Calculator Form -->
+        <div class="form-container">
+            <h2>Enter Network Information</h2>
+            
+            <div class="form-group">
+                <label for="ipInput">IPv4 Address:</label>
+                <input 
+                    type="text" 
+                    id="ipInput" 
+                    placeholder="Example: 192.168.1.100"
+                    autocomplete="off"
+                >
+                <small style="color: var(--text-secondary); margin-top: 5px; display: block;">
+                    Enter any IP address within the network
+                </small>
+            </div>
+
+            <div class="form-group">
+                <label for="maskInput">Subnet Mask:</label>
+                <input 
+                    type="text" 
+                    id="maskInput" 
+                    placeholder="Example: 255.255.255.0"
+                    autocomplete="off"
+                >
+                <small style="color: var(--text-secondary); margin-top: 5px; display: block;">
+                    Enter subnet mask in dotted decimal notation
+                </small>
+            </div>
+
+            <div class="form-group">
+                <button class="btn" onclick="calculateSubnetInfo()">Calculate</button>
+                <button class="btn btn-secondary" onclick="clearSubnetForm()">Clear</button>
+            </div>
+        </div>
+
+        <!-- Results Section -->
+        <div id="resultContainer" class="result-container">
+            <h2>Subnet Information</h2>
+            
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Property</th>
+                            <th>Value</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Network Address</td>
+                            <td><span id="networkAddr">-</span></td>
+                        </tr>
+                        <tr>
+                            <td>Broadcast Address</td>
+                            <td><span id="broadcastAddr">-</span></td>
+                        </tr>
+                        <tr>
+                            <td>First Usable Host</td>
+                            <td><span id="firstHost">-</span></td>
+                        </tr>
+                        <tr>
+                            <td>Last Usable Host</td>
+                            <td><span id="lastHost">-</span></td>
+                        </tr>
+                        <tr>
+                            <td>Total Hosts</td>
+                            <td><span id="totalHosts">-</span></td>
+                        </tr>
+                        <tr>
+                            <td>Usable Hosts</td>
+                            <td><span id="usableHosts">-</span></td>
+                        </tr>
+                        <tr>
+                            <td>Subnet Mask</td>
+                            <td><span id="subnetMask">-</span></td>
+                        </tr>
+                        <tr>
+                            <td>Wildcard Mask</td>
+                            <td><span id="wildcardMask">-</span></td>
+                        </tr>
+                        <tr>
+                            <td>CIDR Notation</td>
+                            <td><span id="cidrNotation">-</span></td>
+                        </tr>
+                        <tr>
+                            <td>IP Range</td>
+                            <td><span id="ipRange">-</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Subnet Visualization -->
+            <div class="subnet-visual">
+                <h3>Subnet Breakdown</h3>
+                <div class="breakdown">
+                    <div class="breakdown-item">
+                        <span class="breakdown-label">Network Address</span>
+                        <div class="breakdown-bar network"></div>
+                        <span class="breakdown-value" id="breakdown-network">-</span>
+                    </div>
+                    <div class="breakdown-item">
+                        <span class="breakdown-label">Usable Hosts</span>
+                        <div class="breakdown-bar hosts"></div>
+                        <span class="breakdown-value" id="breakdown-hosts">-</span>
+                    </div>
+                    <div class="breakdown-item">
+                        <span class="breakdown-label">Broadcast Address</span>
+                        <div class="breakdown-bar broadcast"></div>
+                        <span class="breakdown-value" id="breakdown-broadcast">-</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Information Section -->
+        <div class="info-section">
+            <h2>About Subnet Calculation</h2>
+            <div class="info-grid">
+                <div class="info-card">
+                    <h3>Network Address</h3>
+                    <p>The first address in a subnet. It identifies the network and cannot be assigned to a host. Calculated by performing a bitwise AND between the IP address and subnet mask.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Broadcast Address</h3>
+                    <p>The last address in a subnet used to send messages to all hosts on the network. Calculated by performing a bitwise OR between the network address and the inverted subnet mask.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Usable Hosts</h3>
+                    <p>All addresses between the network address and broadcast address (excluding both). The number of usable hosts is 2^(32-prefix) - 2.</p>
+                </div>
+                <div class="info-card">
+                    <h3>CIDR Notation</h3>
+                    <p>Classless Inter-Domain Routing notation represents a network and its subnet mask. Format: IP/PREFIX where PREFIX is the number of bits used for the network (0-32).</p>
+                </div>
+                <div class="info-card">
+                    <h3>Wildcard Mask</h3>
+                    <p>The inverse of a subnet mask. Used in access control lists and routing. Calculated as NOT (subnet mask) in binary.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Common Subnet Masks</h3>
+                    <p>/24 (255.255.255.0): 254 hosts | /25 (255.255.255.128): 126 hosts | /26 (255.255.255.192): 62 hosts</p>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="footer-content">
+            <p>&copy; 2024 NetMaster Toolkit. Professional Network Engineering Solutions.</p>
+            <p>Built with ❤️ for Network Engineers</p>
+        </div>
+    </footer>
+
+    <!-- Scripts -->
+    <script src="../js/script.js"></script>
+    <script>
+        /* =====================================================
+           Subnet Calculator - Tool Specific JavaScript
+           ===================================================== */
+
+        /**
+         * Calculate and display subnet information
+         * Main calculation function triggered by user input
+         */
+        function calculateSubnetInfo() {
+            // Get input values
+            const ip = document.getElementById('ipInput').value.trim();
+            const mask = document.getElementById('maskInput').value.trim();
+
+            // Clear previous alerts
+            const formContainer = document.querySelector('.form-container');
+            NetMasterUtils.clearAlerts(formContainer);
+
+            // Validate inputs
+            if (!ip) {
+                NetMasterUtils.showAlert(
+                    'Please enter an IPv4 address',
+                    'error',
+                    formContainer
+                );
+                return;
+            }
+
+            if (!mask) {
+                NetMasterUtils.showAlert(
+                    'Please enter a subnet mask',
+                    'error',
+                    formContainer
+                );
+                return;
+            }
+
+            // Validate IP format
+            if (!NetMasterUtils.isValidIPv4(ip)) {
+                NetMasterUtils.showAlert(
+                    'Invalid IPv4 address format. Use format: 192.168.1.1',
+                    'error',
+                    formContainer
+                );
+                return;
+            }
+
+            // Validate subnet mask format
+            if (!NetMasterUtils.isValidSubnetMask(mask)) {
+                NetMasterUtils.showAlert(
+                    'Invalid subnet mask format. Use format: 255.255.255.0',
+                    'error',
+                    formContainer
+                );
+                return;
+            }
+
+            // Calculate subnet information
+            const subnetInfo = NetMasterUtils.calculateSubnet(ip, mask);
+
+            if (!subnetInfo) {
+                NetMasterUtils.showAlert(
+                    'Error calculating subnet. Please check your inputs.',
+                    'error',
+                    formContainer
+                );
+                return;
+            }
+
+            // Display results
+            displaySubnetResults(subnetInfo);
+
+            // Show success message
+            NetMasterUtils.showAlert(
+                'Subnet calculated successfully!',
+                'success',
+                formContainer,
+                3000
+            );
+        }
+
+        /**
+         * Display calculated subnet results in the UI
+         * @param {object} subnetInfo - Subnet calculation results
+         */
+        function displaySubnetResults(subnetInfo) {
+            const resultContainer = document.getElementById('resultContainer');
+
+            // Populate table values
+            document.getElementById('networkAddr').textContent = subnetInfo.networkAddress;
+            document.getElementById('broadcastAddr').textContent = subnetInfo.broadcastAddress;
+            document.getElementById('firstHost').textContent = subnetInfo.firstHost;
+            document.getElementById('lastHost').textContent = subnetInfo.lastHost;
+            document.getElementById('totalHosts').textContent = NetMasterUtils.formatNumber(
+                subnetInfo.hostCount + 2
+            );
+            document.getElementById('usableHosts').textContent = NetMasterUtils.formatNumber(
+                subnetInfo.hostCount
+            );
+            document.getElementById('subnetMask').textContent = subnetInfo.mask;
+            document.getElementById('wildcardMask').textContent = subnetInfo.wildcardMask;
+            document.getElementById('cidrNotation').textContent = 
+                `${subnetInfo.networkAddress}/${subnetInfo.cidr}`;
+            document.getElementById('ipRange').textContent = 
+                `${subnetInfo.firstHost} - ${subnetInfo.lastHost}`;
+
+            // Update breakdown visualization
+            document.getElementById('breakdown-network').textContent = subnetInfo.networkAddress;
+            document.getElementById('breakdown-hosts').textContent = 
+                `${subnetInfo.firstHost} to ${subnetInfo.lastHost}`;
+            document.getElementById('breakdown-broadcast').textContent = subnetInfo.broadcastAddress;
+
+            // Show result container with animation
+            resultContainer.classList.add('show');
+
+            // Scroll to results
+            setTimeout(() => {
+                resultContainer.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }, 100);
+        }
+
+        /**
+         * Clear calculator form and results
+         * Resets all inputs and hides results
+         */
+        function clearSubnetForm() {
+            document.getElementById('ipInput').value = '';
+            document.getElementById('maskInput').value = '';
+            document.getElementById('resultContainer').classList.remove('show');
+            NetMasterUtils.clearAlerts(document.querySelector('.form-container'));
+            document.getElementById('ipInput').focus();
+        }
+
+        // Focus on IP input when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('ipInput').focus();
+            
+            // Allow Enter key to calculate
+            document.getElementById('maskInput').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    calculateSubnetInfo();
+                }
+            });
+
+            document.getElementById('ipInput').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    document.getElementById('maskInput').focus();
+                }
+            });
+        });
+    </script>
+
+    <!-- Additional Styles for Subnet Calculator -->
+    <style>
+        .page-header {
+            text-align: center;
+            margin-bottom: var(--spacing-xl);
+            animation: slideDown 0.6s ease;
+        }
+
+        .page-header h1 {
+            font-size: var(--font-size-lg);
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: var(--spacing-sm);
+        }
+
+        .page-header p {
+            color: var(--text-secondary);
+            font-size: var(--font-size-sm);
+        }
+
+        .subnet-visual {
+            margin-top: var(--spacing-lg);
+            padding: var(--spacing-lg);
+            background: rgba(0, 212, 255, 0.05);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+        }
+
+        .subnet-visual h3 {
+            color: var(--primary-color);
+            margin-bottom: var(--spacing-lg);
+            font-size: var(--font-size-md);
+        }
+
+        .breakdown {
+            display: flex;
+            flex-direction: column;
+            gap: var(--spacing-lg);
+        }
+
+        .breakdown-item {
+            display: flex;
+            flex-direction: column;
+            gap: var(--spacing-sm);
+        }
+
+        .breakdown-label {
+            color: var(--text-secondary);
+            font-weight: 600;
+            font-size: var(--font-size-xs);
+        }
+
+        .breakdown-bar {
+            height: 40px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: var(--font-size-xs);
+        }
+
+        .breakdown-bar.network {
+            background: linear-gradient(90deg, rgba(255, 107, 107, 0.3), transparent);
+            color: #ff9999;
+        }
+
+        .breakdown-bar.hosts {
+            background: linear-gradient(90deg, rgba(81, 207, 102, 0.3), transparent);
+            color: #81df96;
+        }
+
+        .breakdown-bar.broadcast {
+            background: linear-gradient(90deg, rgba(0, 212, 255, 0.3), transparent);
+            color: var(--primary-color);
+        }
+
+        .breakdown-value {
+            color: var(--text-primary);
+            font-family: 'Courier New', monospace;
+            font-size: var(--font-size-sm);
+        }
+
+        .info-section {
+            margin-top: var(--spacing-xl);
+            padding-top: var(--spacing-xl);
+            border-top: 1px solid var(--border-color);
+        }
+
+        .info-section h2 {
+            font-size: var(--font-size-lg);
+            margin-bottom: var(--spacing-lg);
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: var(--spacing-lg);
+        }
+
+        .info-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: var(--spacing-lg);
+            transition: var(--transition);
+        }
+
+        .info-card:hover {
+            border-color: var(--primary-color);
+            transform: translateY(-4px);
+        }
+
+        .info-card h3 {
+            color: var(--primary-color);
+            margin-bottom: var(--spacing-md);
+            font-size: var(--font-size-sm);
+        }
+
+        .info-card p {
+            color: var(--text-secondary);
+            font-size: var(--font-size-xs);
+            line-height: 1.7;
+        }
+
+        @media (max-width: 768px) {
+            .page-header h1 {
+                font-size: 1.5rem;
+            }
+
+            .info-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .breakdown-bar {
+                height: 35px;
+                font-size: 0.75rem;
+            }
+        }
+    </style>
+</body>
+</html>
