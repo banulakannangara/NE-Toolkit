@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Network Lab | NE-Toolkit</title>
+    <link rel="stylesheet" href="../css/style.css">
+    <link rel="stylesheet" href="../css/network-lab.css">
+</head>
+<body>
+    <div class="network-lab-page">
+        <header class="lab-toolbar">
+            <div class="lab-toolbar__title">
+                <div>
+                    <p class="lab-toolbar__eyebrow">Network Engineering Toolkit</p>
+                    <h1>Network Lab</h1>
+                </div>
+                <p class="lab-toolbar__subtitle">A foundation for topology design, device placement, and future simulation.</p>
+            </div>
+
+            <div class="lab-toolbar__actions">
+                <button class="toolbar-button is-active" data-mode="select" type="button">Select</button>
+                <button class="toolbar-button" data-mode="add" type="button">Add / Place</button>
+                <button class="toolbar-button" data-mode="connect" type="button">Connect</button>
+                <button class="toolbar-button" data-action="delete" type="button">Delete</button>
+                <button class="toolbar-button" data-action="clear" type="button">Clear</button>
+                <button class="toolbar-button" data-action="undo" type="button">Undo</button>
+                <button class="toolbar-button" data-action="redo" type="button">Redo</button>
+                <button class="toolbar-button" data-action="testConnection" type="button">Test Connection</button>
+                <button class="toolbar-button" data-action="sendFrame" type="button">Send Frame</button>
+                <button class="toolbar-button" data-action="simulate" type="button">Simulation Mode</button>
+            </div>
+        </header>
+
+        <main class="lab-main">
+            <aside class="lab-panel lab-panel--left">
+                <div class="panel-heading">
+                    <div>
+                        <p class="panel-heading__eyebrow">Workspace</p>
+                        <h2>Devices</h2>
+                    </div>
+                    <p class="panel-heading__text">Drag or click to place devices.</p>
+                </div>
+
+                <div class="device-palette" id="devicePalette">
+                    <button class="palette-item is-selected" type="button" draggable="true" data-type="pc">
+                        <span class="palette-item__icon" aria-hidden="true">
+                            <svg viewBox="0 0 64 64">
+                                <rect x="14" y="18" width="36" height="24" rx="4"></rect>
+                                <rect x="20" y="24" width="24" height="10" rx="2"></rect>
+                                <rect x="24" y="42" width="16" height="8" rx="2"></rect>
+                            </svg>
+                        </span>
+                        <span class="palette-item__label">PC</span>
+                    </button>
+
+                    <button class="palette-item" type="button" draggable="true" data-type="laptop">
+                        <span class="palette-item__icon" aria-hidden="true">
+                            <svg viewBox="0 0 64 64">
+                                <rect x="16" y="18" width="32" height="20" rx="4"></rect>
+                                <rect x="22" y="22" width="20" height="10" rx="2"></rect>
+                                <rect x="24" y="40" width="16" height="6" rx="2"></rect>
+                            </svg>
+                        </span>
+                        <span class="palette-item__label">Laptop</span>
+                    </button>
+
+                    <button class="palette-item" type="button" draggable="true" data-type="server">
+                        <span class="palette-item__icon" aria-hidden="true">
+                            <svg viewBox="0 0 64 64">
+                                <rect x="14" y="18" width="36" height="28" rx="4"></rect>
+                                <rect x="20" y="24" width="24" height="6" rx="2"></rect>
+                                <rect x="20" y="34" width="24" height="6" rx="2"></rect>
+                                <circle cx="32" cy="44" r="4"></circle>
+                            </svg>
+                        </span>
+                        <span class="palette-item__label">Server</span>
+                    </button>
+
+                    <button class="palette-item" type="button" draggable="true" data-type="switch">
+                        <span class="palette-item__icon" aria-hidden="true">
+                            <svg viewBox="0 0 64 64">
+                                <rect x="16" y="20" width="32" height="24" rx="5"></rect>
+                                <line x1="20" y1="28" x2="44" y2="28"></line>
+                                <line x1="20" y1="36" x2="44" y2="36"></line>
+                                <circle cx="24" cy="32" r="2"></circle>
+                                <circle cx="40" cy="32" r="2"></circle>
+                            </svg>
+                        </span>
+                        <span class="palette-item__label">Switch</span>
+                    </button>
+
+                    <button class="palette-item" type="button" draggable="true" data-type="router">
+                        <span class="palette-item__icon" aria-hidden="true">
+                            <svg viewBox="0 0 64 64">
+                                <rect x="16" y="20" width="32" height="24" rx="5"></rect>
+                                <path d="M24 28h16"></path>
+                                <path d="M24 36h16"></path>
+                                <path d="M28 24l-8 10"></path>
+                                <path d="M36 24l8 10"></path>
+                            </svg>
+                        </span>
+                        <span class="palette-item__label">Router</span>
+                    </button>
+                </div>
+            </aside>
+
+            <section class="lab-canvas-panel">
+                <div class="canvas-status-bar">
+                    <span id="statusMessage">Select a device or click the canvas to place one.</span>
+                    <span id="modeBadge" class="mode-pill">Mode: Select</span>
+                </div>
+
+                <div id="networkCanvas" class="network-canvas" tabindex="0">
+                    <svg id="connectionLayer" class="connection-layer" viewBox="0 0 1000 800" preserveAspectRatio="none"></svg>
+                    <div id="frameAnimationLayer" class="frame-animation-layer"></div>
+                    <div id="deviceLayer" class="device-layer"></div>
+                </div>
+            </section>
+
+            <aside class="lab-panel lab-panel--right">
+                <div class="panel-heading">
+                    <div>
+                        <p class="panel-heading__eyebrow">Inspector</p>
+                        <h2>Properties</h2>
+                    </div>
+                    <p class="panel-heading__text">Inspect and prepare future network settings.</p>
+                </div>
+
+                <div id="propertiesPanel" class="properties-panel"></div>
+            </aside>
+        </main>
+    </div>
+
+    <script src="../js/network-lab.js"></script>
+</body>
+</html>
