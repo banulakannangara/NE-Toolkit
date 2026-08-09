@@ -46,6 +46,7 @@ const networkState = {
 
 let dragState = null;
 let inspectorDrafts = {};
+let frameAnimation = null;
 
 function initializeLab() {
     bindEvents();
@@ -141,6 +142,7 @@ function handleToolbarAction(action) {
     }
 
     if (action === 'testConnection') {
+        cancelFrameAnimation();
         networkState.sendFrameState = null;
         networkState.lastFrameResult = null;
         if (networkState.connectionTestState) {
@@ -160,6 +162,7 @@ function handleToolbarAction(action) {
 
     if (action === 'sendFrame') {
         if (networkState.sendFrameState) {
+            cancelFrameAnimation();
             networkState.sendFrameState = null;
             networkState.lastFrameResult = null;
             updateStatus('Send Frame cancelled.');
@@ -243,6 +246,7 @@ function clearCanvas() {
     networkState.connectionSourceId = null;
     networkState.sendFrameState = null;
     networkState.lastFrameResult = null;
+    cancelFrameAnimation();
     networkState.switchRuntime = {};
     networkState.typeCounters = {};
     networkState.connectionCounter = 0;
@@ -295,6 +299,7 @@ function deleteDevice(deviceId) {
     }
 
     pushHistory();
+    cancelFrameAnimation();
     networkState.devices = networkState.devices.filter((item) => item.id !== deviceId);
     const removedConnections = networkState.connections.filter((connection) => connection.source === deviceId || connection.target === deviceId);
     networkState.connections = networkState.connections.filter((connection) => connection.source !== deviceId && connection.target !== deviceId);
@@ -317,6 +322,7 @@ function deleteConnection(connectionId) {
     }
 
     pushHistory();
+    cancelFrameAnimation();
     networkState.connections = networkState.connections.filter((item) => item.id !== connectionId);
     releasePortAssignmentsForConnection(connectionId);
     if (networkState.selectedConnectionId === connectionId) {
@@ -382,6 +388,7 @@ function handleDeviceSelection(deviceId, event) {
             networkState.selectedConnectionId = null;
             updateStatus(networkState.sendFrameState.message);
             render();
+            showFrameDrop(deviceId);
             return;
         }
 
@@ -422,21 +429,55 @@ function handleDeviceSelection(deviceId, event) {
                 networkState.selectedConnectionId = null;
                 updateStatus(validation.reason);
                 render();
+                showFrameDrop(sourceDevice?.id || destinationDevice?.id);
                 return;
             }
 
             networkState.selectedDeviceId = deviceId;
             networkState.selectedConnectionId = null;
             networkState.lastFrameResult = simulateSendFrame(sourceDevice, destinationDevice);
+            networkState.lastFrameResult.animationState = 'in-progress';
             networkState.sendFrameState = {
-                phase: 'complete',
+                phase: 'animating',
                 sourceId: networkState.sendFrameState.sourceId,
-                message: null
+                message: 'Frame is travelling through the topology.'
             };
             updateStatus(networkState.lastFrameResult.success
                 ? `Frame delivered: ${sourceDevice.name} → ${destinationDevice.name}`
                 : `Frame failed: ${networkState.lastFrameResult.reason}`);
             render();
+            startFrameAnimation(networkState.lastFrameResult.path, {
+                onDelivered: () => {
+                    if (networkState.lastFrameResult?.animationState !== 'in-progress') {
+                        return;
+                    }
+                    networkState.lastFrameResult.animationState = 'delivered';
+                    networkState.sendFrameState = {
+                        phase: 'complete',
+                        sourceId: sourceDevice.id,
+                        message: null
+                    };
+                    updateStatus(`Frame delivered: ${sourceDevice.name} -> ${destinationDevice.name}`);
+                    render();
+                },
+                onDropped: (reason) => {
+                    if (networkState.lastFrameResult?.animationState !== 'in-progress') {
+                        return;
+                    }
+                    networkState.lastFrameResult.animationState = 'dropped';
+                    networkState.lastFrameResult.success = false;
+                    networkState.lastFrameResult.reason = reason;
+                    networkState.lastFrameResult.action = 'DROP';
+                    networkState.lastFrameResult.events.push(`Frame dropped: ${reason}`);
+                    networkState.sendFrameState = {
+                        phase: 'complete',
+                        sourceId: sourceDevice.id,
+                        message: reason
+                    };
+                    updateStatus(`Frame failed: ${reason}`);
+                    render();
+                }
+            });
             return;
         }
     }
@@ -737,6 +778,7 @@ function renderDevices() {
         const element = document.createElement('button');
         element.type = 'button';
         element.className = `device${networkState.selectedDeviceId === device.id ? ' is-selected' : ''}${networkState.connectionSourceId === device.id ? ' is-connection-source' : ''}`;
+        element.dataset.deviceId = device.id;
         element.style.left = `${device.x}px`;
         element.style.top = `${device.y}px`;
         element.innerHTML = `
@@ -790,6 +832,197 @@ function endPointerDrag() {
     dragState = null;
     document.removeEventListener('pointermove', handlePointerMove);
     render();
+}
+
+function startFrameAnimation(path, callbacks = {}) {
+    cancelFrameAnimation();
+
+    if (!Array.isArray(path) || path.length < 2) {
+        callbacks.onDropped?.('No topology path exists for frame animation.');
+        return;
+    }
+
+    const layer = document.getElementById('frameAnimationLayer');
+    if (!layer) {
+        callbacks.onDropped?.('Frame animation layer is unavailable.');
+        return;
+    }
+
+    const packet = document.createElement('div');
+    packet.className = 'frame-packet';
+    packet.setAttribute('aria-hidden', 'true');
+    packet.innerHTML = '<span class="frame-packet__icon">FRAME</span>';
+    layer.appendChild(packet);
+
+    const animation = {
+        packet,
+        path: [...path],
+        animationFrame: null,
+        cleanupTimer: null,
+        cancelled: false
+    };
+    frameAnimation = animation;
+
+    const finish = (delivered, reason = '') => {
+        if (frameAnimation !== animation || animation.cancelled) {
+            return;
+        }
+
+        if (animation.animationFrame) {
+            window.cancelAnimationFrame(animation.animationFrame);
+        }
+
+        packet.classList.remove('is-moving');
+        packet.classList.add(delivered ? 'is-delivered' : 'is-dropped');
+        clearFrameDeviceHighlights();
+        if (delivered) {
+            setFrameDeviceHighlight(path[path.length - 1], 'is-frame-destination');
+        }
+
+        animation.cleanupTimer = window.setTimeout(() => {
+            if (frameAnimation !== animation) {
+                return;
+            }
+            clearFrameDeviceHighlights();
+            packet.remove();
+            frameAnimation = null;
+            if (delivered) {
+                callbacks.onDelivered?.();
+            } else {
+                callbacks.onDropped?.(reason || 'Topology changed before the frame reached its destination.');
+            }
+        }, delivered ? 480 : 720);
+    };
+
+    const animateHop = (hopIndex) => {
+        if (frameAnimation !== animation || animation.cancelled) {
+            return;
+        }
+
+        const sourceId = path[hopIndex];
+        const targetId = path[hopIndex + 1];
+        const initialSource = getDeviceCenter(sourceId);
+        const initialTarget = getDeviceCenter(targetId);
+        if (!initialSource || !initialTarget) {
+            finish(false, 'A device on the topology path is no longer available.');
+            return;
+        }
+
+        clearFrameDeviceHighlights();
+        setFrameDeviceHighlight(path[0], 'is-frame-source');
+        if (hopIndex > 0) {
+            setFrameDeviceHighlight(sourceId, 'is-frame-hop');
+        }
+        setFrameDeviceHighlight(targetId, hopIndex === path.length - 2 ? 'is-frame-destination' : 'is-frame-hop');
+
+        const distance = Math.hypot(initialTarget.x - initialSource.x, initialTarget.y - initialSource.y);
+        const duration = clamp(distance * 2.2, 420, 1100);
+        const startedAt = performance.now();
+        packet.classList.add('is-moving');
+
+        const move = (now) => {
+            if (frameAnimation !== animation || animation.cancelled) {
+                return;
+            }
+
+            const source = getDeviceCenter(sourceId);
+            const target = getDeviceCenter(targetId);
+            if (!source || !target) {
+                finish(false, 'A device on the topology path was removed.');
+                return;
+            }
+
+            const progress = Math.min(1, (now - startedAt) / duration);
+            const x = source.x + (target.x - source.x) * progress;
+            const y = source.y + (target.y - source.y) * progress;
+            packet.style.left = `${x}px`;
+            packet.style.top = `${y}px`;
+
+            if (progress < 1) {
+                animation.animationFrame = window.requestAnimationFrame(move);
+                return;
+            }
+
+            if (hopIndex < path.length - 2) {
+                animateHop(hopIndex + 1);
+            } else {
+                finish(true);
+            }
+        };
+
+        packet.style.left = `${initialSource.x}px`;
+        packet.style.top = `${initialSource.y}px`;
+        animation.animationFrame = window.requestAnimationFrame(move);
+    };
+
+    animateHop(0);
+}
+
+function showFrameDrop(deviceId) {
+    cancelFrameAnimation();
+
+    const layer = document.getElementById('frameAnimationLayer');
+    const position = getDeviceCenter(deviceId);
+    if (!layer || !position) {
+        return;
+    }
+
+    const packet = document.createElement('div');
+    packet.className = 'frame-packet is-dropped';
+    packet.setAttribute('aria-hidden', 'true');
+    packet.innerHTML = '<span class="frame-packet__icon">DROP</span>';
+    packet.style.left = `${position.x}px`;
+    packet.style.top = `${position.y}px`;
+    layer.appendChild(packet);
+    setFrameDeviceHighlight(deviceId, 'is-frame-dropped');
+
+    window.setTimeout(() => {
+        packet.remove();
+        clearFrameDeviceHighlights();
+    }, 720);
+}
+
+function cancelFrameAnimation() {
+    if (!frameAnimation) {
+        return;
+    }
+
+    frameAnimation.cancelled = true;
+    if (frameAnimation.animationFrame) {
+        window.cancelAnimationFrame(frameAnimation.animationFrame);
+    }
+    if (frameAnimation.cleanupTimer) {
+        window.clearTimeout(frameAnimation.cleanupTimer);
+    }
+    frameAnimation.packet?.remove();
+    frameAnimation = null;
+    clearFrameDeviceHighlights();
+}
+
+function getDeviceCenter(deviceId) {
+    const device = getDeviceById(deviceId);
+    if (!device) {
+        return null;
+    }
+
+    return {
+        x: device.x + DEVICE_WIDTH / 2,
+        y: device.y + DEVICE_HEIGHT / 2
+    };
+}
+
+function setFrameDeviceHighlight(deviceId, className) {
+    document.querySelectorAll('.device').forEach((element) => {
+        if (element.dataset.deviceId === deviceId) {
+            element.classList.add(className);
+        }
+    });
+}
+
+function clearFrameDeviceHighlights() {
+    document.querySelectorAll('.device').forEach((element) => {
+        element.classList.remove('is-frame-source', 'is-frame-hop', 'is-frame-destination', 'is-frame-dropped');
+    });
 }
 
 function renderPropertiesPanel() {
@@ -1025,6 +1258,12 @@ function getSendFramePanelHtml() {
     const sourceName = sourceDevice ? escapeHtml(sourceDevice.name) : 'Not selected';
     const destinationName = networkState.lastFrameResult ? escapeHtml(getDeviceById(networkState.lastFrameResult.path.slice(-1)[0])?.name || '') : 'Not selected';
     const statusMessage = networkState.sendFrameState?.message || (networkState.lastFrameResult ? `Frame ${networkState.lastFrameResult.success ? 'delivered' : 'failed'}` : 'Start by selecting a source device');
+    const animationState = networkState.lastFrameResult?.animationState;
+    const frameDeliveryMessage = animationState === 'in-progress'
+        ? 'Frame in transit'
+        : animationState === 'dropped'
+            ? 'Frame dropped'
+            : 'Frame delivered';
     const eventsHtml = networkState.lastFrameResult?.events?.map((event, index) => `
             <li class="frame-log-item"><strong>${index + 1}.</strong><span>${escapeHtml(event)}</span></li>`).join('') || '';
 
@@ -1048,8 +1287,11 @@ function getSendFramePanelHtml() {
                 </div>
             </div>
             ${networkState.lastFrameResult ? `
-                <div class="property-summary">
+                <div class="property-summary frame-transmission">
                     <h4>FRAME TRANSMISSION</h4>
+                    <div class="property-status-message frame-transmission__status ${animationState === 'dropped' ? 'property-status-message--warning' : animationState === 'delivered' ? 'property-status-message--success' : ''}">
+                        ${escapeHtml(frameDeliveryMessage)}
+                    </div>
                     <div class="property-status-message">
                         ${networkState.lastFrameResult.success ? '✓ Frame delivered' : '✕ Frame not delivered'}
                     </div>
