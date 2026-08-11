@@ -621,6 +621,90 @@ body {
     color: var(--lab-accent-2);
 }
 
+.simulation-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.85rem 1.25rem;
+    padding: 0.95rem 1.15rem;
+    margin-bottom: 1rem;
+    border: 1px solid var(--lab-border);
+    border-radius: 18px;
+    background: var(--lab-surface);
+    box-shadow: var(--lab-shadow);
+}
+
+.simulation-controls__summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.55rem 0.85rem;
+    min-width: 0;
+}
+
+.simulation-controls__label {
+    font-size: 0.72rem;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    color: var(--lab-accent-2);
+}
+
+.simulation-mode-indicator {
+    color: var(--lab-text);
+    font-size: 0.95rem;
+}
+
+.simulation-controls__status {
+    color: var(--lab-muted);
+    font-size: 0.86rem;
+}
+
+.simulation-controls__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.65rem;
+}
+
+.simulation-controls.is-simulation-mode {
+    border-color: rgba(255, 209, 102, 0.34);
+    background: linear-gradient(135deg, rgba(255, 209, 102, 0.08), rgba(8, 16, 33, 0.96));
+}
+
+.simulation-controls.is-simulation-mode .simulation-mode-indicator {
+    color: var(--lab-warning);
+}
+
+.simulation-controls.is-running {
+    box-shadow: 0 0 0 1px rgba(81, 207, 102, 0.18), var(--lab-shadow);
+}
+
+.simulation-controls.is-running .simulation-mode-indicator {
+    color: var(--lab-success);
+}
+
+.simulation-controls.is-running .simulation-controls__status {
+    color: #b7f0c3;
+}
+
+.simulation-event-log {
+    flex: 1 1 100%;
+    margin: 0;
+    padding: 0.75rem 0.9rem;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--lab-muted);
+    font-size: 0.8rem;
+    line-height: 1.5;
+}
+
+.simulation-controls.is-simulation-mode .simulation-event-log {
+    border-color: rgba(255, 209, 102, 0.16);
+    background: rgba(255, 209, 102, 0.06);
+    color: #e8d7a8;
+}
+
 @media (max-width: 1180px) {
     .lab-main {
         grid-template-columns: 220px minmax(0, 1fr);

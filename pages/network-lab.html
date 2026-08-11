@@ -28,9 +28,23 @@
                 <button class="toolbar-button" data-action="redo" type="button">Redo</button>
                 <button class="toolbar-button" data-action="testConnection" type="button">Test Connection</button>
                 <button class="toolbar-button" data-action="sendFrame" type="button">Send Frame</button>
-                <button class="toolbar-button" data-action="simulate" type="button">Simulation Mode</button>
             </div>
         </header>
+
+        <section class="simulation-controls" id="simulationControls" aria-label="Simulation controls">
+            <div class="simulation-controls__summary">
+                <span class="simulation-controls__label">Lab Mode</span>
+                <strong id="simulationModeIndicator" class="simulation-mode-indicator">Edit Mode</strong>
+                <span id="simulationStatus" class="simulation-controls__status">Topology editing is enabled.</span>
+            </div>
+            <div class="simulation-controls__actions">
+                <button id="simulationModeButton" class="toolbar-button" data-action="simulate" type="button">Enter Simulation</button>
+                <button class="toolbar-button" data-action="simulationStart" type="button">Start / Run</button>
+                <button class="toolbar-button" data-action="simulationPause" type="button">Pause</button>
+                <button class="toolbar-button" data-action="simulationReset" type="button">Reset Simulation</button>
+            </div>
+            <p id="simulationEventLog" class="simulation-event-log" aria-live="polite">No simulation events yet.</p>
+        </section>
 
         <main class="lab-main">
             <aside class="lab-panel lab-panel--left">
@@ -112,7 +126,7 @@
                 </div>
 
                 <div id="networkCanvas" class="network-canvas" tabindex="0">
-                    <svg id="connectionLayer" class="connection-layer" viewBox="0 0 1000 800" preserveAspectRatio="none"></svg>
+                    <svg id="connectionLayer" class="connection-layer" aria-hidden="true"></svg>
                     <div id="frameAnimationLayer" class="frame-animation-layer"></div>
                     <div id="deviceLayer" class="device-layer"></div>
                 </div>

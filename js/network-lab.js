@@ -32,7 +32,11 @@ const networkState = {
     mode: 'select',
     pendingDeviceType: 'pc',
     connectionSourceId: null,
-    simulationMode: false,
+    labMode: 'edit',
+    simulationRuntime: {
+        isRunning: false,
+        events: []
+    },
     sendFrameState: null,
     lastFrameResult: null,
     switchRuntime: {},
@@ -47,9 +51,11 @@ const networkState = {
 let dragState = null;
 let inspectorDrafts = {};
 let frameAnimation = null;
+let canvasResizeObserver = null;
 
 function initializeLab() {
     bindEvents();
+    bindCanvasResizeObserver();
     render();
 }
 
@@ -71,6 +77,11 @@ function bindEvents() {
         });
 
         item.addEventListener('dragstart', (event) => {
+            if (!canEditTopology()) {
+                event.preventDefault();
+                reportEditingLocked();
+                return;
+            }
             event.dataTransfer.setData('text/plain', item.dataset.type);
             event.dataTransfer.effectAllowed = 'copy';
         });
@@ -79,6 +90,9 @@ function bindEvents() {
     const canvas = document.getElementById('networkCanvas');
     canvas.addEventListener('click', handleCanvasClick);
     canvas.addEventListener('dragover', (event) => {
+        if (!canEditTopology()) {
+            return;
+        }
         event.preventDefault();
         canvas.classList.add('is-drop-target');
     });
@@ -86,6 +100,12 @@ function bindEvents() {
         canvas.classList.remove('is-drop-target');
     });
     canvas.addEventListener('drop', (event) => {
+        if (!canEditTopology()) {
+            event.preventDefault();
+            canvas.classList.remove('is-drop-target');
+            reportEditingLocked();
+            return;
+        }
         event.preventDefault();
         canvas.classList.remove('is-drop-target');
         const type = event.dataTransfer.getData('text/plain') || networkState.pendingDeviceType;
@@ -96,7 +116,57 @@ function bindEvents() {
     document.addEventListener('keydown', handleKeydown);
 }
 
+function bindCanvasResizeObserver() {
+    const canvas = document.getElementById('networkCanvas');
+    if (!canvas || canvasResizeObserver) {
+        return;
+    }
+
+    canvasResizeObserver = new ResizeObserver(() => {
+        syncConnectionLayerDimensions();
+        renderConnections();
+    });
+    canvasResizeObserver.observe(canvas);
+}
+
+function syncConnectionLayerDimensions() {
+    const canvas = document.getElementById('networkCanvas');
+    const svg = document.getElementById('connectionLayer');
+    if (!canvas || !svg) {
+        return { width: 0, height: 0 };
+    }
+
+    const width = Math.max(1, canvas.clientWidth);
+    const height = Math.max(1, canvas.clientHeight);
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.setAttribute('width', String(width));
+    svg.setAttribute('height', String(height));
+    return { width, height };
+}
+
+function createLabSnapshot() {
+    return JSON.parse(JSON.stringify({
+        devices: networkState.devices,
+        connections: networkState.connections,
+        selectedDeviceId: networkState.selectedDeviceId,
+        selectedConnectionId: networkState.selectedConnectionId,
+        mode: networkState.mode,
+        pendingDeviceType: networkState.pendingDeviceType,
+        typeCounters: networkState.typeCounters,
+        connectionCounter: networkState.connectionCounter,
+        connectionSourceId: networkState.connectionSourceId,
+        connectionTestState: networkState.connectionTestState,
+        lastConnectionTestResult: networkState.lastConnectionTestResult,
+        switchRuntime: networkState.switchRuntime
+    }));
+}
+
 function setMode(mode) {
+    if (!canEditTopology() && mode !== 'select') {
+        reportEditingLocked();
+        return;
+    }
+
     networkState.mode = mode;
     if (mode !== 'connect') {
         networkState.connectionSourceId = null;
@@ -107,6 +177,11 @@ function setMode(mode) {
 }
 
 function selectPaletteDevice(type) {
+    if (!canEditTopology()) {
+        reportEditingLocked();
+        return;
+    }
+
     networkState.pendingDeviceType = type;
     networkState.mode = 'add';
     networkState.selectedConnectionId = null;
@@ -117,7 +192,31 @@ function selectPaletteDevice(type) {
 }
 
 function handleToolbarAction(action) {
+    if (action === 'simulate') {
+        setLabMode(isSimulationMode() ? 'edit' : 'simulation');
+        return;
+    }
+
+    if (action === 'simulationStart') {
+        startSimulation();
+        return;
+    }
+
+    if (action === 'simulationPause') {
+        pauseSimulation();
+        return;
+    }
+
+    if (action === 'simulationReset') {
+        resetSimulation();
+        return;
+    }
+
     if (action === 'delete') {
+        if (!canEditTopology()) {
+            reportEditingLocked();
+            return;
+        }
         if (networkState.selectedConnectionId) {
             deleteConnection(networkState.selectedConnectionId);
         } else {
@@ -127,16 +226,28 @@ function handleToolbarAction(action) {
     }
 
     if (action === 'clear') {
+        if (!canEditTopology()) {
+            reportEditingLocked();
+            return;
+        }
         clearCanvas();
         return;
     }
 
     if (action === 'undo') {
+        if (!canEditTopology()) {
+            reportEditingLocked();
+            return;
+        }
         undo();
         return;
     }
 
     if (action === 'redo') {
+        if (!canEditTopology()) {
+            reportEditingLocked();
+            return;
+        }
         redo();
         return;
     }
@@ -184,15 +295,107 @@ function handleToolbarAction(action) {
         return;
     }
 
-    if (action === 'simulate') {
-        networkState.simulationMode = !networkState.simulationMode;
-        updateToolbarButtons();
-        updateStatus(networkState.simulationMode ? 'Simulation mode enabled for future packet flow updates.' : 'Simulation mode disabled.');
-        render();
+}
+
+function isSimulationMode() {
+    return networkState.labMode === 'simulation';
+}
+
+function canEditTopology() {
+    return !isSimulationMode();
+}
+
+function setLabMode(nextMode) {
+    if (!['edit', 'simulation'].includes(nextMode) || networkState.labMode === nextMode) {
+        return;
     }
+
+    networkState.labMode = nextMode;
+    networkState.mode = 'select';
+    networkState.connectionSourceId = null;
+    dragState = null;
+
+    if (nextMode === 'simulation') {
+        recordSimulationEvent('Entered Simulation Mode. Topology editing is locked.');
+        updateStatus('Simulation Mode active. Select devices, test connections, or send frames.');
+    } else {
+        networkState.simulationRuntime.isRunning = false;
+        recordSimulationEvent('Returned to Edit Mode. Topology editing is enabled.');
+        updateStatus('Edit Mode active. Topology editing is enabled.');
+    }
+
+    render();
+}
+
+function startSimulation() {
+    if (!isSimulationMode()) {
+        updateStatus('Enter Simulation Mode before starting the simulation.');
+        renderSimulationControls();
+        return;
+    }
+
+    if (!networkState.simulationRuntime.isRunning) {
+        networkState.simulationRuntime.isRunning = true;
+        recordSimulationEvent('Simulation started.');
+    }
+    updateStatus('Simulation running. Send Frame remains available.');
+    render();
+}
+
+function pauseSimulation() {
+    if (!isSimulationMode()) {
+        updateStatus('Simulation controls are available in Simulation Mode.');
+        renderSimulationControls();
+        return;
+    }
+
+    const wasAnimating = Boolean(frameAnimation);
+    cancelFrameAnimation();
+    networkState.simulationRuntime.isRunning = false;
+    if (wasAnimating && networkState.lastFrameResult?.animationState === 'in-progress') {
+        networkState.lastFrameResult.animationState = 'paused';
+        networkState.lastFrameResult.events.push('Frame animation paused.');
+    }
+    recordSimulationEvent(wasAnimating ? 'Simulation paused. Active frame animation cancelled.' : 'Simulation paused.');
+    updateStatus('Simulation paused. Topology is unchanged.');
+    render();
+}
+
+function resetSimulation() {
+    if (!isSimulationMode()) {
+        updateStatus('Simulation controls are available in Simulation Mode.');
+        renderSimulationControls();
+        return;
+    }
+
+    cancelFrameAnimation();
+    networkState.simulationRuntime.isRunning = false;
+    networkState.switchRuntime = {};
+    networkState.sendFrameState = null;
+    networkState.lastFrameResult = null;
+    networkState.connectionTestState = null;
+    networkState.lastConnectionTestResult = null;
+    networkState.simulationRuntime.events = [];
+    recordSimulationEvent('Simulation reset. Runtime state and MAC tables cleared.');
+    updateStatus('Simulation reset. Topology and device configuration are preserved.');
+    render();
+}
+
+function recordSimulationEvent(message) {
+    networkState.simulationRuntime.events.unshift(message);
+    networkState.simulationRuntime.events = networkState.simulationRuntime.events.slice(0, 4);
+}
+
+function reportEditingLocked() {
+    updateStatus('Topology editing is locked in Simulation Mode. Return to Edit Mode to make changes.');
+    renderSimulationControls();
 }
 
 function addDevice(type, x, y) {
+    if (!canEditTopology()) {
+        reportEditingLocked();
+        return;
+    }
     if (!DEVICE_DEFINITIONS[type]) {
         return;
     }
@@ -229,6 +432,11 @@ function addDevice(type, x, y) {
 }
 
 function clearCanvas() {
+    if (!canEditTopology()) {
+        reportEditingLocked();
+        return;
+    }
+
     if (!networkState.devices.length && !networkState.connections.length) {
         updateStatus('The canvas is already empty.');
         return;
@@ -293,6 +501,11 @@ function clearSelection() {
 }
 
 function deleteDevice(deviceId) {
+    if (!canEditTopology()) {
+        reportEditingLocked();
+        return;
+    }
+
     const device = getDeviceById(deviceId);
     if (!device) {
         return;
@@ -316,6 +529,11 @@ function deleteDevice(deviceId) {
 }
 
 function deleteConnection(connectionId) {
+    if (!canEditTopology()) {
+        reportEditingLocked();
+        return;
+    }
+
     const connection = getConnectionById(connectionId);
     if (!connection) {
         return;
@@ -334,6 +552,11 @@ function deleteConnection(connectionId) {
 }
 
 function addConnection(sourceId, targetId) {
+    if (!canEditTopology()) {
+        reportEditingLocked();
+        return;
+    }
+
     if (!sourceId || !targetId || sourceId === targetId) {
         if (sourceId && targetId && sourceId === targetId) {
             updateStatus('A device cannot connect to itself.');
@@ -579,6 +802,11 @@ function handleCanvasClick(event) {
     const x = event.clientX - rect.left;
     const y = event.clientY - rect.top;
 
+    if (!canEditTopology()) {
+        clearSelection();
+        return;
+    }
+
     if (networkState.mode === 'add') {
         addDevice(networkState.pendingDeviceType, x, y);
         return;
@@ -614,6 +842,10 @@ function isEditableElement(target) {
 
 function handleKeydown(event) {
     if ((event.key === 'Delete' || event.key === 'Backspace') && !isEditableElement(event.target)) {
+        if (!canEditTopology()) {
+            reportEditingLocked();
+            return;
+        }
         if (networkState.selectedConnectionId) {
             deleteConnection(networkState.selectedConnectionId);
         } else if (networkState.selectedDeviceId) {
@@ -623,20 +855,7 @@ function handleKeydown(event) {
 }
 
 function pushHistory() {
-    const snapshot = JSON.parse(JSON.stringify({
-        devices: networkState.devices,
-        connections: networkState.connections,
-        selectedDeviceId: networkState.selectedDeviceId,
-        selectedConnectionId: networkState.selectedConnectionId,
-        mode: networkState.mode,
-        pendingDeviceType: networkState.pendingDeviceType,
-        simulationMode: networkState.simulationMode,
-        typeCounters: networkState.typeCounters,
-        connectionCounter: networkState.connectionCounter,
-        connectionSourceId: networkState.connectionSourceId,
-        connectionTestState: networkState.connectionTestState,
-        lastConnectionTestResult: networkState.lastConnectionTestResult
-    }));
+    const snapshot = createLabSnapshot();
 
     networkState.history.push(snapshot);
     if (networkState.history.length > 30) {
@@ -646,26 +865,18 @@ function pushHistory() {
 }
 
 function undo() {
+    if (!canEditTopology()) {
+        reportEditingLocked();
+        return;
+    }
+
     if (!networkState.history.length) {
         updateStatus('Nothing to undo.');
         return;
     }
 
     const snapshot = networkState.history.pop();
-    networkState.future.push(JSON.parse(JSON.stringify({
-        devices: networkState.devices,
-        connections: networkState.connections,
-        selectedDeviceId: networkState.selectedDeviceId,
-        selectedConnectionId: networkState.selectedConnectionId,
-        mode: networkState.mode,
-        pendingDeviceType: networkState.pendingDeviceType,
-        simulationMode: networkState.simulationMode,
-        typeCounters: networkState.typeCounters,
-        connectionCounter: networkState.connectionCounter,
-        connectionSourceId: networkState.connectionSourceId,
-        connectionTestState: networkState.connectionTestState,
-        lastConnectionTestResult: networkState.lastConnectionTestResult
-    })));
+    networkState.future.push(createLabSnapshot());
 
     restoreSnapshot(snapshot);
     updateStatus('Undid the last action.');
@@ -673,26 +884,18 @@ function undo() {
 }
 
 function redo() {
+    if (!canEditTopology()) {
+        reportEditingLocked();
+        return;
+    }
+
     if (!networkState.future.length) {
         updateStatus('Nothing to redo.');
         return;
     }
 
     const snapshot = networkState.future.pop();
-    networkState.history.push(JSON.parse(JSON.stringify({
-        devices: networkState.devices,
-        connections: networkState.connections,
-        selectedDeviceId: networkState.selectedDeviceId,
-        selectedConnectionId: networkState.selectedConnectionId,
-        mode: networkState.mode,
-        pendingDeviceType: networkState.pendingDeviceType,
-        simulationMode: networkState.simulationMode,
-        typeCounters: networkState.typeCounters,
-        connectionCounter: networkState.connectionCounter,
-        connectionSourceId: networkState.connectionSourceId,
-        connectionTestState: networkState.connectionTestState,
-        lastConnectionTestResult: networkState.lastConnectionTestResult
-    })));
+    networkState.history.push(createLabSnapshot());
 
     restoreSnapshot(snapshot);
     updateStatus('Redid the last action.');
@@ -706,7 +909,6 @@ function restoreSnapshot(snapshot) {
     networkState.selectedConnectionId = snapshot.selectedConnectionId || null;
     networkState.mode = snapshot.mode || 'select';
     networkState.pendingDeviceType = snapshot.pendingDeviceType || 'pc';
-    networkState.simulationMode = snapshot.simulationMode || false;
     networkState.typeCounters = snapshot.typeCounters || {};
     networkState.connectionCounter = typeof snapshot.connectionCounter === 'number' ? snapshot.connectionCounter : 0;
     networkState.connectionSourceId = snapshot.connectionSourceId || null;
@@ -722,11 +924,17 @@ function render() {
     renderPropertiesPanel();
     updateToolbarButtons();
     updatePaletteSelection();
+    renderSimulationControls();
     updateStatus();
 }
 
 function renderConnections() {
     const svg = document.getElementById('connectionLayer');
+    if (!svg) {
+        return;
+    }
+
+    syncConnectionLayerDimensions();
     svg.innerHTML = '';
 
     networkState.connections.forEach((connection) => {
@@ -792,14 +1000,19 @@ function renderDevices() {
             selectDevice(device.id);
         });
         element.addEventListener('pointerdown', (event) => {
-            if (networkState.mode !== 'select') {
+            if (networkState.mode !== 'select' || !canEditTopology()) {
+                if (!canEditTopology()) {
+                    reportEditingLocked();
+                }
                 return;
             }
 
+            const canvas = document.getElementById('networkCanvas');
+            const rect = canvas.getBoundingClientRect();
             dragState = {
                 deviceId: device.id,
-                offsetX: event.clientX - device.x,
-                offsetY: event.clientY - device.y
+                offsetX: event.clientX - rect.left - device.x,
+                offsetY: event.clientY - rect.top - device.y
             };
             selectDevice(device.id);
             document.addEventListener('pointermove', handlePointerMove);
@@ -2256,24 +2469,34 @@ function canCommunicateDirectly(sourceDevice, targetDevice) {
 }
 
 function updateToolbarButtons() {
+    const simulationMode = isSimulationMode();
     document.querySelectorAll('.toolbar-button[data-mode]').forEach((button) => {
         button.classList.toggle('is-active', button.dataset.mode === networkState.mode);
+        button.disabled = simulationMode && button.dataset.mode !== 'select';
     });
 
     const undoButton = document.querySelector('.toolbar-button[data-action="undo"]');
     const redoButton = document.querySelector('.toolbar-button[data-action="redo"]');
 
     if (undoButton) {
-        undoButton.disabled = !networkState.history.length;
+        undoButton.disabled = simulationMode || !networkState.history.length;
     }
 
     if (redoButton) {
-        redoButton.disabled = !networkState.future.length;
+        redoButton.disabled = simulationMode || !networkState.future.length;
     }
 
-    const simulateButton = document.querySelector('.toolbar-button[data-action="simulate"]');
+    ['delete', 'clear'].forEach((action) => {
+        const button = document.querySelector(`.toolbar-button[data-action="${action}"]`);
+        if (button) {
+            button.disabled = simulationMode;
+        }
+    });
+
+    const simulateButton = document.querySelector('#simulationModeButton');
     if (simulateButton) {
-        simulateButton.classList.toggle('is-active', networkState.simulationMode);
+        simulateButton.classList.toggle('is-active', simulationMode);
+        simulateButton.textContent = simulationMode ? 'Return to Edit Mode' : 'Enter Simulation';
     }
 
     const testButton = document.querySelector('.toolbar-button[data-action="testConnection"]');
@@ -2290,6 +2513,43 @@ function updateToolbarButtons() {
 function updatePaletteSelection() {
     document.querySelectorAll('.palette-item').forEach((item) => {
         item.classList.toggle('is-selected', item.dataset.type === networkState.pendingDeviceType);
+        item.disabled = isSimulationMode();
+        item.draggable = !isSimulationMode();
+    });
+}
+
+function renderSimulationControls() {
+    const indicator = document.getElementById('simulationModeIndicator');
+    const status = document.getElementById('simulationStatus');
+    const eventLog = document.getElementById('simulationEventLog');
+    const controls = document.getElementById('simulationControls');
+    const simulationMode = isSimulationMode();
+
+    if (controls) {
+        controls.classList.toggle('is-simulation-mode', simulationMode);
+        controls.classList.toggle('is-running', simulationMode && networkState.simulationRuntime.isRunning);
+    }
+    if (indicator) {
+        indicator.textContent = simulationMode ? 'Simulation Mode' : 'Edit Mode';
+    }
+    if (status) {
+        status.textContent = simulationMode
+            ? networkState.simulationRuntime.isRunning
+                ? 'Running: topology is locked; frames and tests are available.'
+                : 'Paused: topology is locked; frames and tests are available.'
+            : 'Topology editing is enabled.';
+    }
+    if (eventLog) {
+        eventLog.textContent = networkState.simulationRuntime.events.length
+            ? networkState.simulationRuntime.events.join(' | ')
+            : 'No simulation events yet.';
+    }
+
+    ['simulationStart', 'simulationPause', 'simulationReset'].forEach((action) => {
+        const button = document.querySelector(`.toolbar-button[data-action="${action}"]`);
+        if (button) {
+            button.disabled = !simulationMode || (action === 'simulationStart' && networkState.simulationRuntime.isRunning);
+        }
     });
 }
 
@@ -2335,7 +2595,13 @@ function updateStatus(message) {
 
     statusMessage.textContent = cleanDisplayText(statusMessage.textContent);
 
-    const activeMode = networkState.sendFrameState ? 'Send Frame' : networkState.connectionTestState ? 'Test Connection' : capitalize(networkState.mode);
+    const activeMode = networkState.sendFrameState
+        ? 'Send Frame'
+        : networkState.connectionTestState
+            ? 'Test Connection'
+            : isSimulationMode()
+                ? 'Simulation'
+                : capitalize(networkState.mode);
     modeBadge.textContent = `Mode: ${activeMode}`;
 }
 
