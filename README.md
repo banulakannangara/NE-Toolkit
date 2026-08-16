@@ -1,271 +1,558 @@
-# NetMaster Toolkit - Professional Network Engineering Website
+# 🌐 NE-Toolkit
 
-## Project Overview
-NetMaster Toolkit is a professional, portfolio-worthy network engineering toolkit built with pure HTML, CSS, and JavaScript. It provides modern network calculation tools with a sleek dark theme, responsive design, and smooth animations.
+### Network Engineering Toolkit & Browser-Based Network Simulation Environment
 
-## Features
-✅ **Modern Dark Theme UI** - Professional gradient colors and smooth transitions  
-✅ **Fully Responsive** - Desktop, tablet, and mobile optimized  
-✅ **Pure Web Technologies** - HTML5, CSS3, vanilla JavaScript  
-✅ **Input Validation** - Real-time validation with user-friendly error messages  
-✅ **Smooth Animations** - Modern transitions and visual feedback  
-✅ **Professional Cards & Icons** - Clean, organized layout with emoji icons  
-✅ **Accessible Navigation** - Mobile hamburger menu and smooth scrolling  
-✅ **No Dependencies** - Zero external libraries, lightweight and fast  
-✅ **Well-Commented Code** - Professional documentation throughout  
+**NE-Toolkit** is a professional, browser-based network engineering toolkit designed for learning, experimenting with, and visualizing networking concepts.
 
-## Project Structure
-```
-NE-Toolkit/
-├── index.html              # Home page - Project landing page
-├── css/
-│   └── style.css          # Main stylesheet with all styles and animations
-├── js/
-│   └── script.js          # Shared utilities and navigation logic
-├── pages/
-│   ├── subnet.html        # Subnet Calculator tool
-│   ├── binary.html        # IPv4 to Binary Converter
-│   └── cidr.html          # CIDR to Subnet Mask Converter
-└── assets/                # Reserved for future assets (images, icons, etc.)
-```
+Built entirely with **HTML, CSS, and vanilla JavaScript**, the project combines practical network calculation tools with an interactive **Network Lab** that allows users to build topologies, configure devices, create connections, and simulate network behavior directly in the browser.
 
-## Pages & Tools
-
-### 1. Home Page (index.html)
-- Hero section with call-to-action
-- Tool showcase with feature cards
-- Benefits overview with 6 key features
-- Quick statistics section
-- Professional footer
-- Mobile-responsive navigation
-
-### 2. Subnet Calculator (pages/subnet.html)
-**Features:**
-- Calculate network addresses and broadcast addresses
-- Display first and last usable hosts
-- Show total and usable host counts
-- Display CIDR notation
-- Calculate wildcard masks
-- Subnet visualization breakdown
-- Comprehensive information section
-- Real-time validation
-
-**Calculations:**
-- Network Address: IP AND Subnet Mask
-- Broadcast Address: Network OR Inverted Mask
-- Host Range: Network + 1 to Broadcast - 1
-- Total Hosts: 2^(32 - CIDR prefix) - 2
-
-### 3. IPv4 to Binary Converter (pages/binary.html)
-**Features:**
-- Convert IPv4 addresses to 32-bit binary
-- Display full binary representation with dots
-- Breakdown by individual octets
-- Bit-by-bit visualization (32 boxes)
-- IP address classification (Class A-E)
-- Determine IP type (Public/Private/Multicast/etc.)
-- Copy functionality for results
-- Reference conversion table
-
-**Visualizations:**
-- Color-coded bits (1s in green, 0s in red)
-- Bit position labels
-- Interactive hover effects
-
-### 4. CIDR to Subnet Mask Converter (pages/cidr.html)
-**Features:**
-- Convert CIDR prefix to subnet mask
-- Convert subnet mask to CIDR prefix
-- Calculate wildcard mask
-- Show network and host bit counts
-- Display usable host count
-- Comprehensive reference table with 12 common CIDR values
-- Educational information section
-
-**Reference Data:**
-Includes /8 through /32 with corresponding masks and host counts
-
-## Technology Stack
-
-### HTML5
-- Semantic markup
-- Mobile viewport meta tag
-- SEO-friendly structure
-
-### CSS3
-- CSS Variables for consistent theming
-- Grid and Flexbox layouts
-- Media queries for responsive design
-- Smooth animations and transitions
-- Gradient text effects
-- Backdrop blur for modern effects
-
-### JavaScript
-- ES6+ syntax
-- Object-oriented utility functions
-- Event handling and DOM manipulation
-- Form validation
-- Clipboard API for copy-to-clipboard
-- Local storage ready (for future theme switching)
-
-## Color Scheme (CSS Variables)
-- **Primary**: #00d4ff (Cyan)
-- **Secondary**: #0099cc (Dark Cyan)
-- **Dark Background**: #0a0e27
-- **Card Background**: #1a1f3a
-- **Text Primary**: #e0e0e0
-- **Text Secondary**: #a0a0a0
-- **Success**: #51cf66 (Green)
-- **Error**: #ff6b6b (Red)
-- **Warning**: #ffd93d (Yellow)
-
-## Responsive Breakpoints
-- **Desktop**: > 768px
-- **Tablet**: 768px and below
-- **Mobile**: 480px and below
-
-## JavaScript Utilities
-
-The `script.js` file exports utility functions available globally:
-
-```javascript
-NetMasterUtils = {
-    isValidIPv4(ip)           // Validate IPv4 format
-    isValidSubnetMask(mask)   // Validate subnet mask
-    isValidCIDR(cidr)         // Validate CIDR notation
-    ipToNumber(ip)            // Convert IP to 32-bit number
-    numberToIP(num)           // Convert number to IP
-    decToBinary8Bit(num)      // Convert decimal to 8-bit binary
-    cidrToSubnetMask(prefix)  // Convert CIDR to subnet mask
-    subnetMaskToCIDR(mask)    // Convert subnet mask to CIDR
-    calculateSubnet(ip, mask) // Full subnet calculation
-    copyToClipboard(text)     // Copy to clipboard
-    formatNumber(num)         // Format number with commas
-    showAlert(message, type)  // Display alert notifications
-}
-```
-
-## Features in Detail
-
-### Input Validation
-- IPv4 format validation using regex
-- Subnet mask validation
-- CIDR prefix range checking (0-32)
-- User-friendly error messages
-- Success notifications
-
-### Error Handling
-- Empty field detection
-- Invalid format detection
-- Clear error messages
-- Alert dismissal on timeout
-- Alert clearing on form reset
-
-### User Experience
-- Smooth page transitions
-- Auto-scrolling to results
-- Keyboard Enter support
-- Mobile hamburger menu
-- Focus management
-- Hover effects and animations
-- Copy-to-clipboard feedback
-
-## Browser Compatibility
-- Chrome/Edge 88+
-- Firefox 85+
-- Safari 14+
-- Opera 74+
-- Modern mobile browsers
-
-## Performance Optimizations
-- Pure CSS animations (no JavaScript)
-- Minimal DOM manipulation
-- Efficient algorithms
-- No external dependencies
-- Fast binary conversions
-- Optimized network calculations
-
-## Future Enhancement Ideas
-1. Light/Dark theme toggle
-2. History of calculations
-3. Export results as PDF
-4. Network diagram visualization
-5. IPv6 support
-6. Subnet calculator batching
-7. APA (Asian Pacific) IP range support
-8. Advanced VLSM (Variable Length Subnet Mask) calculator
-
-## Code Quality
-- Comprehensive comments throughout
-- DRY (Don't Repeat Yourself) principles
-- Modular function design
-- Consistent naming conventions
-- Professional documentation
-- ES6+ best practices
-
-## Getting Started
-
-1. **Download/Clone the project**
-2. **No installation required** - Just open `index.html` in your browser
-3. **No server needed** - All calculations are client-side
-4. **No dependencies** - Pure HTML, CSS, and JavaScript
-
-## How to Use
-
-### Subnet Calculator
-1. Enter an IP address (e.g., 192.168.1.100)
-2. Enter a subnet mask (e.g., 255.255.255.0)
-3. Click "Calculate"
-4. View network information, host ranges, and more
-
-### IPv4 to Binary
-1. Enter an IPv4 address
-2. Click "Convert"
-3. View 32-bit binary representation
-4. See octet breakdown and bit visualization
-
-### CIDR Converter
-1. Enter CIDR prefix (0-32) OR subnet mask
-2. Click respective "Convert" button
-3. View CIDR notation and corresponding subnet mask
-4. Reference the table for common CIDR values
-
-## Network Engineering Knowledge
-
-### Important Concepts
-
-**Subnet Mask**: Determines which portion of an IP address is the network and which is the host
-- Format: 255.255.255.0 (dotted decimal)
-- Network bits are represented as 1s
-- Host bits are represented as 0s
-
-**CIDR Notation**: Modern notation for IP addresses and networks
-- Format: 192.168.1.0/24
-- /24 means 24 bits for network, 8 bits for hosts
-- More efficient than traditional classful notation
-
-**Network Address**: First address in a subnet
-- Cannot be assigned to devices
-- Identifies the entire network
-- Calculated: IP AND Subnet Mask
-
-**Broadcast Address**: Last address in a subnet
-- Used to send to all hosts on network
-- Cannot be assigned to devices
-- Calculated: Network OR Inverted Mask
-
-**Usable Hosts**: All addresses except network and broadcast
-- Formula: 2^(host bits) - 2
-- For /24: 2^8 - 2 = 254 usable hosts
-
-## Credits
-Built with ❤️ for Network Engineers  
-Professional Network Engineering Solutions  
-© 2024 NetMaster Toolkit
-
-## License
-Free to use and modify for personal or commercial projects.
+> 🚧 **Project Status:** Active Development — V5
 
 ---
 
-**Ready to use! No build steps, no dependencies, just pure web technology.** 🚀
+## ✨ Features
+
+### 🧮 Network Engineering Tools
+
+NE-Toolkit includes practical tools for common networking calculations.
+
+* IPv4 Subnet Calculator
+* IPv4 → Binary Converter
+* CIDR ↔ Subnet Mask Converter
+* Network address calculation
+* Broadcast address calculation
+* Usable host range calculation
+* Host count calculation
+* Wildcard mask calculation
+* IPv4 validation
+* Subnet mask validation
+* CIDR validation
+* IPv4 address classification
+* Public/private address identification
+
+---
+
+# 🖥️ Network Lab
+
+The **Network Lab** is the core of the project's simulation environment.
+
+It provides a visual canvas where users can create and interact with network topologies.
+
+### Supported Devices
+
+* 💻 PC
+* 💻 Laptop
+* 🖥️ Server
+* 🔀 Switch
+* 🌐 Router
+
+Devices can be placed directly onto the network canvas and connected together to create custom topologies.
+
+---
+
+## 🔗 Topology Builder
+
+The Network Lab allows users to build network topologies interactively.
+
+### Current capabilities
+
+* Add network devices
+* Drag devices around the canvas
+* Select devices
+* Create connections between devices
+* Delete devices
+* Delete connections
+* Clear the entire topology
+* Visualize connections dynamically
+* Detect topology paths
+* Automatically maintain connection relationships
+
+The connection layer dynamically adapts to the canvas size so that connections remain aligned with devices when the workspace is resized.
+
+---
+
+# ⚙️ Device Configuration
+
+Each supported network device has an interactive configuration inspector.
+
+### Network configuration
+
+Devices can be configured with:
+
+* Device name
+* IPv4 address
+* Subnet mask
+* Default gateway
+* MAC address
+
+The inspector performs validation before configuration changes are applied.
+
+### Network information
+
+The Network Lab can display:
+
+* Network address
+* Broadcast address
+* Prefix length
+* Host count
+* Usable host range
+* Gateway warnings
+* Special-address warnings
+* Network configuration status
+
+Invalid configurations are highlighted before they can be applied.
+
+---
+
+# 🔀 Switch Simulation
+
+Switches include runtime state for basic Layer 2 behavior.
+
+### Current switch capabilities
+
+* Dynamic switch port assignment
+* Switch port tracking
+* MAC address learning state
+* MAC address table runtime
+* Connection-to-port mapping
+* Runtime state preservation through undo/redo
+
+Switch ports are automatically assigned as connections are created.
+
+Example:
+
+```text
+Switch0
+
+Fa0/1 → PC0
+Fa0/2 → PC1
+Fa0/3 → Server0
+```
+
+---
+
+# 📦 Frame Simulation
+
+NE-Toolkit includes a visual frame-transmission workflow for demonstrating how traffic moves through a topology.
+
+A frame can be sent from a source device toward a destination device.
+
+The simulation provides:
+
+* Source selection
+* Destination selection
+* Topology path detection
+* Hop-by-hop frame movement
+* Frame animation
+* Delivery status
+* Failure detection
+* DROP events
+* Simulation event information
+
+Example:
+
+```text
+PC0
+ ↓
+Switch0
+ ↓
+Switch1
+ ↓
+Server0
+```
+
+The simulated frame is visually animated through the discovered topology path.
+
+---
+
+# 🔍 Connection Testing
+
+The Network Lab includes a connection-testing system for checking whether two devices can communicate based on their current configuration and topology.
+
+The system evaluates:
+
+* Source device
+* Destination device
+* IPv4 configuration
+* Subnet mask
+* Same-subnet relationship
+* Topology connectivity
+* Available path
+
+Example result:
+
+```text
+✓ Connection possible
+
+Source:
+PC0 — 192.168.1.10
+
+Destination:
+PC1 — 192.168.1.20
+
+Network:
+192.168.1.0/24
+```
+
+Invalid configurations and unreachable topology paths produce explanatory failure messages.
+
+> **Note:** Full Layer 3 routing and router forwarding are part of the upcoming development roadmap.
+
+---
+
+# 🎮 Edit & Simulation Modes
+
+The Network Lab separates topology editing from simulation.
+
+### Edit Mode
+
+Used to build and configure the network.
+
+* Add devices
+* Move devices
+* Connect devices
+* Delete devices
+* Configure device properties
+* Undo changes
+* Redo changes
+
+### Simulation Mode
+
+Used to interact with the simulated network.
+
+* Start/stop simulation
+* Send frames
+* Test connections
+* Observe simulation events
+* Inspect runtime behavior
+
+This separation helps prevent accidental topology changes during simulation.
+
+---
+
+# ↩️ Undo & Redo
+
+The Network Lab includes a history system for topology and configuration changes.
+
+Supported state includes:
+
+* Devices
+* Connections
+* Device configuration
+* Selection state
+* Connection state
+* Switch runtime state
+* MAC table state
+* Switch port assignments
+
+This allows network experiments to be safely modified and reverted.
+
+---
+
+# 📐 Responsive Network Canvas
+
+The Network Lab uses a dynamically sized SVG connection layer.
+
+The connection system automatically synchronizes with the canvas dimensions, allowing topology connections to remain correctly positioned when the workspace is resized.
+
+This provides consistent behavior across different screen sizes and canvas dimensions.
+
+---
+
+# 🎨 User Interface
+
+NE-Toolkit uses a modern dark network-engineering aesthetic.
+
+### UI characteristics
+
+* Dark theme
+* Cyan networking accents
+* Gradient elements
+* Responsive layouts
+* Interactive controls
+* Device inspector
+* Simulation controls
+* Status indicators
+* Visual feedback
+* Smooth transitions
+* Responsive network canvas
+
+The interface is designed to feel closer to a professional engineering tool than a basic educational webpage.
+
+---
+
+# 🛠️ Technology Stack
+
+## Frontend
+
+* HTML5
+* CSS3
+* JavaScript ES6+
+
+## Architecture
+
+* Vanilla JavaScript
+* No React
+* No TypeScript
+* No frontend framework
+* No build system
+* No external runtime dependencies
+
+## Browser APIs / Technologies
+
+* DOM API
+* SVG
+* Pointer Events
+* ResizeObserver
+* Clipboard API
+* Drag & Drop API
+
+---
+
+# 📁 Project Structure
+
+```text
+NE-Toolkit/
+│
+├── index.html
+│
+├── css/
+│   ├── style.css
+│   └── network-lab.css
+│
+├── js/
+│   ├── script.js
+│   └── network-lab.js
+│
+├── pages/
+│   ├── subnet.html
+│   ├── binary.html
+│   ├── cidr.html
+│   └── network-lab.html
+│
+└── assets/
+```
+
+---
+
+# 🧠 Networking Concepts Covered
+
+NE-Toolkit is designed around practical networking concepts including:
+
+### IPv4
+
+* IPv4 addressing
+* Binary representation
+* Address classes
+* Public/private addressing
+* Network addresses
+* Broadcast addresses
+
+### Subnetting
+
+* Subnet masks
+* CIDR
+* Network prefixes
+* Host bits
+* Network bits
+* Usable hosts
+* Wildcard masks
+* Host ranges
+
+### Layer 2
+
+* MAC addresses
+* Ethernet frames
+* Switches
+* Switch ports
+* MAC address learning
+* MAC tables
+* Topology forwarding paths
+
+### Layer 3
+
+Layer 3 functionality is currently under development.
+
+Planned concepts include:
+
+* Routers
+* Router interfaces
+* Default gateways
+* Inter-subnet communication
+* Router forwarding
+* Routing tables
+* Next-hop decisions
+
+---
+
+# 🚀 Roadmap
+
+NE-Toolkit is being developed toward a more complete browser-based network engineering simulation environment.
+
+## ✅ Completed
+
+* [x] IPv4 Subnet Calculator
+* [x] IPv4 Binary Converter
+* [x] CIDR Converter
+* [x] Interactive Network Lab
+* [x] Device placement
+* [x] Device dragging
+* [x] Network connections
+* [x] Device inspector
+* [x] IPv4 configuration
+* [x] Subnet configuration
+* [x] Gateway configuration
+* [x] MAC configuration
+* [x] Network status analysis
+* [x] Topology path detection
+* [x] Switch runtime state
+* [x] Switch port assignment
+* [x] MAC table simulation
+* [x] Frame animation
+* [x] Connection testing
+* [x] Edit/Simulation modes
+* [x] Undo/redo
+* [x] Responsive SVG connection system
+
+## 🔨 In Development
+
+* [ ] Layer 3 router forwarding
+* [ ] Router interface configuration
+* [ ] Gateway-aware communication
+* [ ] Inter-subnet communication
+* [ ] Routing table simulation
+* [ ] Next-hop forwarding decisions
+* [ ] Improved packet/frame simulation
+* [ ] More advanced network failure scenarios
+
+## 🔮 Future
+
+* [ ] IPv6 support
+* [ ] VLAN simulation
+* [ ] ARP simulation
+* [ ] DHCP simulation
+* [ ] DNS simulation
+* [ ] NAT simulation
+* [ ] Static routing
+* [ ] Dynamic routing concepts
+* [ ] VLSM calculator
+* [ ] Network topology export/import
+* [ ] Save/load network projects
+* [ ] Packet inspection
+* [ ] Advanced protocol simulation
+* [ ] Network performance visualization
+* [ ] Educational labs and guided exercises
+
+---
+
+# 🧪 Development Philosophy
+
+NE-Toolkit is designed around three principles:
+
+### 1. Learn
+
+Networking concepts should be understandable through interaction rather than theory alone.
+
+### 2. Experiment
+
+Users should be able to build a topology, configure devices, change network parameters, and observe the results.
+
+### 3. Visualize
+
+Networking processes such as frame forwarding, topology paths, and device relationships should be represented visually.
+
+---
+
+# ⚡ Getting Started
+
+NE-Toolkit requires no installation or package manager.
+
+### Option 1 — Open directly
+
+Clone or download the repository and open:
+
+```text
+index.html
+```
+
+in a modern browser.
+
+### Option 2 — Run a local server
+
+For the best experience with the Network Lab, run a local HTTP server:
+
+```bash
+python -m http.server 8765
+```
+
+Then open:
+
+```text
+http://localhost:8765
+```
+
+---
+
+# 💻 Browser Compatibility
+
+NE-Toolkit targets modern browsers supporting current HTML, CSS, and JavaScript APIs.
+
+Recommended:
+
+* Google Chrome
+* Microsoft Edge
+* Mozilla Firefox
+* Safari
+* Chromium-based browsers
+
+---
+
+# 📊 Current Project Status
+
+| Component                    | Status            |
+| ---------------------------- | ----------------- |
+| Subnet Calculator            | ✅ Complete        |
+| Binary Converter             | ✅ Complete        |
+| CIDR Converter               | ✅ Complete        |
+| Network Lab                  | ✅ Active          |
+| Device Placement             | ✅ Complete        |
+| Topology Connections         | ✅ Complete        |
+| Device Configuration         | ✅ Complete        |
+| Switch Simulation            | ✅ Complete        |
+| MAC Learning Runtime         | ✅ Complete        |
+| Frame Visualization          | ✅ Complete        |
+| Connection Testing           | ✅ Complete        |
+| Undo / Redo                  | ✅ Complete        |
+| Layer 3 Routing              | 🚧 In Development |
+| Router Forwarding            | 🚧 In Development |
+| Advanced Protocol Simulation | 🔮 Planned        |
+
+---
+
+# 🎯 Project Goal
+
+The long-term goal of NE-Toolkit is to create a lightweight, accessible network engineering environment that allows students and networking enthusiasts to **build, configure, visualize, and experiment with computer networks directly from a web browser**.
+
+Rather than being limited to static calculators, the project is evolving toward an interactive network simulation platform where networking concepts can be explored through practical experimentation.
+
+---
+
+# 🤝 Contributing
+
+Contributions, ideas, bug reports, and suggestions are welcome.
+
+If you find an issue or have an idea for improving the Network Lab, feel free to open an issue or submit a pull request.
+
+---
+
+# 📜 License
+
+This project is free to use and modify for personal or educational purposes.
+
+---
+
+## ❤️ Built for Network Engineers
+
+**NE-Toolkit**
+
+*Learn networking. Build networks. Simulate the concepts.*
