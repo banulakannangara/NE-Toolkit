@@ -198,14 +198,17 @@ function subnetMaskToCIDR(mask) {
     const num = ipToNumber(mask);
     if (num === null) return null;
 
-    // Check if it's a valid subnet mask (contiguous 1s followed by 0s)
+    // Check if it's a valid subnet mask (contiguous 1s followed by 0s).
+    // Use >>> 0 to keep all values as unsigned 32-bit so the === check
+    // doesn't fail when the MSB is set (e.g. 0x80000000 is -2147483648
+    // as a signed int but 2147483648 as unsigned).
     let prefix = 0;
-    let currentNum = 0x80000000;
-    
+    let currentNum = 0x80000000 >>> 0;
+
     for (let i = 0; i < 32; i++) {
-        if ((num & currentNum) === currentNum) {
+        if ((num & currentNum) >>> 0 === currentNum) {
             prefix++;
-            currentNum >>>= 1;
+            currentNum = (currentNum >>> 1) >>> 0;
         } else {
             break;
         }

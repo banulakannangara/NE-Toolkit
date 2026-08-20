@@ -25,6 +25,7 @@ body {
 .network-lab-page {
     min-height: 100vh;
     padding: 1.25rem;
+    padding-top: 84px;
 }
 
 .lab-toolbar {

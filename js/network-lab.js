@@ -669,6 +669,8 @@ function handleDeviceSelection(deviceId, event) {
                 ? `Frame delivered: ${sourceDevice.name} → ${destinationDevice.name}`
                 : `Frame failed: ${networkState.lastFrameResult.reason}`);
             render();
+            const isDelivered = Boolean(networkState.lastFrameResult.success);
+            const dropReason = networkState.lastFrameResult.reason || 'Frame dropped along topology path.';
             startFrameAnimation(networkState.lastFrameResult.path, {
                 onDelivered: () => {
                     if (networkState.lastFrameResult?.animationState !== 'in-progress') {
@@ -687,20 +689,20 @@ function handleDeviceSelection(deviceId, event) {
                     if (networkState.lastFrameResult?.animationState !== 'in-progress') {
                         return;
                     }
+                    const finalReason = reason || dropReason;
                     networkState.lastFrameResult.animationState = 'dropped';
                     networkState.lastFrameResult.success = false;
-                    networkState.lastFrameResult.reason = reason;
+                    networkState.lastFrameResult.reason = finalReason;
                     networkState.lastFrameResult.action = 'DROP';
-                    networkState.lastFrameResult.events.push(`Frame dropped: ${reason}`);
                     networkState.sendFrameState = {
                         phase: 'complete',
                         sourceId: sourceDevice.id,
-                        message: reason
+                        message: finalReason
                     };
-                    updateStatus(`Frame failed: ${reason}`);
+                    updateStatus(`Frame failed: ${finalReason}`);
                     render();
                 }
-            });
+            }, isDelivered, dropReason);
             return;
         }
     }
@@ -875,6 +877,7 @@ function undo() {
         return;
     }
 
+    cancelFrameAnimation();
     const snapshot = networkState.history.pop();
     networkState.future.push(createLabSnapshot());
 
@@ -894,6 +897,7 @@ function redo() {
         return;
     }
 
+    cancelFrameAnimation();
     const snapshot = networkState.future.pop();
     networkState.history.push(createLabSnapshot());
 
@@ -1009,10 +1013,18 @@ function renderDevices() {
 
             const canvas = document.getElementById('networkCanvas');
             const rect = canvas.getBoundingClientRect();
+            const startSnapshot = createLabSnapshot();
+            startSnapshot.selectedDeviceId = device.id;
+            startSnapshot.selectedConnectionId = null;
+
             dragState = {
                 deviceId: device.id,
                 offsetX: event.clientX - rect.left - device.x,
-                offsetY: event.clientY - rect.top - device.y
+                offsetY: event.clientY - rect.top - device.y,
+                initialX: device.x,
+                initialY: device.y,
+                startSnapshot,
+                hasMoved: false
             };
             selectDevice(device.id);
             document.addEventListener('pointermove', handlePointerMove);
@@ -1036,18 +1048,35 @@ function handlePointerMove(event) {
         return;
     }
 
-    device.x = clamp(event.clientX - rect.left - dragState.offsetX, 24, Math.max(90, rect.width - 136));
-    device.y = clamp(event.clientY - rect.top - dragState.offsetY, 24, Math.max(90, rect.height - 126));
-    render();
+    const nextX = clamp(event.clientX - rect.left - dragState.offsetX, 24, Math.max(90, rect.width - 136));
+    const nextY = clamp(event.clientY - rect.top - dragState.offsetY, 24, Math.max(90, rect.height - 126));
+
+    if (nextX !== device.x || nextY !== device.y) {
+        device.x = nextX;
+        device.y = nextY;
+        dragState.hasMoved = true;
+        render();
+    }
 }
 
 function endPointerDrag() {
+    if (dragState) {
+        const device = getDeviceById(dragState.deviceId);
+        if (device && dragState.startSnapshot && dragState.hasMoved && (device.x !== dragState.initialX || device.y !== dragState.initialY)) {
+            networkState.history.push(dragState.startSnapshot);
+            if (networkState.history.length > 30) {
+                networkState.history.shift();
+            }
+            networkState.future = [];
+            updateToolbarButtons();
+        }
+    }
     dragState = null;
     document.removeEventListener('pointermove', handlePointerMove);
     render();
 }
 
-function startFrameAnimation(path, callbacks = {}) {
+function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReason = '') {
     cancelFrameAnimation();
 
     if (!Array.isArray(path) || path.length < 2) {
@@ -1090,6 +1119,8 @@ function startFrameAnimation(path, callbacks = {}) {
         clearFrameDeviceHighlights();
         if (delivered) {
             setFrameDeviceHighlight(path[path.length - 1], 'is-frame-destination');
+        } else {
+            setFrameDeviceHighlight(path[path.length - 1], 'is-frame-dropped');
         }
 
         animation.cleanupTimer = window.setTimeout(() => {
@@ -1102,7 +1133,7 @@ function startFrameAnimation(path, callbacks = {}) {
             if (delivered) {
                 callbacks.onDelivered?.();
             } else {
-                callbacks.onDropped?.(reason || 'Topology changed before the frame reached its destination.');
+                callbacks.onDropped?.(reason || dropReason || 'Topology changed before the frame reached its destination.');
             }
         }, delivered ? 480 : 720);
     };
@@ -1126,7 +1157,7 @@ function startFrameAnimation(path, callbacks = {}) {
         if (hopIndex > 0) {
             setFrameDeviceHighlight(sourceId, 'is-frame-hop');
         }
-        setFrameDeviceHighlight(targetId, hopIndex === path.length - 2 ? 'is-frame-destination' : 'is-frame-hop');
+        setFrameDeviceHighlight(targetId, hopIndex === path.length - 2 ? (isDelivered ? 'is-frame-destination' : 'is-frame-dropped') : 'is-frame-hop');
 
         const distance = Math.hypot(initialTarget.x - initialSource.x, initialTarget.y - initialSource.y);
         const duration = clamp(distance * 2.2, 420, 1100);
@@ -1159,7 +1190,7 @@ function startFrameAnimation(path, callbacks = {}) {
             if (hopIndex < path.length - 2) {
                 animateHop(hopIndex + 1);
             } else {
-                finish(true);
+                finish(isDelivered, dropReason);
             }
         };
 
@@ -1614,10 +1645,10 @@ function getInspectorValue(device, field) {
 function getInspectorValidity(device, draft) {
     const fields = getSupportedConfigFields(device);
     const values = {
-        ip: Object.prototype.hasOwnProperty.call(draft, 'ip') ? draft.ip : device.ip,
-        subnetMask: Object.prototype.hasOwnProperty.call(draft, 'subnetMask') ? draft.subnetMask : device.subnetMask,
-        gateway: Object.prototype.hasOwnProperty.call(draft, 'gateway') ? draft.gateway : device.gateway,
-        mac: Object.prototype.hasOwnProperty.call(draft, 'mac') ? draft.mac : device.mac
+        ip: (Object.prototype.hasOwnProperty.call(draft, 'ip') ? draft.ip : device.ip) || '',
+        subnetMask: (Object.prototype.hasOwnProperty.call(draft, 'subnetMask') ? draft.subnetMask : device.subnetMask) || '',
+        gateway: (Object.prototype.hasOwnProperty.call(draft, 'gateway') ? draft.gateway : device.gateway) || '',
+        mac: (Object.prototype.hasOwnProperty.call(draft, 'mac') ? draft.mac : device.mac) || ''
     };
 
     if (fields.ip && values.ip !== '' && !isValidIPv4(values.ip)) {
@@ -1632,8 +1663,13 @@ function getInspectorValidity(device, draft) {
         return false;
     }
 
-    if (fields.mac && values.mac !== '' && !isValidMacAddress(values.mac)) {
-        return false;
+    if (fields.mac && values.mac !== '') {
+        if (!isValidMacAddress(values.mac)) {
+            return false;
+        }
+        if (findDeviceByMac(values.mac, device.id)) {
+            return false;
+        }
     }
 
     return true;
@@ -1866,14 +1902,26 @@ function refreshInspectorValidation(device) {
 
         if (!value) {
             feedbackText = '';
+        } else if (field === 'mac') {
+            if (!isValidMacAddress(value)) {
+                feedbackText = '✗ Invalid MAC address';
+                feedbackClass = 'property-feedback--error';
+            } else {
+                const duplicateDevice = findDeviceByMac(value, device.id);
+                if (duplicateDevice) {
+                    feedbackText = `✗ MAC address already in use by ${duplicateDevice.name}`;
+                    feedbackClass = 'property-feedback--error';
+                } else {
+                    feedbackText = '✓ Valid';
+                    feedbackClass = 'property-feedback--success';
+                }
+            }
         } else {
             const valid = field === 'ip'
                 ? isValidIPv4(value)
                 : field === 'subnetMask'
                     ? isValidSubnetMask(value)
-                    : field === 'gateway'
-                        ? isValidIPv4(value)
-                        : isValidMacAddress(value);
+                    : isValidIPv4(value);
 
             if (valid) {
                 feedbackText = '✓ Valid';
@@ -1883,9 +1931,7 @@ function refreshInspectorValidation(device) {
                     ? '✗ Invalid IPv4 address'
                     : field === 'subnetMask'
                         ? '✗ Invalid subnet mask'
-                        : field === 'gateway'
-                            ? '✗ Invalid gateway'
-                            : '✗ Invalid MAC address';
+                        : '✗ Invalid gateway';
                 feedbackClass = 'property-feedback--error';
             }
         }
@@ -2126,6 +2172,20 @@ function normalizeMacAddress(value) {
     return cleaned.match(/.{1,2}/g).join(':');
 }
 
+function findDeviceByMac(mac, excludeDeviceId = null, existingDevices = networkState.devices) {
+    const normalized = normalizeMacAddress(mac);
+    if (!normalized) {
+        return null;
+    }
+    return existingDevices.find((device) =>
+        device.id !== excludeDeviceId && normalizeMacAddress(device.mac) === normalized
+    ) || null;
+}
+
+function isMacAddressInUse(mac, excludeDeviceId = null, existingDevices = networkState.devices) {
+    return Boolean(findDeviceByMac(mac, excludeDeviceId, existingDevices));
+}
+
 function generateMacAddress(existingDevices = networkState.devices) {
     const prefix = '02:4A:7B:10:00:';
     let counter = 1;
@@ -2351,7 +2411,19 @@ function simulateSendFrame(sourceDevice, destinationDevice) {
         events: []
     };
 
-    let action = 'FLOOD';
+    if (!topologyPath || topologyPath.length < 2) {
+        return {
+            success: false,
+            reason: 'No physical topology path exists between devices.',
+            path: sourceDevice ? [sourceDevice.id] : [],
+            action: 'DROP',
+            events: ['No topology connection between source and destination']
+        };
+    }
+
+    let action = 'FORWARD';
+    const traversedPath = [topologyPath[0]];
+
     for (let i = 0; i < topologyPath.length - 1; i += 1) {
         const fromId = topologyPath[i];
         const toId = topologyPath[i + 1];
@@ -2359,28 +2431,63 @@ function simulateSendFrame(sourceDevice, destinationDevice) {
         const toDevice = getDeviceById(toId);
 
         if (!fromDevice || !toDevice) {
-            continue;
+            frame.events.push('Topology link broken during transmission');
+            return {
+                success: false,
+                reason: 'A device on the topology path is missing.',
+                path: traversedPath,
+                action: 'DROP',
+                events: frame.events
+            };
         }
+
+        traversedPath.push(toId);
 
         if (toDevice.type === 'switch') {
             const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
             frame.events.push(`Frame entered ${toDevice.name} on ${ingressPort}`);
 
             learnSwitchMac(toDevice.id, frame.sourceMac, sourceDevice.id, ingressPort);
-            frame.events.push(`Switch ${toDevice.name} learned ${sourceDevice.name} MAC → ${ingressPort}`);
+            frame.events.push(`Switch ${toDevice.name} learned ${sourceDevice.name} MAC (${frame.sourceMac}) → ${ingressPort}`);
+
+            const nextHopId = topologyPath[i + 2];
+            const expectedEgressPort = nextHopId ? getPortForSwitchAndNeighbor(toDevice.id, nextHopId) : null;
 
             const destEntry = getSwitchMacEntry(toDevice.id, frame.destinationMac);
-            if (destEntry && destEntry.port !== ingressPort) {
-                frame.events.push(`Destination MAC found → ${destEntry.port}`);
-                frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}`);
-                action = 'FORWARD';
-            } else if (destEntry && destEntry.port === ingressPort) {
-                frame.events.push(`Destination MAC found on incoming port`);
-                action = 'LOCAL';
-            } else {
-                frame.events.push('Destination MAC unknown');
-                frame.events.push(`Switch ${toDevice.name} flooded frame`);
+            if (!destEntry) {
+                frame.events.push(`Destination MAC (${frame.destinationMac}) unknown in MAC table`);
+                frame.events.push(`Switch ${toDevice.name} flooded frame on all ports except ${ingressPort}`);
                 action = 'FLOOD';
+            } else if (destEntry.port === ingressPort) {
+                frame.events.push(`Destination MAC (${frame.destinationMac}) found on incoming port ${ingressPort}`);
+                frame.events.push(`Switch ${toDevice.name} filtered (dropped) frame — destination is on incoming segment`);
+                action = 'DROP';
+                return {
+                    success: false,
+                    reason: `Switch ${toDevice.name} filtered frame (destination is on ingress port ${ingressPort}).`,
+                    path: traversedPath,
+                    action: 'DROP',
+                    events: frame.events
+                };
+            } else if (expectedEgressPort && destEntry.port === expectedEgressPort) {
+                frame.events.push(`Destination MAC found in MAC table → ${destEntry.port}`);
+                frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}`);
+                if (action !== 'FLOOD') {
+                    action = 'FORWARD';
+                }
+            } else if (expectedEgressPort && destEntry.port !== expectedEgressPort) {
+                frame.events.push(`Destination MAC mapped to ${destEntry.port} (mismatch with path to destination)`);
+                frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}; frame misdirected and dropped`);
+                action = 'DROP';
+                return {
+                    success: false,
+                    reason: `Switch ${toDevice.name} misdirected frame via ${destEntry.port}.`,
+                    path: traversedPath,
+                    action: 'DROP',
+                    events: frame.events
+                };
+            } else {
+                frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}`);
             }
         }
     }
@@ -2390,7 +2497,7 @@ function simulateSendFrame(sourceDevice, destinationDevice) {
     return {
         success: true,
         reason: '',
-        path: topologyPath,
+        path: traversedPath,
         action,
         events: frame.events
     };
