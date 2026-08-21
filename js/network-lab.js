@@ -40,6 +40,7 @@ const networkState = {
     sendFrameState: null,
     lastFrameResult: null,
     switchRuntime: {},
+    routerRuntime: {},
     typeCounters: {},
     connectionCounter: 0,
     connectionTestState: null,
@@ -157,7 +158,8 @@ function createLabSnapshot() {
         connectionSourceId: networkState.connectionSourceId,
         connectionTestState: networkState.connectionTestState,
         lastConnectionTestResult: networkState.lastConnectionTestResult,
-        switchRuntime: networkState.switchRuntime
+        switchRuntime: networkState.switchRuntime,
+        routerRuntime: networkState.routerRuntime
     }));
 }
 
@@ -256,7 +258,7 @@ function handleToolbarAction(action) {
         cancelFrameAnimation();
         networkState.sendFrameState = null;
         networkState.lastFrameResult = null;
-        if (networkState.connectionTestState) {
+        if (networkState.connectionTestState && networkState.connectionTestState.phase !== 'complete') {
             networkState.connectionTestState = null;
             networkState.lastConnectionTestResult = null;
             updateStatus('Connection test cancelled.');
@@ -272,7 +274,7 @@ function handleToolbarAction(action) {
     }
 
     if (action === 'sendFrame') {
-        if (networkState.sendFrameState) {
+        if (networkState.sendFrameState && networkState.sendFrameState.phase !== 'complete') {
             cancelFrameAnimation();
             networkState.sendFrameState = null;
             networkState.lastFrameResult = null;
@@ -401,24 +403,61 @@ function addDevice(type, x, y) {
     }
 
     const canvas = document.getElementById('networkCanvas');
-    const rect = canvas.getBoundingClientRect();
+    const rect = canvas ? canvas.getBoundingClientRect() : { width: 800, height: 600 };
     const safeWidth = Math.max(90, rect.width - 140);
     const safeHeight = Math.max(90, rect.height - 130);
 
     const counter = networkState.typeCounters[type] || 0;
     networkState.typeCounters[type] = counter + 1;
 
-    const device = {
-        id: `${DEVICE_DEFINITIONS[type].label}${counter}`,
-        type,
-        name: `${DEVICE_DEFINITIONS[type].label}${counter}`,
-        x: clamp(x - 56, 24, safeWidth),
-        y: clamp(y - 48, 24, safeHeight),
-        ip: '',
-        subnetMask: '',
-        gateway: '',
-        mac: generateMacAddress(networkState.devices)
-    };
+    let device;
+    if (type === 'router') {
+        const mac1 = generateMacAddress(networkState.devices);
+        const tempDevice = {
+            id: `${DEVICE_DEFINITIONS[type].label}${counter}`,
+            type: 'router',
+            interfaces: {
+                'Gig0/0': { name: 'Gig0/0', mac: mac1, status: 'up' }
+            }
+        };
+        const mac2 = generateMacAddress([...networkState.devices, tempDevice]);
+
+        device = {
+            id: `${DEVICE_DEFINITIONS[type].label}${counter}`,
+            type,
+            name: `${DEVICE_DEFINITIONS[type].label}${counter}`,
+            x: clamp(x - 56, 24, safeWidth),
+            y: clamp(y - 48, 24, safeHeight),
+            interfaces: {
+                'Gig0/0': {
+                    name: 'Gig0/0',
+                    ip: '',
+                    subnetMask: '',
+                    mac: mac1,
+                    status: 'up'
+                },
+                'Gig0/1': {
+                    name: 'Gig0/1',
+                    ip: '',
+                    subnetMask: '',
+                    mac: mac2,
+                    status: 'up'
+                }
+            }
+        };
+    } else {
+        device = {
+            id: `${DEVICE_DEFINITIONS[type].label}${counter}`,
+            type,
+            name: `${DEVICE_DEFINITIONS[type].label}${counter}`,
+            x: clamp(x - 56, 24, safeWidth),
+            y: clamp(y - 48, 24, safeHeight),
+            ip: '',
+            subnetMask: '',
+            gateway: '',
+            mac: generateMacAddress(networkState.devices)
+        };
+    }
 
     pushHistory();
     networkState.devices.push(device);
@@ -456,6 +495,7 @@ function clearCanvas() {
     networkState.lastFrameResult = null;
     cancelFrameAnimation();
     networkState.switchRuntime = {};
+    networkState.routerRuntime = {};
     networkState.typeCounters = {};
     networkState.connectionCounter = 0;
     networkState.connectionTestState = null;
@@ -522,6 +562,7 @@ function deleteDevice(deviceId) {
     }
     networkState.selectedConnectionId = null;
     networkState.connectionSourceId = null;
+    delete networkState.routerRuntime[deviceId];
     delete inspectorDrafts[deviceId];
 
     updateStatus(`${device.name} removed.`);
@@ -571,6 +612,19 @@ function addConnection(sourceId, targetId) {
 
     if (existing) {
         updateStatus('That connection already exists.');
+        return;
+    }
+
+    const sourceDevice = getDeviceById(sourceId);
+    const targetDevice = getDeviceById(targetId);
+
+    if (sourceDevice?.type === 'router' && getRouterAvailablePortCount(sourceId) === 0) {
+        updateStatus(`${sourceDevice.name} has no available interfaces (Gig0/0 and Gig0/1 are in use).`);
+        return;
+    }
+
+    if (targetDevice?.type === 'router' && getRouterAvailablePortCount(targetId) === 0) {
+        updateStatus(`${targetDevice.name} has no available interfaces (Gig0/0 and Gig0/1 are in use).`);
         return;
     }
 
@@ -919,6 +973,7 @@ function restoreSnapshot(snapshot) {
     networkState.connectionTestState = snapshot.connectionTestState || null;
     networkState.lastConnectionTestResult = snapshot.lastConnectionTestResult || null;
     networkState.switchRuntime = snapshot.switchRuntime || {};
+    networkState.routerRuntime = snapshot.routerRuntime || {};
     inspectorDrafts = {};
 }
 
@@ -1004,12 +1059,24 @@ function renderDevices() {
             selectDevice(device.id);
         });
         element.addEventListener('pointerdown', (event) => {
-            if (networkState.mode !== 'select' || !canEditTopology()) {
-                if (!canEditTopology()) {
-                    reportEditingLocked();
-                }
+            // For Test Connection and Send Frame modes, do NOT consume the event here.
+            // Those modes rely on the `click` event reaching handleDeviceSelection.
+            if (networkState.connectionTestState || networkState.sendFrameState) {
                 return;
             }
+
+            if (!canEditTopology()) {
+                reportEditingLocked();
+                return;
+            }
+
+            if (networkState.mode !== 'select') {
+                return;
+            }
+
+            // Select the device immediately on pointerdown so selection is
+            // registered even if render() replaces the DOM before click fires.
+            selectDevice(device.id);
 
             const canvas = document.getElementById('networkCanvas');
             const rect = canvas.getBoundingClientRect();
@@ -1026,7 +1093,6 @@ function renderDevices() {
                 startSnapshot,
                 hasMoved: false
             };
-            selectDevice(device.id);
             document.addEventListener('pointermove', handlePointerMove);
             document.addEventListener('pointerup', endPointerDrag, { once: true });
         });
@@ -1069,6 +1135,12 @@ function endPointerDrag() {
             }
             networkState.future = [];
             updateToolbarButtons();
+        } else if (device && !dragState.hasMoved) {
+            // Pure click (no drag): ensure selection is up to date.
+            // The selectDevice call in pointerdown already set state, but
+            // re-assert it here in case render() was called during the press.
+            networkState.selectedDeviceId = device.id;
+            networkState.selectedConnectionId = null;
         }
     }
     dragState = null;
@@ -1275,6 +1347,25 @@ function renderPropertiesPanel() {
     const selected = getDeviceById(networkState.selectedDeviceId);
 
     if (selectedConnection) {
+        const sourceDev = getDeviceById(selectedConnection.source);
+        const targetDev = getDeviceById(selectedConnection.target);
+        const sourcePort = sourceDev?.type === 'switch'
+            ? getSwitchPortLabel(sourceDev.id, selectedConnection.id)
+            : sourceDev?.type === 'router'
+                ? getRouterPortLabel(sourceDev.id, selectedConnection.id)
+                : null;
+        const targetPort = targetDev?.type === 'switch'
+            ? getSwitchPortLabel(targetDev.id, selectedConnection.id)
+            : targetDev?.type === 'router'
+                ? getRouterPortLabel(targetDev.id, selectedConnection.id)
+                : null;
+        const sourceLabel = sourcePort
+            ? `${selectedConnection.source} (${sourcePort})`
+            : selectedConnection.source;
+        const targetLabel = targetPort
+            ? `${selectedConnection.target} (${targetPort})`
+            : selectedConnection.target;
+
         panel.innerHTML = `
             <div class="property-card">
                 <h3>Connection</h3>
@@ -1289,11 +1380,11 @@ function renderPropertiesPanel() {
                     </div>
                     <div class="property-field">
                         <label>Source</label>
-                        <input type="text" value="${escapeHtml(selectedConnection.source)}" readonly>
+                        <input type="text" value="${escapeHtml(sourceLabel)}" readonly>
                     </div>
                     <div class="property-field">
                         <label>Target</label>
-                        <input type="text" value="${escapeHtml(selectedConnection.target)}" readonly>
+                        <input type="text" value="${escapeHtml(targetLabel)}" readonly>
                     </div>
                 </div>
                 <p class="property-info">This connection can be deleted with the toolbar or the keyboard shortcut when the inspector is not focused.</p>
@@ -1344,120 +1435,124 @@ function renderPropertiesPanel() {
         return;
     }
 
-    const supports = getSupportedConfigFields(selected);
-    const draft = getInspectorDraft(selected);
-    const nameValue = escapeHtml(getInspectorValue(selected, 'name'));
-    const ipValue = escapeHtml(getInspectorValue(selected, 'ip'));
-    const subnetValue = escapeHtml(getInspectorValue(selected, 'subnetMask'));
-    const gatewayValue = escapeHtml(getInspectorValue(selected, 'gateway'));
-    const macValue = escapeHtml(getInspectorValue(selected, 'mac'));
-    const isValid = getInspectorValidity(selected, draft);
-    const summary = getConfigurationSummary(selected);
+    if (selected.type === 'router') {
+        panel.innerHTML = renderRouterInspector(selected);
+    } else {
+        const supports = getSupportedConfigFields(selected);
+        const draft = getInspectorDraft(selected);
+        const nameValue = escapeHtml(getInspectorValue(selected, 'name'));
+        const ipValue = escapeHtml(getInspectorValue(selected, 'ip'));
+        const subnetValue = escapeHtml(getInspectorValue(selected, 'subnetMask'));
+        const gatewayValue = escapeHtml(getInspectorValue(selected, 'gateway'));
+        const macValue = escapeHtml(getInspectorValue(selected, 'mac'));
+        const isValid = getInspectorValidity(selected, draft);
+        const summary = getConfigurationSummary(selected);
 
-    panel.innerHTML = `
-        <div class="property-card">
-            <h3>${escapeHtml(selected.name)}</h3>
-            <div class="property-grid">
-                <div class="property-section">
-                    <h4>DEVICE</h4>
-                    <div class="property-field">
-                        <label for="deviceName">Device Name</label>
-                        <input id="deviceName" type="text" value="${nameValue}" data-field="name" placeholder="Device name">
-                        <div class="property-feedback" data-feedback-for="name"></div>
-                    </div>
-                    <div class="property-field">
-                        <label>Device Type</label>
-                        <input type="text" value="${escapeHtml(DEVICE_DEFINITIONS[selected.type].label)}" readonly>
-                    </div>
-                    <div class="property-field">
-                        <label>Device ID</label>
-                        <input type="text" value="${escapeHtml(selected.id)}" readonly>
-                    </div>
-                    <div class="property-field">
-                        <label>Position</label>
-                        <input type="text" value="${Math.round(selected.x)}, ${Math.round(selected.y)}" readonly>
-                    </div>
-                </div>
-                ${supports.ip || supports.subnetMask || supports.gateway || supports.mac ? `
+        panel.innerHTML = `
+            <div class="property-card">
+                <h3>${escapeHtml(selected.name)}</h3>
+                <div class="property-grid">
                     <div class="property-section">
-                        <h4>NETWORK CONFIGURATION</h4>
-                        ${supports.ip ? `
-                            <div class="property-field">
-                                <label for="deviceIp">IP Address</label>
-                                <input id="deviceIp" type="text" value="${ipValue}" data-field="ip" placeholder="Not configured">
-                                <div class="property-feedback" data-feedback-for="ip"></div>
-                            </div>
-                        ` : ''}
-                        ${supports.subnetMask ? `
-                            <div class="property-field">
-                                <label for="deviceSubnet">Subnet Mask</label>
-                                <input id="deviceSubnet" type="text" value="${subnetValue}" data-field="subnetMask" placeholder="Not configured">
-                                <div class="property-feedback" data-feedback-for="subnetMask"></div>
-                            </div>
-                        ` : ''}
-                        ${supports.gateway ? `
-                            <div class="property-field">
-                                <label for="deviceGateway">Default Gateway</label>
-                                <input id="deviceGateway" type="text" value="${gatewayValue}" data-field="gateway" placeholder="Not configured">
-                                <div class="property-feedback" data-feedback-for="gateway"></div>
-                            </div>
-                        ` : ''}
-                        ${supports.mac ? `
-                            <div class="property-field">
-                                <label for="deviceMac">MAC Address</label>
-                                <input id="deviceMac" type="text" value="${macValue}" data-field="mac" placeholder="Not configured">
-                                <div class="property-feedback" data-feedback-for="mac"></div>
-                            </div>
-                        ` : ''}
+                        <h4>DEVICE</h4>
+                        <div class="property-field">
+                            <label for="deviceName">Device Name</label>
+                            <input id="deviceName" type="text" value="${nameValue}" data-field="name" placeholder="Device name">
+                            <div class="property-feedback" data-feedback-for="name"></div>
+                        </div>
+                        <div class="property-field">
+                            <label>Device Type</label>
+                            <input type="text" value="${escapeHtml(DEVICE_DEFINITIONS[selected.type].label)}" readonly>
+                        </div>
+                        <div class="property-field">
+                            <label>Device ID</label>
+                            <input type="text" value="${escapeHtml(selected.id)}" readonly>
+                        </div>
+                        <div class="property-field">
+                            <label>Position</label>
+                            <input type="text" value="${Math.round(selected.x)}, ${Math.round(selected.y)}" readonly>
+                        </div>
                     </div>
-                ` : ''}
-            </div>
-            <div class="property-actions">
-                <button id="applyDeviceConfig" class="toolbar-button" type="button" ${isValid ? '' : 'disabled'}>Apply Changes</button>
-            </div>
-            <div class="property-summary" id="deviceSummary">
-                <h4>NETWORK</h4>
-                <div class="property-summary-grid">
-                    <div class="property-summary-item">
-                        <span>IP</span>
-                        <strong>${escapeHtml(summary.ip)}</strong>
-                    </div>
-                    <div class="property-summary-item">
-                        <span>MASK</span>
-                        <strong>${escapeHtml(summary.mask)}</strong>
-                    </div>
-                    <div class="property-summary-item">
-                        <span>GATEWAY</span>
-                        <strong>${escapeHtml(summary.gateway)}</strong>
-                    </div>
-                    <div class="property-summary-item">
-                        <span>MAC</span>
-                        <strong>${escapeHtml(summary.mac)}</strong>
+                    ${supports.ip || supports.subnetMask || supports.gateway || supports.mac ? `
+                        <div class="property-section">
+                            <h4>NETWORK CONFIGURATION</h4>
+                            ${supports.ip ? `
+                                <div class="property-field">
+                                    <label for="deviceIp">IP Address</label>
+                                    <input id="deviceIp" type="text" value="${ipValue}" data-field="ip" placeholder="Not configured">
+                                    <div class="property-feedback" data-feedback-for="ip"></div>
+                                </div>
+                            ` : ''}
+                            ${supports.subnetMask ? `
+                                <div class="property-field">
+                                    <label for="deviceSubnet">Subnet Mask</label>
+                                    <input id="deviceSubnet" type="text" value="${subnetValue}" data-field="subnetMask" placeholder="Not configured">
+                                    <div class="property-feedback" data-feedback-for="subnetMask"></div>
+                                </div>
+                            ` : ''}
+                            ${supports.gateway ? `
+                                <div class="property-field">
+                                    <label for="deviceGateway">Default Gateway</label>
+                                    <input id="deviceGateway" type="text" value="${gatewayValue}" data-field="gateway" placeholder="Not configured">
+                                    <div class="property-feedback" data-feedback-for="gateway"></div>
+                                </div>
+                            ` : ''}
+                            ${supports.mac ? `
+                                <div class="property-field">
+                                    <label for="deviceMac">MAC Address</label>
+                                    <input id="deviceMac" type="text" value="${macValue}" data-field="mac" placeholder="Not configured">
+                                    <div class="property-feedback" data-feedback-for="mac"></div>
+                                </div>
+                            ` : ''}
+                        </div>
+                    ` : ''}
+                </div>
+                <div class="property-actions">
+                    <button id="applyDeviceConfig" class="toolbar-button" type="button" ${isValid ? '' : 'disabled'}>Apply Changes</button>
+                </div>
+                <div class="property-summary" id="deviceSummary">
+                    <h4>NETWORK</h4>
+                    <div class="property-summary-grid">
+                        <div class="property-summary-item">
+                            <span>IP</span>
+                            <strong>${escapeHtml(summary.ip)}</strong>
+                        </div>
+                        <div class="property-summary-item">
+                            <span>MASK</span>
+                            <strong>${escapeHtml(summary.mask)}</strong>
+                        </div>
+                        <div class="property-summary-item">
+                            <span>GATEWAY</span>
+                            <strong>${escapeHtml(summary.gateway)}</strong>
+                        </div>
+                        <div class="property-summary-item">
+                            <span>MAC</span>
+                            <strong>${escapeHtml(summary.mac)}</strong>
+                        </div>
                     </div>
                 </div>
-            </div>
-            <div class="property-summary" id="deviceNetworkStatus">
-                <h4>NETWORK STATUS</h4>
-                <div class="property-status-message ${escapeHtml(getDeviceStatusClass(selected))}">
-                    ${escapeHtml(getDeviceNetworkStatusText(selected))}
-                </div>
-                ${getDeviceNetworkStatusRows(selected).map((row) => `
-                    <div class="property-status-item">
-                        <span>${escapeHtml(row.label)}</span>
-                        <strong>${escapeHtml(row.value)}</strong>
+                <div class="property-summary" id="deviceNetworkStatus">
+                    <h4>NETWORK STATUS</h4>
+                    <div class="property-status-message ${escapeHtml(getDeviceStatusClass(selected))}">
+                        ${escapeHtml(getDeviceNetworkStatusText(selected))}
                     </div>
-                `).join('')}
-            </div>
-            ${selected.type === 'switch' ? renderSwitchInspector(selected) : ''}
-            <div class="property-summary property-summary--subtle" id="connectionTestPanel">
-                <h4>CONNECTION TEST</h4>
-                <div class="property-status-message ${escapeHtml(getTestStatusClass())}">
-                    ${escapeHtml(getConnectionTestPanelMessage())}
+                    ${getDeviceNetworkStatusRows(selected).map((row) => `
+                        <div class="property-status-item">
+                            <span>${escapeHtml(row.label)}</span>
+                            <strong>${escapeHtml(row.value)}</strong>
+                        </div>
+                    `).join('')}
                 </div>
+                ${selected.type === 'switch' ? renderSwitchInspector(selected) : ''}
+                <div class="property-summary property-summary--subtle" id="connectionTestPanel">
+                    <h4>CONNECTION TEST</h4>
+                    <div class="property-status-message ${escapeHtml(getTestStatusClass())}">
+                        ${escapeHtml(getConnectionTestPanelMessage())}
+                    </div>
+                </div>
+                <p class="property-info">Configuration updates are applied only when you click Apply Changes, so invalid data never overwrites the current device state.</p>
             </div>
-            <p class="property-info">Configuration updates are applied only when you click Apply Changes, so invalid data never overwrites the current device state.</p>
-        </div>
-    `;
+        `;
+    }
 
     panel.querySelectorAll('input[data-field]').forEach((field) => {
         field.addEventListener('input', (event) => {
@@ -1565,6 +1660,104 @@ function attachSendFramePanelEvents() {
     // No additional action buttons required currently.
 }
 
+function renderRouterInspector(selected) {
+    const draft = getInspectorDraft(selected);
+    const nameValue = escapeHtml(getInspectorValue(selected, 'name'));
+    const isValid = getInspectorValidity(selected, draft);
+    const runtime = getRouterRuntime(selected.id);
+
+    const ifaces = ['Gig0/0', 'Gig0/1'];
+    const ifaceCards = ifaces.map((ifName) => {
+        const ifObj = selected.interfaces?.[ifName] || { name: ifName, ip: '', subnetMask: '', mac: '', status: 'up' };
+        const ipVal = escapeHtml(getInspectorValue(selected, `interfaces.${ifName}.ip`));
+        const subnetVal = escapeHtml(getInspectorValue(selected, `interfaces.${ifName}.subnetMask`));
+        const macVal = escapeHtml(getInspectorValue(selected, `interfaces.${ifName}.mac`));
+        const status = ifObj.status || 'up';
+
+        const connectionEntry = Object.entries(runtime.ports).find(([, port]) => port === ifName);
+        let connectedInfo = 'Not connected';
+        if (connectionEntry) {
+            const connObj = getConnectionById(connectionEntry[0]);
+            if (connObj) {
+                const neighborId = connObj.source === selected.id ? connObj.target : connObj.source;
+                const neighbor = getDeviceById(neighborId);
+                if (neighbor) {
+                    if (neighbor.type === 'switch') {
+                        const switchPort = getSwitchPortLabel(neighbor.id, connObj.id);
+                        connectedInfo = `Connected: ${neighbor.name} (${switchPort})`;
+                    } else if (neighbor.type === 'router') {
+                        const neighborPort = getRouterPortLabel(neighbor.id, connObj.id);
+                        connectedInfo = `Connected: ${neighbor.name} (${neighborPort})`;
+                    } else {
+                        connectedInfo = `Connected: ${neighbor.name}`;
+                    }
+                }
+            }
+        }
+
+        return `
+            <div class="router-interface-card">
+                <div class="router-interface-header">
+                    <h5 class="router-interface-title">${escapeHtml(ifName)}</h5>
+                    <span class="router-interface-status router-interface-status--${status === 'up' ? 'up' : 'down'}">${escapeHtml(status.toUpperCase())}</span>
+                </div>
+                <p class="router-interface-connection">${escapeHtml(connectedInfo)}</p>
+                <div class="property-field">
+                    <label for="router_${escapeHtml(ifName)}_ip">IPv4 Address</label>
+                    <input id="router_${escapeHtml(ifName)}_ip" type="text" value="${ipVal}" data-field="interfaces.${escapeHtml(ifName)}.ip" placeholder="Not configured">
+                    <div class="property-feedback" data-feedback-for="interfaces.${escapeHtml(ifName)}.ip"></div>
+                </div>
+                <div class="property-field">
+                    <label for="router_${escapeHtml(ifName)}_subnet">Subnet Mask</label>
+                    <input id="router_${escapeHtml(ifName)}_subnet" type="text" value="${subnetVal}" data-field="interfaces.${escapeHtml(ifName)}.subnetMask" placeholder="Not configured">
+                    <div class="property-feedback" data-feedback-for="interfaces.${escapeHtml(ifName)}.subnetMask"></div>
+                </div>
+                <div class="property-field">
+                    <label for="router_${escapeHtml(ifName)}_mac">MAC Address</label>
+                    <input id="router_${escapeHtml(ifName)}_mac" type="text" value="${macVal}" data-field="interfaces.${escapeHtml(ifName)}.mac" placeholder="Not configured">
+                    <div class="property-feedback" data-feedback-for="interfaces.${escapeHtml(ifName)}.mac"></div>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    return `
+        <div class="property-card">
+            <h3>${escapeHtml(selected.name)}</h3>
+            <div class="property-grid">
+                <div class="property-section">
+                    <h4>DEVICE</h4>
+                    <div class="property-field">
+                        <label for="deviceName">Device Name</label>
+                        <input id="deviceName" type="text" value="${nameValue}" data-field="name" placeholder="Device name">
+                        <div class="property-feedback" data-feedback-for="name"></div>
+                    </div>
+                    <div class="property-field">
+                        <label>Device Type</label>
+                        <input type="text" value="${escapeHtml(DEVICE_DEFINITIONS[selected.type].label)}" readonly>
+                    </div>
+                    <div class="property-field">
+                        <label>Device ID</label>
+                        <input type="text" value="${escapeHtml(selected.id)}" readonly>
+                    </div>
+                    <div class="property-field">
+                        <label>Position</label>
+                        <input type="text" value="${Math.round(selected.x)}, ${Math.round(selected.y)}" readonly>
+                    </div>
+                </div>
+            </div>
+            <div class="property-summary">
+                <h4>INTERFACES</h4>
+                ${ifaceCards}
+            </div>
+            <div class="property-actions">
+                <button id="applyDeviceConfig" class="toolbar-button" type="button" ${isValid ? '' : 'disabled'}>Apply Changes</button>
+            </div>
+            <p class="property-info">Configuration updates are applied only when you click Apply Changes, so invalid data never overwrites the current device state.</p>
+        </div>
+    `;
+}
+
 function renderSwitchInspector(selected) {
     const runtime = getSwitchRuntime(selected.id);
     const portCount = getSwitchPortCount(selected.id);
@@ -1619,12 +1812,16 @@ function renderSwitchInspector(selected) {
 }
 
 function getSupportedConfigFields(device) {
-    if (['pc', 'laptop', 'server', 'router'].includes(device.type)) {
+    if (['pc', 'laptop', 'server'].includes(device.type)) {
         return { ip: true, subnetMask: true, gateway: true, mac: true };
     }
 
     if (device.type === 'switch') {
         return { mac: true };
+    }
+
+    if (device.type === 'router') {
+        return { routerInterfaces: true };
     }
 
     return {};
@@ -1639,10 +1836,53 @@ function getInspectorValue(device, field) {
     if (Object.prototype.hasOwnProperty.call(draft, field)) {
         return draft[field];
     }
+    if (field.startsWith('interfaces.')) {
+        const parts = field.split('.');
+        const ifName = parts[1];
+        const prop = parts[2];
+        return device.interfaces?.[ifName]?.[prop] || '';
+    }
     return device[field] || '';
 }
 
 function getInspectorValidity(device, draft) {
+    if (device.type === 'router') {
+        const ifaces = ['Gig0/0', 'Gig0/1'];
+        const seenMacs = new Set();
+        for (const ifName of ifaces) {
+            const ipVal = (Object.prototype.hasOwnProperty.call(draft, `interfaces.${ifName}.ip`)
+                ? draft[`interfaces.${ifName}.ip`]
+                : device.interfaces?.[ifName]?.ip) || '';
+            const subnetVal = (Object.prototype.hasOwnProperty.call(draft, `interfaces.${ifName}.subnetMask`)
+                ? draft[`interfaces.${ifName}.subnetMask`]
+                : device.interfaces?.[ifName]?.subnetMask) || '';
+            const macVal = (Object.prototype.hasOwnProperty.call(draft, `interfaces.${ifName}.mac`)
+                ? draft[`interfaces.${ifName}.mac`]
+                : device.interfaces?.[ifName]?.mac) || '';
+
+            if (ipVal !== '' && !isValidIPv4(ipVal)) {
+                return false;
+            }
+            if (subnetVal !== '' && !isValidSubnetMask(subnetVal)) {
+                return false;
+            }
+            if (macVal !== '') {
+                if (!isValidMacAddress(macVal)) {
+                    return false;
+                }
+                const normMac = normalizeMacAddress(macVal);
+                if (seenMacs.has(normMac)) {
+                    return false;
+                }
+                seenMacs.add(normMac);
+                if (findDeviceByMac(macVal, device.id, networkState.devices, ifName)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     const fields = getSupportedConfigFields(device);
     const values = {
         ip: (Object.prototype.hasOwnProperty.call(draft, 'ip') ? draft.ip : device.ip) || '',
@@ -1878,7 +2118,6 @@ function refreshInspectorValidation(device) {
         return;
     }
 
-    const supports = getSupportedConfigFields(device);
     const draft = getInspectorDraft(device);
     const isValid = getInspectorValidity(device, draft);
     const applyButton = panel.querySelector('#applyDeviceConfig');
@@ -1886,6 +2125,75 @@ function refreshInspectorValidation(device) {
         applyButton.disabled = !isValid;
     }
 
+    if (device.type === 'router') {
+        const ifaces = ['Gig0/0', 'Gig0/1'];
+        const currentMacs = {};
+        ifaces.forEach((ifName) => {
+            const rawMac = getInspectorValue(device, `interfaces.${ifName}.mac`);
+            currentMacs[ifName] = normalizeMacAddress(rawMac);
+        });
+
+        ifaces.forEach((ifName) => {
+            ['ip', 'subnetMask', 'mac'].forEach((prop) => {
+                const fieldKey = `interfaces.${ifName}.${prop}`;
+                const feedback = panel.querySelector(`[data-feedback-for="${fieldKey}"]`);
+                if (!feedback) {
+                    return;
+                }
+                const val = getInspectorValue(device, fieldKey);
+                let feedbackText = '';
+                let feedbackClass = '';
+
+                if (!val) {
+                    feedbackText = '';
+                } else if (prop === 'mac') {
+                    if (!isValidMacAddress(val)) {
+                        feedbackText = '✗ Invalid MAC address';
+                        feedbackClass = 'property-feedback--error';
+                    } else {
+                        const norm = normalizeMacAddress(val);
+                        const otherIfName = ifName === 'Gig0/0' ? 'Gig0/1' : 'Gig0/0';
+                        if (currentMacs[otherIfName] && currentMacs[otherIfName] === norm) {
+                            feedbackText = `✗ MAC address already used by ${otherIfName}`;
+                            feedbackClass = 'property-feedback--error';
+                        } else {
+                            const duplicate = findDeviceByMac(val, device.id, networkState.devices, ifName);
+                            if (duplicate) {
+                                const ifSuffix = duplicate.matchedInterface ? ` (${duplicate.matchedInterface})` : '';
+                                feedbackText = `✗ MAC address already in use by ${duplicate.name}${ifSuffix}`;
+                                feedbackClass = 'property-feedback--error';
+                            } else {
+                                feedbackText = '✓ Valid';
+                                feedbackClass = 'property-feedback--success';
+                            }
+                        }
+                    }
+                } else if (prop === 'ip') {
+                    if (isValidIPv4(val)) {
+                        feedbackText = '✓ Valid';
+                        feedbackClass = 'property-feedback--success';
+                    } else {
+                        feedbackText = '✗ Invalid IPv4 address';
+                        feedbackClass = 'property-feedback--error';
+                    }
+                } else if (prop === 'subnetMask') {
+                    if (isValidSubnetMask(val)) {
+                        feedbackText = '✓ Valid';
+                        feedbackClass = 'property-feedback--success';
+                    } else {
+                        feedbackText = '✗ Invalid subnet mask';
+                        feedbackClass = 'property-feedback--error';
+                    }
+                }
+
+                feedback.textContent = feedbackText;
+                feedback.className = `property-feedback ${feedbackClass}`.trim();
+            });
+        });
+        return;
+    }
+
+    const supports = getSupportedConfigFields(device);
     Object.entries(supports).forEach(([field, enabled]) => {
         if (!enabled) {
             return;
@@ -1909,7 +2217,8 @@ function refreshInspectorValidation(device) {
             } else {
                 const duplicateDevice = findDeviceByMac(value, device.id);
                 if (duplicateDevice) {
-                    feedbackText = `✗ MAC address already in use by ${duplicateDevice.name}`;
+                    const ifSuffix = duplicateDevice.matchedInterface ? ` (${duplicateDevice.matchedInterface})` : '';
+                    feedbackText = `✗ MAC address already in use by ${duplicateDevice.name}${ifSuffix}`;
                     feedbackClass = 'property-feedback--error';
                 } else {
                     feedbackText = '✓ Valid';
@@ -1951,6 +2260,46 @@ function applyDeviceConfiguration() {
     const isValid = getInspectorValidity(device, draft);
     if (!isValid) {
         updateStatus('Configuration contains invalid values. Fix the highlighted fields before applying changes.');
+        return;
+    }
+
+    if (device.type === 'router') {
+        const nextName = String(draft.name ?? device.name ?? '').trim() || device.name;
+        const ifaces = ['Gig0/0', 'Gig0/1'];
+        const nextInterfaces = {};
+        ifaces.forEach((ifName) => {
+            const cur = device.interfaces?.[ifName] || { name: ifName, ip: '', subnetMask: '', mac: '', status: 'up' };
+            const ipKey = `interfaces.${ifName}.ip`;
+            const maskKey = `interfaces.${ifName}.subnetMask`;
+            const macKey = `interfaces.${ifName}.mac`;
+            const rawIp = Object.prototype.hasOwnProperty.call(draft, ipKey) ? draft[ipKey] : cur.ip;
+            const rawMask = Object.prototype.hasOwnProperty.call(draft, maskKey) ? draft[maskKey] : cur.subnetMask;
+            const rawMac = Object.prototype.hasOwnProperty.call(draft, macKey) ? draft[macKey] : cur.mac;
+            nextInterfaces[ifName] = {
+                name: ifName,
+                ip: String(rawIp || '').trim(),
+                subnetMask: normalizeSubnetMask(String(rawMask || '').trim()) || '',
+                mac: normalizeMacAddress(String(rawMac || '').trim()) || '',
+                status: cur.status || 'up'
+            };
+        });
+
+        const hasChanges = device.name !== nextName
+            || JSON.stringify(device.interfaces) !== JSON.stringify(nextInterfaces);
+
+        if (!hasChanges) {
+            delete inspectorDrafts[device.id];
+            render();
+            return;
+        }
+
+        pushHistory();
+        device.name = nextName;
+        device.interfaces = nextInterfaces;
+        delete inspectorDrafts[device.id];
+
+        updateStatus(`${device.name} configuration updated.`);
+        render();
         return;
     }
 
@@ -2172,30 +2521,80 @@ function normalizeMacAddress(value) {
     return cleaned.match(/.{1,2}/g).join(':');
 }
 
-function findDeviceByMac(mac, excludeDeviceId = null, existingDevices = networkState.devices) {
+function getAllDeviceMacEntries(existingDevices = networkState.devices) {
+    const entries = [];
+    existingDevices.forEach((device) => {
+        if (!device) {
+            return;
+        }
+        if (device.type === 'router' && device.interfaces) {
+            Object.entries(device.interfaces).forEach(([ifName, ifObj]) => {
+                if (ifObj && ifObj.mac) {
+                    const normalized = normalizeMacAddress(ifObj.mac);
+                    if (normalized) {
+                        entries.push({
+                            mac: normalized,
+                            deviceId: device.id,
+                            deviceName: device.name,
+                            interfaceName: ifName
+                        });
+                    }
+                }
+            });
+        } else if (device.mac) {
+            const normalized = normalizeMacAddress(device.mac);
+            if (normalized) {
+                entries.push({
+                    mac: normalized,
+                    deviceId: device.id,
+                    deviceName: device.name,
+                    interfaceName: null
+                });
+            }
+        }
+    });
+    return entries;
+}
+
+function findDeviceByMac(mac, excludeDeviceId = null, existingDevices = networkState.devices, excludeInterface = null) {
     const normalized = normalizeMacAddress(mac);
     if (!normalized) {
         return null;
     }
-    return existingDevices.find((device) =>
-        device.id !== excludeDeviceId && normalizeMacAddress(device.mac) === normalized
-    ) || null;
+    const entries = getAllDeviceMacEntries(existingDevices);
+    const match = entries.find((entry) => {
+        if (excludeDeviceId && entry.deviceId === excludeDeviceId) {
+            if (excludeInterface !== null && excludeInterface !== undefined) {
+                return entry.interfaceName !== excludeInterface && entry.mac === normalized;
+            }
+            return false;
+        }
+        return entry.mac === normalized;
+    });
+    if (!match) {
+        return null;
+    }
+    const targetDev = existingDevices.find((d) => d.id === match.deviceId) || getDeviceById(match.deviceId);
+    return {
+        ...(targetDev || { id: match.deviceId, name: match.deviceName }),
+        matchedInterface: match.interfaceName
+    };
 }
 
-function isMacAddressInUse(mac, excludeDeviceId = null, existingDevices = networkState.devices) {
-    return Boolean(findDeviceByMac(mac, excludeDeviceId, existingDevices));
+function isMacAddressInUse(mac, excludeDeviceId = null, existingDevices = networkState.devices, excludeInterface = null) {
+    return Boolean(findDeviceByMac(mac, excludeDeviceId, existingDevices, excludeInterface));
 }
 
 function generateMacAddress(existingDevices = networkState.devices) {
     const prefix = '02:4A:7B:10:00:';
     let counter = 1;
+    const assignedMacs = new Set(getAllDeviceMacEntries(existingDevices).map((e) => e.mac));
 
     while (true) {
         const octet = counter.toString(16).padStart(2, '0').toUpperCase();
         const candidate = `${prefix}${octet}`;
         const normalized = normalizeMacAddress(candidate);
-        const isDuplicate = existingDevices.some((device) => normalizeMacAddress(device.mac) === normalized);
-        if (normalized && !isDuplicate) {
+        if (normalized && !assignedMacs.has(normalized)) {
             return normalized;
         }
         counter += 1;
@@ -2312,14 +2711,62 @@ function getPortForSwitchAndNeighbor(switchId, neighborId) {
     return getSwitchPortLabel(switchId, connection.id);
 }
 
+function getRouterRuntime(routerId) {
+    if (!networkState.routerRuntime) {
+        networkState.routerRuntime = {};
+    }
+    if (!networkState.routerRuntime[routerId]) {
+        networkState.routerRuntime[routerId] = {
+            ports: {}
+        };
+    }
+    return networkState.routerRuntime[routerId];
+}
+
+function getRouterPortLabel(routerId, connectionId) {
+    const runtime = getRouterRuntime(routerId);
+    if (runtime.ports[connectionId]) {
+        return runtime.ports[connectionId];
+    }
+
+    const existingPorts = new Set(Object.values(runtime.ports));
+    const availablePorts = ['Gig0/0', 'Gig0/1'];
+    for (const port of availablePorts) {
+        if (!existingPorts.has(port)) {
+            runtime.ports[connectionId] = port;
+            return port;
+        }
+    }
+
+    return null;
+}
+
+function getPortForRouterAndNeighbor(routerId, neighborId) {
+    const connection = getConnectionBetween(routerId, neighborId);
+    if (!connection) {
+        return null;
+    }
+    return getRouterPortLabel(routerId, connection.id);
+}
+
+function getRouterAvailablePortCount(routerId) {
+    const runtime = getRouterRuntime(routerId);
+    const usedPorts = Object.keys(runtime.ports).length;
+    return Math.max(0, 2 - usedPorts);
+}
+
 function assignPortsForConnection(connection) {
     const sourceDevice = getDeviceById(connection.source);
     const targetDevice = getDeviceById(connection.target);
     if (sourceDevice?.type === 'switch') {
         getSwitchPortLabel(sourceDevice.id, connection.id);
+    } else if (sourceDevice?.type === 'router') {
+        getRouterPortLabel(sourceDevice.id, connection.id);
     }
     if (targetDevice?.type === 'switch') {
         getSwitchPortLabel(targetDevice.id, connection.id);
+    } else if (targetDevice?.type === 'router') {
+        getRouterPortLabel(targetDevice.id, connection.id);
     }
 }
 
@@ -2329,6 +2776,13 @@ function releasePortAssignmentsForConnection(connectionId) {
             delete runtime.ports[connectionId];
         }
     });
+    if (networkState.routerRuntime) {
+        Object.values(networkState.routerRuntime).forEach((runtime) => {
+            if (Object.prototype.hasOwnProperty.call(runtime.ports, connectionId)) {
+                delete runtime.ports[connectionId];
+            }
+        });
+    }
 }
 
 function getSwitchMacEntry(switchId, mac) {
