@@ -3296,6 +3296,284 @@ runTest('98. Full V5.1-V5.6 end-to-end regression with routing, ARP, MAC learnin
     assert.strictEqual(lookupArp('Router0', '10.0.0.10'), server.mac);
 });
 
+// 99. Test A — Empty ARP cache on newly initialized IP-capable devices
+runTest('99. Test A — Empty ARP cache on newly initialized IP-capable devices', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('laptop', 200, 100);
+    addDevice('server', 300, 100);
+    addDevice('router', 400, 100);
+
+    const pc = networkState.devices[0];
+    const laptop = networkState.devices[1];
+    const server = networkState.devices[2];
+    const router = networkState.devices[3];
+
+    assert.strictEqual(getArpTable(pc.id).length, 0, 'PC ARP table must start empty');
+    assert.strictEqual(getArpTable(laptop.id).length, 0, 'Laptop ARP table must start empty');
+    assert.strictEqual(getArpTable(server.id).length, 0, 'Server ARP table must start empty');
+    assert.strictEqual(getArpTable(router.id).length, 0, 'Router ARP table must start empty');
+});
+
+// 100. Test B — Cold ARP resolution populates dynamic ARP entry
+runTest('100. Test B — Cold ARP resolution populates dynamic ARP entry', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    assert.strictEqual(getArpTable('PC0').length, 0);
+
+    const result = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.arpResult.cacheHit, false, 'Initial resolution must be a cold cache miss');
+
+    const pc0Table = getArpTable('PC0');
+    assert.strictEqual(pc0Table.length, 1, 'PC0 must have 1 ARP entry after resolution');
+    assert.strictEqual(pc0Table[0].ip, '192.168.1.20');
+    assert.strictEqual(pc0Table[0].mac, normalizeMacAddress(pc1.mac));
+    assert.strictEqual(pc0Table[0].type, 'dynamic');
+});
+
+// 101. Test C — Warm ARP cache hit skips ARP broadcast and uses cached MAC
+runTest('101. Test C — Warm ARP cache hit skips ARP broadcast and uses cached MAC', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    // Cold run
+    simulateSendFrame(pc0, pc1);
+
+    // Warm run
+    const resultWarm = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(resultWarm.success, true);
+    assert.strictEqual(resultWarm.arpResult.cacheHit, true, 'Subsequent transmission must be a cache hit');
+    assert.strictEqual(resultWarm.arpResult.targetMac, normalizeMacAddress(pc1.mac));
+
+    // Verify no broadcast events were generated in the warm run
+    const hasBroadcast = resultWarm.events.some(e => e.includes('broadcast ARP Request') || e.includes('flooded broadcast frame'));
+    assert.strictEqual(hasBroadcast, false, 'Warm ARP lookup must not generate broadcast frames');
+});
+
+// 102. Test D — Clear ARP table empties cache and forces re-resolution
+runTest('102. Test D — Clear ARP table empties cache and forces re-resolution', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    // Populate cache
+    simulateSendFrame(pc0, pc1);
+    assert.strictEqual(getArpTable('PC0').length, 1);
+
+    // Clear PC0 ARP table
+    clearArpTable('PC0');
+    assert.strictEqual(getArpTable('PC0').length, 0, 'ARP table must be empty after clearArpTable');
+
+    // Next communication must perform cold resolution again
+    const resultAfterClear = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(resultAfterClear.success, true);
+    assert.strictEqual(resultAfterClear.arpResult.cacheHit, false, 'Must perform ARP broadcast again after clearing table');
+    assert.strictEqual(getArpTable('PC0').length, 1);
+});
+
+// 103. Test E — Device deletion invalidates references to deleted device
+runTest('103. Test E — Device deletion invalidates references to deleted device', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+    addDevice('server', 550, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+    const server0 = networkState.devices[3];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+    server0.ip = '192.168.1.30';
+    server0.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+    addConnection('Switch0', 'Server0');
+
+    // Populate PC0 cache with entries for both PC1 and Server0
+    simulateSendFrame(pc0, pc1);
+    simulateSendFrame(pc0, server0);
+    assert.strictEqual(getArpTable('PC0').length, 2);
+
+    const pc1Ip = pc1.ip;
+    const pc1Mac = pc1.mac;
+
+    // Delete PC1
+    deleteDevice('PC1');
+
+    // PC0 ARP table must no longer have PC1's entry, while Server0's entry remains intact
+    assert.strictEqual(lookupArp('PC0', pc1Ip), null, 'Deleted device IP must be removed from PC0 ARP table');
+    assert.strictEqual(lookupArp('PC0', '192.168.1.30'), server0.mac, 'Unrelated Server0 entry must remain intact');
+    assert.strictEqual(getArpTable('PC0').length, 1);
+});
+
+// 104. Test F — IP change invalidates old ARP mappings
+runTest('104. Test F — IP change invalidates old ARP mappings', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+    addDevice('server', 550, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+    const server0 = networkState.devices[3];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+    server0.ip = '192.168.1.30';
+    server0.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+    addConnection('Switch0', 'Server0');
+
+    simulateSendFrame(pc0, pc1);
+    simulateSendFrame(pc0, server0);
+    assert.strictEqual(getArpTable('PC0').length, 2);
+
+    // Change PC1 IP address via inspector draft and apply
+    networkState.selectedDeviceId = 'PC1';
+    inspectorDrafts['PC1'] = { ip: '192.168.1.25' };
+    applyDeviceConfiguration();
+
+    assert.strictEqual(pc1.ip, '192.168.1.25');
+    assert.strictEqual(lookupArp('PC0', '192.168.1.20'), null, 'Old IP must be invalidated in PC0 ARP table');
+    assert.strictEqual(lookupArp('PC0', '192.168.1.30'), server0.mac, 'Unrelated Server0 entry must remain intact');
+    assert.strictEqual(getArpTable('PC0').length, 1);
+});
+
+// 105. Test G — MAC change invalidates old ARP mappings
+runTest('105. Test G — MAC change invalidates old ARP mappings', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+    addDevice('server', 550, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+    const server0 = networkState.devices[3];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+    server0.ip = '192.168.1.30';
+    server0.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+    addConnection('Switch0', 'Server0');
+
+    simulateSendFrame(pc0, pc1);
+    simulateSendFrame(pc0, server0);
+    assert.strictEqual(getArpTable('PC0').length, 2);
+
+    const oldMac = pc1.mac;
+    const newMac = '02:99:99:99:99:99';
+
+    // Change PC1 MAC address via inspector draft and apply
+    networkState.selectedDeviceId = 'PC1';
+    inspectorDrafts['PC1'] = { mac: newMac };
+    applyDeviceConfiguration();
+
+    assert.strictEqual(normalizeMacAddress(pc1.mac), normalizeMacAddress(newMac));
+    assert.strictEqual(lookupArp('PC0', '192.168.1.20'), null, 'Old MAC mapping must be invalidated');
+    assert.strictEqual(lookupArp('PC0', '192.168.1.30'), server0.mac, 'Unrelated Server0 entry must remain intact');
+    assert.strictEqual(getArpTable('PC0').length, 1);
+});
+
+// 106. Test H — Router interface IP/MAC change invalidates corresponding ARP mappings
+runTest('106. Test H — Router interface IP/MAC change invalidates corresponding ARP mappings', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    // Run frame transmission so PC0 learns Router Gig0/0 MAC, and Router learns Server0 MAC
+    simulateSendFrame(pc, server);
+    assert.strictEqual(lookupArp('PC0', '192.168.1.1'), router.interfaces['Gig0/0'].mac);
+    assert.strictEqual(lookupArp('Router0', '10.0.0.10'), server.mac);
+
+    // Change Router0 Gig0/0 IP to 192.168.1.254 via applyDeviceConfiguration
+    networkState.selectedDeviceId = 'Router0';
+    inspectorDrafts['Router0'] = { 'interfaces.Gig0/0.ip': '192.168.1.254' };
+    applyDeviceConfiguration();
+
+    // PC0's old mapping for 192.168.1.1 is purged
+    assert.strictEqual(lookupArp('PC0', '192.168.1.1'), null, 'Stale router gateway IP must be removed from PC0 ARP table');
+
+    // Router's cached entry for Server0 on Gig0/1 remains intact
+    assert.strictEqual(lookupArp('Router0', '10.0.0.10'), server.mac, 'Router ARP entry for Server0 must remain intact');
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

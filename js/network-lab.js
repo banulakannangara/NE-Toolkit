@@ -557,6 +557,7 @@ function deleteDevice(deviceId) {
     pushHistory();
     cancelFrameAnimation();
     removeSwitchMacEntriesForDevice(deviceId);
+    removeArpEntriesForDevice(deviceId);
 
     networkState.devices = networkState.devices.filter((item) => item.id !== deviceId);
     const removedConnections = networkState.connections.filter((connection) => connection.source === deviceId || connection.target === deviceId);
@@ -1712,6 +1713,7 @@ function renderPropertiesPanel() {
                         </div>
                     `).join('')}
                 </div>
+                ${['pc', 'laptop', 'server'].includes(selected.type) ? renderArpTableInspector(selected) : ''}
                 ${selected.type === 'switch' ? renderSwitchInspector(selected) : ''}
                 <div class="property-summary property-summary--subtle" id="connectionTestPanel">
                     <h4>CONNECTION TEST</h4>
@@ -1759,7 +1761,67 @@ function renderPropertiesPanel() {
         });
     }
 
+    const clearArpButton = panel.querySelector('#clearArpTable');
+    if (clearArpButton) {
+        clearArpButton.addEventListener('click', () => {
+            const selectedDevice = getDeviceById(networkState.selectedDeviceId);
+            if (!selectedDevice) {
+                return;
+            }
+            clearArpTable(selectedDevice.id);
+            updateStatus(`ARP table cleared for ${selectedDevice.name}.`);
+            renderPropertiesPanel();
+        });
+    }
+
     refreshInspectorValidation(selected);
+}
+
+function renderArpTableInspector(device) {
+    const table = getArpTable(device.id);
+    const count = table.length;
+    const isRouter = device.type === 'router';
+
+    const rows = table.map((entry) => {
+        const learnedFormatted = entry.learnedAt
+            ? new Date(entry.learnedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+            : 'Dynamic';
+
+        return `
+            <tr>
+                <td><code>${escapeHtml(entry.ip)}</code></td>
+                <td><code>${escapeHtml(entry.mac)}</code></td>
+                ${isRouter ? `<td>${escapeHtml(entry.interface || '—')}</td>` : ''}
+                <td><span class="badge ${entry.type === 'static' ? 'badge--route' : 'badge--forward'}">${escapeHtml(entry.type || 'dynamic')}</span></td>
+                <td>${escapeHtml(learnedFormatted)}</td>
+            </tr>
+        `;
+    }).join('');
+
+    return `
+        <div class="property-summary" id="deviceArpTableSection">
+            <h4>ARP TABLE</h4>
+            ${count ? `
+                <table class="property-table">
+                    <thead>
+                        <tr>
+                            <th>IP Address</th>
+                            <th>MAC Address</th>
+                            ${isRouter ? '<th>Interface</th>' : ''}
+                            <th>Type</th>
+                            <th>Learned At</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows}
+                    </tbody>
+                </table>
+            ` : '<p class="empty-state">No ARP entries cached yet.</p>'}
+            <div class="property-actions">
+                <button id="clearArpTable" class="toolbar-button" type="button">Clear ARP Table</button>
+            </div>
+        </div>
+    `;
 }
 
 function renderHopDecisionCard(hop) {
@@ -2336,6 +2398,7 @@ function renderRouterInspector(selected) {
                 <h4>INTERFACES</h4>
                 ${ifaceCards}
             </div>
+            ${renderArpTableInspector(selected)}
             <div class="property-actions">
                 <button id="applyDeviceConfig" class="toolbar-button" type="button" ${isValid ? '' : 'disabled'}>Apply Changes</button>
             </div>
@@ -2880,6 +2943,18 @@ function applyDeviceConfiguration() {
         }
 
         pushHistory();
+        ifaces.forEach((ifName) => {
+            const oldIface = device.interfaces?.[ifName];
+            const newIface = nextInterfaces[ifName];
+            if (oldIface && newIface) {
+                if (oldIface.ip && oldIface.ip !== newIface.ip) {
+                    removeArpEntriesForIp(oldIface.ip);
+                }
+                if (oldIface.mac && normalizeMacAddress(oldIface.mac) !== normalizeMacAddress(newIface.mac)) {
+                    removeArpEntriesForMac(oldIface.mac);
+                }
+            }
+        });
         device.name = nextName;
         device.interfaces = nextInterfaces;
         delete inspectorDrafts[device.id];
@@ -2916,6 +2991,14 @@ function applyDeviceConfiguration() {
     }
 
     pushHistory();
+    const oldIp = device.ip;
+    const oldMac = device.mac;
+    if (oldIp && oldIp !== nextState.ip) {
+        removeArpEntriesForIp(oldIp);
+    }
+    if (oldMac && normalizeMacAddress(oldMac) !== normalizeMacAddress(nextState.mac)) {
+        removeArpEntriesForMac(oldMac);
+    }
     device.name = nextState.name;
     device.ip = nextState.ip;
     device.subnetMask = nextState.subnetMask;
@@ -3643,6 +3726,62 @@ function clearArpTable(deviceId) {
     }
     const runtime = getArpRuntime(deviceId);
     runtime.arpTable = [];
+}
+
+function removeArpEntriesMatching(predicate) {
+    if (!networkState.arpRuntime || typeof predicate !== 'function') {
+        return 0;
+    }
+
+    let removedCount = 0;
+    Object.keys(networkState.arpRuntime).forEach((deviceId) => {
+        const runtime = networkState.arpRuntime[deviceId];
+        if (runtime && Array.isArray(runtime.arpTable)) {
+            const before = runtime.arpTable.length;
+            runtime.arpTable = runtime.arpTable.filter((entry) => !predicate(entry, deviceId));
+            removedCount += (before - runtime.arpTable.length);
+        }
+    });
+
+    return removedCount;
+}
+
+function removeArpEntriesForDevice(deviceId) {
+    if (!deviceId) return 0;
+    const device = getDeviceById(deviceId);
+    if (!device) return 0;
+
+    const targetIps = new Set();
+    const targetMacs = new Set();
+
+    if (device.type === 'router' && device.interfaces) {
+        Object.values(device.interfaces).forEach((iface) => {
+            if (iface) {
+                if (iface.ip) targetIps.add(iface.ip);
+                if (iface.mac) targetMacs.add(normalizeMacAddress(iface.mac));
+            }
+        });
+    } else {
+        if (device.ip) targetIps.add(device.ip);
+        if (device.mac) targetMacs.add(normalizeMacAddress(device.mac));
+    }
+
+    return removeArpEntriesMatching((entry, ownerDeviceId) => {
+        if (ownerDeviceId === deviceId) return false;
+        const normMac = normalizeMacAddress(entry.mac);
+        return targetIps.has(entry.ip) || targetMacs.has(normMac);
+    });
+}
+
+function removeArpEntriesForIp(ip) {
+    if (!ip) return 0;
+    return removeArpEntriesMatching((entry) => entry.ip === ip);
+}
+
+function removeArpEntriesForMac(mac) {
+    if (!mac) return 0;
+    const norm = normalizeMacAddress(mac);
+    return removeArpEntriesMatching((entry) => normalizeMacAddress(entry.mac) === norm);
 }
 
 function resolveNextHopIp(sourceDevice, destinationDevice) {
