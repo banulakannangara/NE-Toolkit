@@ -1690,6 +1690,700 @@ runTest('50. Invalid/malformed gateway is handled correctly', () => {
     assert.strictEqual(nextHop2, null, 'Out of range gateway IP must return null');
 });
 
+// 51. Same-subnet cold ARP: PC0 -> Switch0 -> PC1
+runTest('51. Same-subnet cold ARP (PC0 -> Switch0 -> PC1)', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    assert.strictEqual(lookupArp('PC0', pc1.ip), null, 'Initial PC0 ARP cache must be empty');
+    assert.strictEqual(lookupArp('PC1', pc0.ip), null, 'Initial PC1 ARP cache must be empty');
+
+    const arpResult = simulateArpResolution(pc0, pc1.ip);
+    assert.strictEqual(arpResult.success, true);
+    assert.strictEqual(arpResult.cacheHit, false);
+    assert.strictEqual(arpResult.targetMac, pc1.mac);
+    assert.ok(arpResult.requestPacket, 'Request packet must be generated');
+    assert.strictEqual(arpResult.requestPacket.protocol, 'ARP');
+    assert.strictEqual(arpResult.requestPacket.operation, 'REQUEST');
+    assert.strictEqual(arpResult.requestPacket.targetMac, '00:00:00:00:00:00');
+    assert.ok(arpResult.replyPacket, 'Reply packet must be generated');
+    assert.strictEqual(arpResult.replyPacket.operation, 'REPLY');
+    assert.strictEqual(arpResult.replyPacket.senderMac, pc1.mac);
+
+    // Mutual ARP learning
+    assert.strictEqual(lookupArp('PC0', pc1.ip), pc1.mac, 'PC0 must learn PC1 IP -> PC1 MAC');
+    assert.strictEqual(lookupArp('PC1', pc0.ip), pc0.mac, 'PC1 must learn PC0 IP -> PC0 MAC');
+});
+
+// 52. Same-subnet warm ARP uses cache
+runTest('52. Same-subnet warm ARP uses cache without ARP broadcast', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    // First transmission (cold ARP)
+    const result1 = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(result1.success, true);
+    const events1 = result1.events.join(' | ');
+    assert.ok(events1.includes('broadcast ARP Request'), 'Cold transmission must broadcast ARP request');
+    assert.ok(events1.includes('sent ARP Reply'), 'Cold transmission must receive ARP reply');
+
+    // Second transmission (warm ARP)
+    const result2 = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(result2.success, true);
+    const events2 = result2.events.join(' | ');
+    assert.ok(events2.includes('ARP cache hit for 192.168.1.20'), 'Warm transmission must log ARP cache hit');
+    assert.strictEqual(events2.includes('broadcast ARP Request'), false, 'Warm transmission must NOT broadcast ARP request');
+});
+
+// 53. Switch learns requester MAC during ARP broadcast
+runTest('53. Switch learns requester MAC during ARP broadcast', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    clearSwitchMacTable('Switch0');
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 0);
+
+    const arpResult = simulateArpResolution(pc0, pc1.ip);
+    assert.strictEqual(arpResult.success, true);
+
+    const swMacs = getSwitchRuntime('Switch0').macTable;
+    assert.ok(swMacs.some(e => e.mac === normalizeMacAddress(pc0.mac) && e.port === 'Fa0/1'), 'Switch0 must learn PC0 MAC on Fa0/1');
+});
+
+// 54. Inter-subnet first-hop ARP resolves gateway MAC
+runTest('54. Inter-subnet first-hop ARP resolves gateway MAC', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 150, 100);
+    addDevice('router', 250, 100);
+    addDevice('switch', 350, 100);
+    addDevice('server', 450, 100);
+
+    const pc0 = networkState.devices[0];
+    const router = networkState.devices[2];
+    const server0 = networkState.devices[4];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server0.ip = '10.0.0.10';
+    server0.subnetMask = '255.255.255.0';
+    server0.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Router0');
+    addConnection('Router0', 'Switch1');
+    addConnection('Switch1', 'Server0');
+
+    const arpResult = simulateArpResolution(pc0, pc0.gateway);
+    assert.strictEqual(arpResult.success, true);
+    assert.strictEqual(arpResult.targetMac, router.interfaces['Gig0/0'].mac, 'Must resolve to Router0 Gig0/0 MAC');
+    assert.strictEqual(lookupArp('PC0', '192.168.1.1'), router.interfaces['Gig0/0'].mac, 'PC0 must cache gateway IP -> Gig0/0 MAC');
+    assert.strictEqual(lookupArp('Router0', '192.168.1.10'), pc0.mac, 'Router0 must learn PC0 IP -> PC0 MAC');
+});
+
+// 55. ARP broadcast does not cross Router0 boundary
+runTest('55. ARP broadcast does not cross Router0 boundary', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server0 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server0.ip = '10.0.0.10';
+    server0.subnetMask = '255.255.255.0';
+    server0.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    // PC0 directly attempts to ARP for Server0's remote IP 10.0.0.10
+    const arpResult = simulateArpResolution(pc0, '10.0.0.10');
+    assert.strictEqual(arpResult.success, false, 'ARP resolution for remote IP across router must fail');
+    assert.strictEqual(lookupArp('Server0', pc0.ip), null, 'Server0 must not receive or learn ARP broadcast across router');
+    assert.strictEqual(lookupArp('PC0', '10.0.0.10'), null, 'PC0 must not resolve or cache remote host MAC');
+});
+
+// 56. ARP failure cleanly handled when IP has no responder
+runTest('56. ARP failure cleanly handled when IP has no responder', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+
+    const pc0 = networkState.devices[0];
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+
+    const arpResult = simulateArpResolution(pc0, '192.168.1.99');
+    assert.strictEqual(arpResult.success, false);
+    assert.strictEqual(arpResult.targetMac, undefined);
+    assert.strictEqual(lookupArp('PC0', '192.168.1.99'), null);
+});
+
+// 57. Existing non-ICMP Send Frame regression with ARP
+runTest('57. Existing non-ICMP Send Frame regression with ARP', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 150, 100);
+    addDevice('router', 250, 100);
+    addDevice('switch', 350, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[2];
+    const server = networkState.devices[4];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Router0');
+    addConnection('Router0', 'Switch1');
+    addConnection('Switch1', 'Server0');
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.packet.ttl, 63);
+    assert.strictEqual(lookupArp('PC0', '192.168.1.1'), router.interfaces['Gig0/0'].mac);
+});
+
+// 58. Existing ICMP Echo Request/Reply regression with ARP enabled
+runTest('58. Existing ICMP Echo Request/Reply regression with ARP enabled', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 150, 100);
+    addDevice('router', 250, 100);
+    addDevice('switch', 350, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[2];
+    const server = networkState.devices[4];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Router0');
+    addConnection('Router0', 'Switch1');
+    addConnection('Switch1', 'Server0');
+
+    const result = simulateSendFrame(pc, server, {
+        icmp: { identifier: 99, sequence: 7 }
+    });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.packet.protocol, 'ICMP');
+    assert.strictEqual(result.packet.icmp.type, 'ECHO_REPLY');
+    assert.strictEqual(result.packet.icmp.identifier, 99);
+    assert.strictEqual(result.packet.icmp.sequence, 7);
+    assert.strictEqual(result.packet.ttl, 63);
+});
+
+// 59. Existing TTL expiration regression with ARP enabled
+runTest('59. Existing TTL expiration regression with ARP enabled', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    const result = simulateSendFrame(pc, server, { initialTtl: 1 });
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.action, 'DROP');
+    assert.ok(result.reason.includes('TTL expired') || result.reason.includes('Time to Live'));
+    // ARP should have succeeded prior to IP transmission
+    assert.strictEqual(lookupArp('PC0', '192.168.1.1'), router.interfaces['Gig0/0'].mac);
+});
+
+// 60. Full V5.1-V5.5 regression suite
+runTest('60. Full V5.1-V5.5 regression suite', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 150, 100);
+    addDevice('router', 250, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const router = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '192.168.2.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    // 1. Send Frame with ICMP ping
+    const pingResult = simulateSendFrame(pc0, pc1, {
+        icmp: { identifier: 1001, sequence: 1 }
+    });
+    assert.strictEqual(pingResult.success, true);
+    assert.strictEqual(pingResult.packet.icmp.type, 'ECHO_REPLY');
+
+    // 2. Verify ARP cache state
+    assert.strictEqual(lookupArp('PC0', '192.168.1.1'), router.interfaces['Gig0/0'].mac);
+    assert.strictEqual(lookupArp('Router0', '192.168.1.10'), pc0.mac);
+
+    // 3. Snapshot & restore
+    const snapshot = createLabSnapshot();
+    resetLab();
+    assert.strictEqual(networkState.devices.length, 0);
+    restoreSnapshot(snapshot);
+    assert.strictEqual(networkState.devices.length, 4);
+    assert.strictEqual(lookupArp('PC0', '192.168.1.1'), router.interfaces['Gig0/0'].mac);
+});
+
+// 61. Router egress ARP cold-cache resolution
+runTest('61. Router egress ARP cold-cache resolution', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    assert.strictEqual(lookupArp('Router0', '10.0.0.10'), null, 'Initial Router0 egress ARP cache must be empty');
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.path.length, 3);
+
+    const events = result.events.join(' | ');
+    assert.ok(events.includes('Router0 broadcast ARP Request: Who has 10.0.0.10?'), 'Router0 must broadcast ARP request on egress LAN');
+    assert.ok(events.includes('Server0 sent ARP Reply: 10.0.0.10 is at ' + server.mac), 'Server0 must send ARP reply');
+    assert.ok(events.includes('Router0 set destination MAC to ' + server.mac), 'Router0 must set resolved destination MAC');
+});
+
+// 62. Router learns destination host IP/MAC in ARP cache
+runTest('62. Router learns destination host IP/MAC in ARP cache', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    simulateSendFrame(pc, server);
+
+    assert.strictEqual(lookupArp('Router0', '10.0.0.10'), server.mac, 'Router0 must learn Server0 IP -> MAC');
+    assert.strictEqual(lookupArp('Server0', '10.0.0.1'), router.interfaces['Gig0/1'].mac, 'Server0 must learn Router0 Gig0/1 IP -> MAC');
+    assert.strictEqual(lookupArp('Router0', '192.168.1.10'), pc.mac, 'Router0 must learn PC0 IP -> MAC on ingress');
+});
+
+// 63. Router egress ARP warm-cache transmission
+runTest('63. Router egress ARP warm-cache transmission', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    // First (cold) transmission
+    const result1 = simulateSendFrame(pc, server);
+    assert.strictEqual(result1.success, true);
+    assert.ok(result1.events.join(' | ').includes('Router0 broadcast ARP Request: Who has 10.0.0.10?'));
+
+    // Second (warm) transmission
+    const result2 = simulateSendFrame(pc, server);
+    assert.strictEqual(result2.success, true);
+    const events2 = result2.events.join(' | ');
+    assert.ok(events2.includes('Router0 ARP cache hit for 10.0.0.10'), 'Warm transmission must log Router0 ARP cache hit');
+    assert.strictEqual(events2.includes('Router0 broadcast ARP Request: Who has 10.0.0.10?'), false, 'Warm transmission must NOT broadcast egress ARP');
+});
+
+// 64. Correct egress interface is recorded in the ARP entry
+runTest('64. Correct egress interface is recorded in the ARP entry', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    simulateSendFrame(pc, server);
+
+    const rTable = getArpTable('Router0');
+    const serverEntry = rTable.find(e => e.ip === '10.0.0.10');
+    assert.ok(serverEntry, 'Server0 entry must exist in Router0 ARP table');
+    assert.strictEqual(serverEntry.interface, 'Gig0/1', 'Server0 entry must be associated with Gig0/1');
+
+    const pcEntry = rTable.find(e => e.ip === '192.168.1.10');
+    assert.ok(pcEntry, 'PC0 entry must exist in Router0 ARP table');
+    assert.strictEqual(pcEntry.interface, 'Gig0/0', 'PC0 entry must be associated with Gig0/0');
+});
+
+// 65. ARP broadcast remains on destination LAN
+runTest('65. ARP broadcast remains on destination LAN', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 150, 100);
+    addDevice('router', 250, 100);
+    addDevice('switch', 350, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[2];
+    const server = networkState.devices[4];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Router0');
+    addConnection('Router0', 'Switch1');
+    addConnection('Switch1', 'Server0');
+
+    simulateSendFrame(pc, server);
+
+    // Switch0 on source LAN must NOT have learned Server0's MAC or Router0's Gig0/1 MAC
+    const sw0Macs = getSwitchRuntime('Switch0').macTable;
+    assert.strictEqual(sw0Macs.some(e => e.mac === normalizeMacAddress(server.mac)), false, 'Switch0 must not learn Server0 MAC');
+    assert.strictEqual(sw0Macs.some(e => e.mac === normalizeMacAddress(router.interfaces['Gig0/1'].mac)), false, 'Switch0 must not learn Router0 Gig0/1 MAC');
+
+    // Switch1 on destination LAN must have learned Router0 Gig0/1 MAC
+    const sw1Macs = getSwitchRuntime('Switch1').macTable;
+    assert.ok(sw1Macs.some(e => e.mac === normalizeMacAddress(router.interfaces['Gig0/1'].mac)), 'Switch1 must learn Router0 Gig0/1 MAC');
+});
+
+// 66. Full ICMP request/reply still works with router egress ARP
+runTest('66. Full ICMP request/reply still works with router egress ARP', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 150, 100);
+    addDevice('router', 250, 100);
+    addDevice('switch', 350, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[2];
+    const server = networkState.devices[4];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Router0');
+    addConnection('Router0', 'Switch1');
+    addConnection('Switch1', 'Server0');
+
+    const result = simulateSendFrame(pc, server, {
+        icmp: { identifier: 4242, sequence: 10 }
+    });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.packet.protocol, 'ICMP');
+    assert.strictEqual(result.packet.icmp.type, 'ECHO_REPLY');
+    assert.strictEqual(result.packet.icmp.identifier, 4242);
+    assert.strictEqual(result.packet.icmp.sequence, 10);
+    assert.strictEqual(result.packet.ttl, 63);
+
+    // Mutual ARP entries must be present
+    assert.strictEqual(lookupArp('PC0', '192.168.1.1'), router.interfaces['Gig0/0'].mac);
+    assert.strictEqual(lookupArp('Router0', '10.0.0.10'), server.mac);
+    assert.strictEqual(lookupArp('Server0', '10.0.0.1'), router.interfaces['Gig0/1'].mac);
+});
+
+// 67. TTL decrement still works across routers
+runTest('67. TTL decrement still works across routers with egress ARP', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    const result = simulateSendFrame(pc, server, { initialTtl: 64 });
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.packet.ttl, 62, 'TTL should decrement from 64 to 62 through two routers');
+    assert.strictEqual(lookupArp('Router1', '10.0.0.10'), server.mac);
+});
+
+// 68. Full V5.1–V5.5 regression
+runTest('68. Full V5.1-V5.5 regression with end-to-end ARP and ICMP', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 150, 100);
+    addDevice('router', 250, 100);
+    addDevice('switch', 350, 100);
+    addDevice('pc', 450, 100);
+
+    const pc0 = networkState.devices[0];
+    const router = networkState.devices[2];
+    const pc1 = networkState.devices[4];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '192.168.2.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.20';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Router0');
+    addConnection('Router0', 'Switch1');
+    addConnection('Switch1', 'PC1');
+
+    // 1. First ping (cold ARP on both sides)
+    const result1 = simulateSendFrame(pc0, pc1, { icmp: { identifier: 1, sequence: 1 } });
+    assert.strictEqual(result1.success, true);
+    assert.strictEqual(lookupArp('PC0', '192.168.1.1'), router.interfaces['Gig0/0'].mac);
+    assert.strictEqual(lookupArp('Router0', '192.168.2.20'), pc1.mac);
+
+    // 2. Second ping (warm ARP on all hops)
+    const result2 = simulateSendFrame(pc0, pc1, { icmp: { identifier: 1, sequence: 2 } });
+    assert.strictEqual(result2.success, true);
+    const events2 = result2.events.join(' | ');
+    assert.ok(events2.includes('PC0 ARP cache hit for 192.168.1.1'));
+    assert.ok(events2.includes('Router0 ARP cache hit for 192.168.2.20'));
+
+    // 3. Reverse ping (PC1 -> PC0)
+    const result3 = simulateSendFrame(pc1, pc0, { icmp: { identifier: 2, sequence: 1 } });
+    assert.strictEqual(result3.success, true);
+
+    // 4. Snapshot / Restore integrity
+    const snap = createLabSnapshot();
+    resetLab();
+    assert.strictEqual(networkState.devices.length, 0);
+    restoreSnapshot(snap);
+    assert.strictEqual(networkState.devices.length, 5);
+    assert.strictEqual(lookupArp('Router0', '192.168.2.20'), pc1.mac);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

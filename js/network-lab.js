@@ -3058,8 +3058,44 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
             frame.events.push(`Router ${toDevice.name} routed frame from ${ingressPort} to ${egressPort}`);
             frame.sourceMac = egressIface.mac;
             frame.events.push(`Router ${toDevice.name} rewrote source MAC to ${egressIface.mac}`);
-            frame.destinationMac = toEndpoint.mac;
-            frame.events.push(`Router ${toDevice.name} set destination MAC to ${toEndpoint.mac}`);
+
+            // Router egress ARP resolution
+            let nextHopTargetIp = frame.packet.destinationIp;
+            if (nextHopId) {
+                const nextDevice = getDeviceById(nextHopId);
+                if (nextDevice?.type === 'router' && nextDevice.interfaces) {
+                    for (const [nIfName, nIface] of Object.entries(nextDevice.interfaces)) {
+                        const nMask = normalizeSubnetMask(nIface.subnetMask);
+                        const egMask = normalizeSubnetMask(egressIface.subnetMask);
+                        if (nMask && egMask && isSameSubnet(egressIface.ip, nIface.ip, egMask)) {
+                            nextHopTargetIp = nIface.ip;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            const remainingTopology = topologyPath.slice(i + 1);
+            const routerArpResult = simulateArpResolution(toDevice, nextHopTargetIp, remainingTopology, {
+                egressInterface: egressPort
+            });
+
+            if (!routerArpResult.success) {
+                frame.events.push(...routerArpResult.events);
+                return {
+                    success: false,
+                    reason: routerArpResult.reason,
+                    path: traversedPath,
+                    action: 'DROP'
+                };
+            }
+
+            if (routerArpResult.events?.length) {
+                frame.events.push(...routerArpResult.events);
+            }
+
+            frame.destinationMac = routerArpResult.targetMac;
+            frame.events.push(`Router ${toDevice.name} set destination MAC to ${routerArpResult.targetMac}`);
         }
     }
 
@@ -3068,6 +3104,255 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
         reason: '',
         path: traversedPath,
         action
+    };
+}
+
+function simulateArpResolution(requesterDevice, targetIp, topologyPath, options = {}) {
+    if (!requesterDevice || !targetIp) {
+        return {
+            success: false,
+            reason: 'Missing requester device or target IP.',
+            path: requesterDevice ? [requesterDevice.id] : [],
+            events: ['Invalid ARP parameters']
+        };
+    }
+
+    if (!isValidIPv4(targetIp)) {
+        return {
+            success: false,
+            reason: `Invalid target IP address: ${targetIp}`,
+            path: [requesterDevice.id],
+            events: [`Invalid target IP address: ${targetIp}`]
+        };
+    }
+
+    // Determine requester IP, MAC, subnet mask, and interface
+    let reqIp = requesterDevice.ip;
+    let reqMac = requesterDevice.mac;
+    let reqMask = normalizeSubnetMask(requesterDevice.subnetMask);
+    let requesterInterfaceName = options.interface || options.egressInterface || null;
+
+    if (requesterDevice.type === 'router') {
+        if (requesterInterfaceName && requesterDevice.interfaces?.[requesterInterfaceName]) {
+            const iface = requesterDevice.interfaces[requesterInterfaceName];
+            reqIp = iface.ip;
+            reqMac = iface.mac;
+            reqMask = normalizeSubnetMask(iface.subnetMask);
+        } else if (requesterDevice.interfaces) {
+            for (const [ifName, iface] of Object.entries(requesterDevice.interfaces)) {
+                if (iface.status === 'up' && iface.ip) {
+                    const ifMask = normalizeSubnetMask(iface.subnetMask);
+                    if (ifMask && isSameSubnet(iface.ip, targetIp, ifMask)) {
+                        reqIp = iface.ip;
+                        reqMac = iface.mac;
+                        reqMask = ifMask;
+                        requesterInterfaceName = ifName;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!reqIp || !reqMac || !reqMask) {
+        return {
+            success: false,
+            reason: `Requester ${requesterDevice.name} has no valid interface configured for target IP ${targetIp}.`,
+            path: [requesterDevice.id],
+            events: [`${requesterDevice.name} cannot resolve ARP: no local interface matches ${targetIp}`]
+        };
+    }
+
+    // 1. Check requester ARP cache first (CACHE HIT)
+    const cachedMac = lookupArp(requesterDevice.id, targetIp);
+    if (cachedMac) {
+        return {
+            success: true,
+            targetIp,
+            targetMac: cachedMac,
+            cacheHit: true,
+            path: [requesterDevice.id],
+            events: [`${requesterDevice.name} ARP cache hit for ${targetIp} → ${cachedMac}`],
+            requestPacket: null,
+            replyPacket: null
+        };
+    }
+
+    // 2. CACHE MISS -> Simulate ARP Request / Reply
+    const events = [];
+    const isTargetOnReqSubnet = isSameSubnet(reqIp, targetIp, reqMask);
+
+    // Build explicit ARP Request packet
+    const requestPacket = {
+        protocol: 'ARP',
+        operation: 'REQUEST',
+        senderIp: reqIp,
+        senderMac: reqMac,
+        targetIp: targetIp,
+        targetMac: '00:00:00:00:00:00'
+    };
+
+    events.push(`${requesterDevice.name} broadcast ARP Request: Who has ${targetIp}? Tell ${reqIp}`);
+
+    // Identify target device and responder interface on local subnet
+    let targetDevice = null;
+    let targetMac = null;
+    let targetInterfaceName = null;
+
+    for (const dev of (networkState.devices || [])) {
+        if (dev.id === requesterDevice.id) continue;
+
+        if (dev.type === 'router') {
+            if (dev.interfaces) {
+                for (const [ifName, iface] of Object.entries(dev.interfaces)) {
+                    if (iface.ip === targetIp && iface.status === 'up') {
+                        const ifMask = normalizeSubnetMask(iface.subnetMask);
+                        if (reqMask && ifMask && isSameSubnet(reqIp, iface.ip, reqMask)) {
+                            targetDevice = dev;
+                            targetInterfaceName = ifName;
+                            targetMac = iface.mac;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (targetDevice) break;
+        } else if (dev.ip === targetIp) {
+            const devMask = normalizeSubnetMask(dev.subnetMask);
+            if (reqMask && devMask && isSameSubnet(reqIp, dev.ip, reqMask)) {
+                targetDevice = dev;
+                targetMac = dev.mac;
+                break;
+            }
+        }
+    }
+
+    // If target is not on the same subnet as requester or no responder device exists
+    if (!isTargetOnReqSubnet || !targetDevice || !targetMac) {
+        events.push(`No ARP reply received for ${targetIp} (target not on local subnet or no responder)`);
+        return {
+            success: false,
+            reason: `ARP resolution failed: No responder for IP ${targetIp} on local subnet.`,
+            path: [requesterDevice.id],
+            events
+        };
+    }
+
+    // Determine L2 path between requester and target device
+    let arpPath = null;
+    if (Array.isArray(topologyPath) && topologyPath.length >= 2) {
+        const reqIdx = topologyPath.indexOf(requesterDevice.id);
+        const targetIdx = topologyPath.indexOf(targetDevice.id);
+        if (reqIdx !== -1 && targetIdx !== -1 && reqIdx < targetIdx) {
+            arpPath = topologyPath.slice(reqIdx, targetIdx + 1);
+        }
+    }
+
+    if (!arpPath) {
+        arpPath = findTopologyPath(requesterDevice.id, targetDevice.id);
+    }
+
+    if (!arpPath || arpPath.length < 2) {
+        events.push(`ARP Request could not reach ${targetDevice.name}: no physical path`);
+        return {
+            success: false,
+            reason: `ARP resolution failed: No physical path between ${requesterDevice.name} and ${targetDevice.name}.`,
+            path: [requesterDevice.id],
+            events
+        };
+    }
+
+    // Check if path contains an intermediate router (ARP broadcast cannot cross routers)
+    for (let i = 1; i < arpPath.length - 1; i++) {
+        const midDevice = getDeviceById(arpPath[i]);
+        if (midDevice?.type === 'router') {
+            events.push(`Router ${midDevice.name} dropped broadcast frame (does not forward broadcast across subnets)`);
+            return {
+                success: false,
+                reason: 'ARP broadcast cannot cross router boundary.',
+                path: arpPath.slice(0, i + 1),
+                events
+            };
+        }
+    }
+
+    // Traverse forward path (ARP Request Broadcast)
+    for (let i = 0; i < arpPath.length - 1; i++) {
+        const fromId = arpPath[i];
+        const toId = arpPath[i + 1];
+        const toDevice = getDeviceById(toId);
+
+        if (!toDevice) {
+            events.push('Topology link broken during ARP request');
+            return {
+                success: false,
+                reason: 'A device on the topology path is missing.',
+                path: arpPath.slice(0, i + 1),
+                events
+            };
+        }
+
+        if (toDevice.type === 'switch') {
+            const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
+            learnSwitchMac(toDevice.id, reqMac, requesterDevice.id, ingressPort);
+            events.push(`Switch ${toDevice.name} learned ${requesterDevice.name} MAC (${reqMac}) → ${ingressPort}`);
+            events.push(`Switch ${toDevice.name} flooded broadcast frame (FF:FF:FF:FF:FF:FF) on all ports except ${ingressPort}`);
+        }
+    }
+
+    // Target receives ARP Request and learns requester's IP -> MAC
+    events.push(`${targetDevice.name} received ARP Request from ${requesterDevice.name}`);
+    learnArp(targetDevice.id, reqIp, reqMac, {
+        interface: targetInterfaceName || null
+    });
+    events.push(`${targetDevice.name} learned ARP entry: ${reqIp} → ${reqMac}`);
+
+    // Build explicit ARP Reply packet
+    const replyPacket = {
+        protocol: 'ARP',
+        operation: 'REPLY',
+        senderIp: targetIp,
+        senderMac: targetMac,
+        targetIp: reqIp,
+        targetMac: reqMac
+    };
+
+    events.push(`${targetDevice.name} sent ARP Reply: ${targetIp} is at ${targetMac}`);
+
+    // Traverse reverse path (ARP Reply Unicast)
+    const reverseArpPath = [...arpPath].reverse();
+    for (let i = 0; i < reverseArpPath.length - 1; i++) {
+        const fromId = reverseArpPath[i];
+        const toId = reverseArpPath[i + 1];
+        const toDevice = getDeviceById(toId);
+
+        if (toDevice && toDevice.type === 'switch') {
+            const destEntry = getSwitchMacEntry(toDevice.id, reqMac);
+            if (destEntry) {
+                events.push(`Switch ${toDevice.name} forwarded unicast ARP Reply to ${requesterDevice.name} on ${destEntry.port}`);
+            } else {
+                const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
+                events.push(`Switch ${toDevice.name} flooded ARP Reply on all ports except ${ingressPort}`);
+            }
+        }
+    }
+
+    // Requester receives ARP Reply and caches target IP -> MAC
+    events.push(`${requesterDevice.name} received ARP Reply from ${targetDevice.name}`);
+    learnArp(requesterDevice.id, targetIp, targetMac, {
+        interface: requesterInterfaceName || null
+    });
+    events.push(`${requesterDevice.name} cached ARP entry: ${targetIp} → ${targetMac}`);
+
+    return {
+        success: true,
+        targetIp,
+        targetMac,
+        cacheHit: false,
+        path: arpPath,
+        events,
+        requestPacket,
+        replyPacket
     };
 }
 
@@ -3090,8 +3375,6 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
         && isSameSubnet(sourceDevice.ip, destinationDevice.ip, normalizedMaskA)
         && isSameSubnet(sourceDevice.ip, destinationDevice.ip, normalizedMaskB);
 
-    let initialDestMac = destinationDevice.mac;
-
     if (!sameSubnet) {
         const commAnalysis = analyzeCommunication(sourceDevice, destinationDevice);
         if (!commAnalysis.possible) {
@@ -3103,19 +3386,31 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
                 events: [commAnalysis.reason]
             };
         }
-
-        const firstRouterIndex = topologyPath.findIndex((id) => getDeviceById(id)?.type === 'router');
-        if (firstRouterIndex !== -1) {
-            const firstRouter = getDeviceById(topologyPath[firstRouterIndex]);
-            const prevHopId = topologyPath[firstRouterIndex - 1];
-            const ingressPort = getPortForRouterAndNeighbor(firstRouter.id, prevHopId);
-            const ingressIface = firstRouter?.interfaces?.[ingressPort];
-            if (ingressIface && ingressIface.mac) {
-                initialDestMac = ingressIface.mac;
-            }
-        }
     }
 
+    const nextHopIp = resolveNextHopIp(sourceDevice, destinationDevice);
+    if (!nextHopIp) {
+        return {
+            success: false,
+            reason: 'Could not resolve next-hop IP address.',
+            path: [topologyPath[0]],
+            action: 'DROP',
+            events: ['Next-hop IP resolution failed']
+        };
+    }
+
+    const arpResult = simulateArpResolution(sourceDevice, nextHopIp, topologyPath);
+    if (!arpResult.success) {
+        return {
+            success: false,
+            reason: arpResult.reason,
+            path: arpResult.path,
+            action: 'DROP',
+            events: arpResult.events
+        };
+    }
+
+    const initialDestMac = arpResult.targetMac;
     const initialTtl = typeof options?.initialTtl === 'number' ? options.initialTtl : 64;
     const isIcmp = Boolean(options?.icmp);
     const icmpConfig = typeof options?.icmp === 'object' ? options.icmp : {};
@@ -3144,7 +3439,7 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
         etherType: 'IPv4',
         packet: packetPayload,
         path: topologyPath,
-        events: []
+        events: [...arpResult.events]
     };
 
     if (isIcmp) {
