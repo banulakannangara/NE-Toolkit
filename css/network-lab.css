@@ -1061,3 +1061,60 @@ body {
     letter-spacing: -0.01em;
 }
 
+.packet-inspector__value--success {
+    color: #51cf66;
+    font-weight: 700;
+}
+
+.packet-inspector__section--arp-failed {
+    background: rgba(255, 107, 107, 0.08);
+    border-color: rgba(255, 107, 107, 0.3);
+}
+
+.packet-inspector__arp-subcard {
+    padding: 0.45rem 0.55rem;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    margin-bottom: 0.4rem;
+}
+
+.packet-inspector__arp-subcard:last-child {
+    margin-bottom: 0;
+}
+
+.packet-inspector__arp-subcard--highlight {
+    background: rgba(81, 207, 102, 0.08);
+    border-color: rgba(81, 207, 102, 0.25);
+}
+
+.packet-inspector__subcard-title {
+    font-size: 0.64rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    color: var(--lab-muted);
+    margin-bottom: 0.3rem;
+    text-transform: uppercase;
+}
+
+.frame-hop-badge--arp-request {
+    background: rgba(35, 20, 55, 0.95);
+    color: #d8b4fe;
+    border: 1px solid rgba(192, 132, 252, 0.6);
+    box-shadow: 0 0 12px rgba(192, 132, 252, 0.3), 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.frame-hop-badge--arp-flood {
+    background: rgba(45, 35, 10, 0.95);
+    color: #fde047;
+    border: 1px solid rgba(250, 204, 21, 0.6);
+    box-shadow: 0 0 12px rgba(250, 204, 21, 0.3), 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.frame-hop-badge--arp-reply {
+    background: rgba(10, 38, 48, 0.95);
+    color: #67e8f9;
+    border: 1px solid rgba(34, 211, 238, 0.6);
+    box-shadow: 0 0 12px rgba(34, 211, 238, 0.3), 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+

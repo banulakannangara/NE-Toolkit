@@ -1162,12 +1162,28 @@ function endPointerDrag() {
     render();
 }
 
-function getHopBadgeConfig(hopAction, isDrop = false, isDelivered = false) {
+function getHopBadgeConfig(hopAction, isDrop = false, isDelivered = false, options = {}) {
     if (isDelivered) {
         return {
             title: '✓ DELIVERED',
             subtitle: '',
             modifier: 'delivered'
+        };
+    }
+
+    if (options.isArpRequest && options.targetIp) {
+        return {
+            title: 'ARP REQUEST',
+            subtitle: `Who has ${options.targetIp}?`,
+            modifier: 'arp-request'
+        };
+    }
+
+    if (options.isArpReply && options.targetIp) {
+        return {
+            title: 'ARP REPLY',
+            subtitle: `${options.targetIp} → ${options.targetMac || ''}`,
+            modifier: 'arp-reply'
         };
     }
 
@@ -1188,6 +1204,16 @@ function getHopBadgeConfig(hopAction, isDrop = false, isDelivered = false) {
     }
 
     if (action === 'FLOOD') {
+        if (options.isArpFlood || hopAction.reason === 'broadcast' || hopAction.destinationMac === 'FF:FF:FF:FF:FF:FF') {
+            const ingress = hopAction.ingressPort || '';
+            const egress = Array.isArray(hopAction.egressPorts) ? hopAction.egressPorts.join(', ') : '';
+            const ports = (ingress && egress) ? `${ingress} → ${egress}` : (egress || ingress || 'Broadcast');
+            return {
+                title: 'ARP FLOOD',
+                subtitle: ports,
+                modifier: 'arp-flood'
+            };
+        }
         const reason = hopAction.reason === 'broadcast' ? 'Broadcast' : 'Unknown Unicast';
         return {
             title: 'FLOOD',
@@ -1256,12 +1282,14 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
     layer.appendChild(badge);
 
     const hopActions = options.hopActions || networkState.lastFrameResult?.hopActions || [];
+    const arpResult = options.arpResult || networkState.lastFrameResult?.arpResult;
 
     const animation = {
         packet,
         badge,
         path: [...path],
         hopActions,
+        arpResult,
         animationFrame: null,
         cleanupTimer: null,
         cancelled: false
@@ -1341,13 +1369,21 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
 
         if (hopIndex > 0) {
             const hopAction = hopActions.find((h) => h.deviceId === sourceId);
-            setBadgeConfig(getHopBadgeConfig(hopAction));
+            const isArpFlood = Boolean(arpResult && !arpResult.cacheHit && (hopAction?.reason === 'broadcast' || hopAction?.destinationMac === 'FF:FF:FF:FF:FF:FF'));
+            setBadgeConfig(getHopBadgeConfig(hopAction, false, false, { isArpFlood }));
         } else {
-            setBadgeConfig({
-                title: 'FRAME',
-                subtitle: `${sourceId} → ${targetId}`,
-                modifier: 'forward'
-            });
+            if (arpResult && !arpResult.cacheHit && arpResult.targetIp) {
+                setBadgeConfig(getHopBadgeConfig(null, false, false, {
+                    isArpRequest: true,
+                    targetIp: arpResult.targetIp
+                }));
+            } else {
+                setBadgeConfig({
+                    title: 'FRAME',
+                    subtitle: `${sourceId} → ${targetId}`,
+                    modifier: 'forward'
+                });
+            }
         }
 
         const distance = Math.hypot(initialTarget.x - initialSource.x, initialTarget.y - initialSource.y);
@@ -1846,6 +1882,157 @@ function formatProtocol(proto) {
     return proto;
 }
 
+function renderArpResolutionSection(arpResult) {
+    if (!arpResult) return '';
+
+    if (arpResult.success === false) {
+        return `
+            <div class="packet-inspector__section packet-inspector__section--arp-failed">
+                <h5 class="packet-inspector__section-title">ARP RESOLUTION FAILED</h5>
+                <div class="packet-inspector__grid">
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Target IP</span>
+                        <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(arpResult.targetIp || 'N/A')}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Reason</span>
+                        <strong class="packet-inspector__value">${escapeHtml(arpResult.reason || 'No ARP responder')}</strong>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    if (arpResult.cacheHit === true) {
+        return `
+            <div class="packet-inspector__section">
+                <h5 class="packet-inspector__section-title">ARP RESOLUTION — CACHE HIT</h5>
+                <div class="packet-inspector__grid">
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Target IP</span>
+                        <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(arpResult.targetIp)}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Resolved MAC</span>
+                        <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(arpResult.targetMac)}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Status</span>
+                        <strong class="packet-inspector__value packet-inspector__value--success">Cache Hit (No broadcast needed)</strong>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    const req = arpResult.requestPacket;
+    const rep = arpResult.replyPacket;
+    const switchActions = Array.isArray(arpResult.hopActions)
+        ? arpResult.hopActions.filter((h) => h.type === 'switch')
+        : [];
+
+    let requestHtml = '';
+    if (req) {
+        requestHtml = `
+            <div class="packet-inspector__arp-subcard">
+                <div class="packet-inspector__subcard-title">REQUEST</div>
+                <div class="packet-inspector__grid">
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Source IP</span>
+                        <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(req.senderIp)}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Source MAC</span>
+                        <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(req.senderMac)}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Target IP</span>
+                        <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(req.targetIp)}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Target MAC</span>
+                        <strong class="packet-inspector__value packet-inspector__value--mono">FF:FF:FF:FF:FF:FF</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Operation</span>
+                        <strong class="packet-inspector__value">REQUEST</strong>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    let switchActionHtml = '';
+    if (switchActions.length) {
+        switchActionHtml = switchActions.map((sw) => `
+            <div class="packet-inspector__arp-subcard">
+                <div class="packet-inspector__subcard-title">SWITCH ACTION — ${escapeHtml(sw.deviceName || sw.deviceId)}</div>
+                <div class="packet-inspector__grid">
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Action</span>
+                        <strong class="packet-inspector__value">${escapeHtml(sw.action || 'FLOOD')}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Ingress</span>
+                        <strong class="packet-inspector__value">${escapeHtml(sw.ingressPort || 'N/A')}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Egress</span>
+                        <strong class="packet-inspector__value">${escapeHtml(Array.isArray(sw.egressPorts) ? sw.egressPorts.join(', ') : (sw.egressPort || 'All other ports'))}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Reason</span>
+                        <strong class="packet-inspector__value">${escapeHtml(sw.reason === 'broadcast' ? 'Broadcast' : sw.reason)}</strong>
+                    </div>
+                </div>
+            </div>
+        `).join('');
+    }
+
+    let replyHtml = '';
+    if (rep) {
+        replyHtml = `
+            <div class="packet-inspector__arp-subcard">
+                <div class="packet-inspector__subcard-title">REPLY</div>
+                <div class="packet-inspector__grid">
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Responder IP</span>
+                        <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(rep.senderIp)}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">MAC</span>
+                        <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(rep.senderMac)}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Operation</span>
+                        <strong class="packet-inspector__value">REPLY</strong>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    const cacheUpdatedHtml = `
+        <div class="packet-inspector__arp-subcard packet-inspector__arp-subcard--highlight">
+            <div class="packet-inspector__subcard-title">ARP CACHE UPDATED</div>
+            <div class="packet-inspector__item">
+                <span class="packet-inspector__label">Cached Entry</span>
+                <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(arpResult.targetIp)} → ${escapeHtml(arpResult.targetMac)}</strong>
+            </div>
+        </div>
+    `;
+
+    return `
+        <div class="packet-inspector__section">
+            <h5 class="packet-inspector__section-title">ARP RESOLUTION</h5>
+            ${requestHtml}
+            ${switchActionHtml}
+            ${replyHtml}
+            ${cacheUpdatedHtml}
+        </div>
+    `;
+}
+
 function renderPacketInspector(packet, result) {
     if (!packet && !result) {
         return '';
@@ -1877,6 +2064,8 @@ function renderPacketInspector(packet, result) {
     const summaryEndpoints = (pkt.sourceIp && pkt.destinationIp)
         ? `${pkt.sourceIp} → ${pkt.destinationIp}`
         : (path.length >= 2 ? `${path[0]} → ${path[path.length - 1]}` : '');
+
+    const arpHtml = renderArpResolutionSection(result?.arpResult);
 
     const ethernetHtml = `
         <div class="packet-inspector__section">
@@ -1971,6 +2160,7 @@ function renderPacketInspector(packet, result) {
                 <div class="packet-inspector__summary-title">${escapeHtml(summaryTitle)}</div>
                 ${summaryEndpoints ? `<div class="packet-inspector__summary-endpoints">${escapeHtml(summaryEndpoints)}</div>` : ''}
             </div>
+            ${arpHtml}
             ${ethernetHtml}
             ${ipv4Html}
             ${icmpHtml}
@@ -4113,7 +4303,8 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             path: arpResult.path,
             action: 'DROP',
             events: arpResult.events,
-            hopActions: arpResult.hopActions || []
+            hopActions: arpResult.hopActions || [],
+            arpResult
         };
     }
 
@@ -4165,7 +4356,8 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             action: forwardResult.action,
             hopActions: forwardResult.hopActions,
             events: frame.events,
-            packet: frame.packet
+            packet: frame.packet,
+            arpResult
         };
     }
 
@@ -4178,7 +4370,8 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             action: forwardResult.action,
             hopActions: forwardResult.hopActions,
             events: frame.events,
-            packet: frame.packet
+            packet: frame.packet,
+            arpResult
         };
     }
 
@@ -4240,7 +4433,8 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             hopActions: forwardResult.hopActions,
             reverseHopActions: reverseResult.hopActions,
             events: replyFrame.events,
-            packet: replyFrame.packet
+            packet: replyFrame.packet,
+            arpResult
         };
     }
 
@@ -4254,7 +4448,8 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
         hopActions: forwardResult.hopActions,
         reverseHopActions: reverseResult.hopActions,
         events: replyFrame.events,
-        packet: replyFrame.packet
+        packet: replyFrame.packet,
+        arpResult
     };
 }
 
