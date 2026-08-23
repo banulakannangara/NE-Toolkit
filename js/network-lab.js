@@ -2853,6 +2853,123 @@ function validateSendFrameEndpoints(sourceDevice, destinationDevice) {
     return { valid: true, path };
 }
 
+function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath) {
+    let action = 'FORWARD';
+    const traversedPath = [topologyPath[0]];
+
+    for (let i = 0; i < topologyPath.length - 1; i += 1) {
+        const fromId = topologyPath[i];
+        const toId = topologyPath[i + 1];
+        const fromDevice = getDeviceById(fromId);
+        const toDevice = getDeviceById(toId);
+
+        if (!fromDevice || !toDevice) {
+            frame.events.push('Topology link broken during transmission');
+            return {
+                success: false,
+                reason: 'A device on the topology path is missing.',
+                path: traversedPath,
+                action: 'DROP'
+            };
+        }
+
+        traversedPath.push(toId);
+
+        if (toDevice.type === 'switch') {
+            const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
+            frame.events.push(`Frame entered ${toDevice.name} on ${ingressPort}`);
+
+            const learnedDevice = findDeviceByMac(frame.sourceMac, null, networkState.devices);
+            const learnedDeviceId = learnedDevice?.id || fromEndpoint.id;
+            const learnedDeviceName = learnedDevice?.name || fromEndpoint.name;
+            learnSwitchMac(toDevice.id, frame.sourceMac, learnedDeviceId, ingressPort);
+            frame.events.push(`Switch ${toDevice.name} learned ${learnedDeviceName} MAC (${frame.sourceMac}) → ${ingressPort}`);
+
+            const nextHopId = topologyPath[i + 2];
+            const expectedEgressPort = nextHopId ? getPortForSwitchAndNeighbor(toDevice.id, nextHopId) : null;
+
+            const destEntry = getSwitchMacEntry(toDevice.id, frame.destinationMac);
+            if (!destEntry) {
+                frame.events.push(`Destination MAC (${frame.destinationMac}) unknown in MAC table`);
+                frame.events.push(`Switch ${toDevice.name} flooded frame on all ports except ${ingressPort}`);
+                action = 'FLOOD';
+            } else if (destEntry.port === ingressPort) {
+                frame.events.push(`Destination MAC (${frame.destinationMac}) found on incoming port ${ingressPort}`);
+                frame.events.push(`Switch ${toDevice.name} filtered (dropped) frame — destination is on incoming segment`);
+                action = 'DROP';
+                return {
+                    success: false,
+                    reason: `Switch ${toDevice.name} filtered frame (destination is on ingress port ${ingressPort}).`,
+                    path: traversedPath,
+                    action: 'DROP'
+                };
+            } else if (expectedEgressPort && destEntry.port === expectedEgressPort) {
+                frame.events.push(`Destination MAC found in MAC table → ${destEntry.port}`);
+                frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}`);
+                if (action !== 'FLOOD') {
+                    action = 'FORWARD';
+                }
+            } else if (expectedEgressPort && destEntry.port !== expectedEgressPort) {
+                frame.events.push(`Destination MAC mapped to ${destEntry.port} (mismatch with path to destination)`);
+                frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}; frame misdirected and dropped`);
+                action = 'DROP';
+                return {
+                    success: false,
+                    reason: `Switch ${toDevice.name} misdirected frame via ${destEntry.port}.`,
+                    path: traversedPath,
+                    action: 'DROP'
+                };
+            } else {
+                frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}`);
+            }
+        } else if (toDevice.type === 'router') {
+            const ingressPort = getPortForRouterAndNeighbor(toDevice.id, fromId);
+            const nextHopId = topologyPath[i + 2];
+            const egressPort = nextHopId ? getPortForRouterAndNeighbor(toDevice.id, nextHopId) : null;
+            const ingressIface = toDevice.interfaces?.[ingressPort];
+            const egressIface = egressPort ? toDevice.interfaces?.[egressPort] : null;
+
+            frame.events.push(`Frame received by ${toDevice.name} on ${ingressPort}`);
+
+            if (!ingressPort || !egressPort || !ingressIface || !egressIface) {
+                frame.events.push(`Router ${toDevice.name} could not resolve routing interfaces`);
+                return {
+                    success: false,
+                    reason: `Router ${toDevice.name} interface error.`,
+                    path: traversedPath,
+                    action: 'DROP'
+                };
+            }
+
+            frame.packet.ttl = Math.max(0, frame.packet.ttl - 1);
+            frame.events.push(`Router ${toDevice.name} decremented IP TTL to ${frame.packet.ttl}`);
+
+            if (frame.packet.ttl <= 0) {
+                frame.events.push(`Router ${toDevice.name} dropped packet: Time to Live (TTL) expired in transit`);
+                return {
+                    success: false,
+                    reason: `Time to Live (TTL) expired at router ${toDevice.name}.`,
+                    path: traversedPath,
+                    action: 'DROP'
+                };
+            }
+
+            frame.events.push(`Router ${toDevice.name} routed frame from ${ingressPort} to ${egressPort}`);
+            frame.sourceMac = egressIface.mac;
+            frame.events.push(`Router ${toDevice.name} rewrote source MAC to ${egressIface.mac}`);
+            frame.destinationMac = toEndpoint.mac;
+            frame.events.push(`Router ${toDevice.name} set destination MAC to ${toEndpoint.mac}`);
+        }
+    }
+
+    return {
+        success: true,
+        reason: '',
+        path: traversedPath,
+        action
+    };
+}
+
 function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
     const topologyPath = findTopologyPath(sourceDevice.id, destinationDevice.id);
 
@@ -2899,6 +3016,24 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
     }
 
     const initialTtl = typeof options?.initialTtl === 'number' ? options.initialTtl : 64;
+    const isIcmp = Boolean(options?.icmp);
+    const icmpConfig = typeof options?.icmp === 'object' ? options.icmp : {};
+
+    const packetPayload = {
+        sourceIp: sourceDevice.ip,
+        destinationIp: destinationDevice.ip,
+        ttl: initialTtl
+    };
+
+    if (isIcmp) {
+        packetPayload.protocol = 'ICMP';
+        packetPayload.icmp = {
+            type: icmpConfig.type || 'ECHO_REQUEST',
+            code: typeof icmpConfig.code === 'number' ? icmpConfig.code : 0,
+            identifier: typeof icmpConfig.identifier === 'number' ? icmpConfig.identifier : 1,
+            sequence: typeof icmpConfig.sequence === 'number' ? icmpConfig.sequence : 1
+        };
+    }
 
     const frame = {
         sourceDeviceId: sourceDevice.id,
@@ -2906,142 +3041,107 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
         sourceMac: sourceDevice.mac,
         destinationMac: initialDestMac,
         etherType: 'IPv4',
-        packet: {
-            sourceIp: sourceDevice.ip,
-            destinationIp: destinationDevice.ip,
-            ttl: initialTtl
-        },
+        packet: packetPayload,
         path: topologyPath,
         events: []
     };
 
-    let action = 'FORWARD';
-    const traversedPath = [topologyPath[0]];
+    if (isIcmp) {
+        frame.events.push(`${sourceDevice.name} sent ICMP Echo Request to ${destinationDevice.name}`);
+    }
 
-    for (let i = 0; i < topologyPath.length - 1; i += 1) {
-        const fromId = topologyPath[i];
-        const toId = topologyPath[i + 1];
-        const fromDevice = getDeviceById(fromId);
-        const toDevice = getDeviceById(toId);
+    const forwardResult = simulatePathTransmission(frame, sourceDevice, destinationDevice, topologyPath);
 
-        if (!fromDevice || !toDevice) {
-            frame.events.push('Topology link broken during transmission');
-            return {
-                success: false,
-                reason: 'A device on the topology path is missing.',
-                path: traversedPath,
-                action: 'DROP',
-                events: frame.events,
-                packet: frame.packet
-            };
-        }
+    if (!forwardResult.success) {
+        return {
+            success: false,
+            reason: forwardResult.reason,
+            path: forwardResult.path,
+            action: forwardResult.action,
+            events: frame.events,
+            packet: frame.packet
+        };
+    }
 
-        traversedPath.push(toId);
+    if (!isIcmp) {
+        frame.events.push(`${destinationDevice.name} received frame`);
+        return {
+            success: true,
+            reason: '',
+            path: forwardResult.path,
+            action: forwardResult.action,
+            events: frame.events,
+            packet: frame.packet
+        };
+    }
 
-        if (toDevice.type === 'switch') {
-            const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
-            frame.events.push(`Frame entered ${toDevice.name} on ${ingressPort}`);
+    // ICMP Echo Request delivered -> Generate ICMP Echo Reply & traverse reverse path
+    frame.events.push(`${destinationDevice.name} received ICMP Echo Request`);
+    frame.events.push(`${destinationDevice.name} generated ICMP Echo Reply to ${sourceDevice.name}`);
 
-            const learnedDevice = findDeviceByMac(frame.sourceMac, null, networkState.devices);
-            const learnedDeviceId = learnedDevice?.id || sourceDevice.id;
-            const learnedDeviceName = learnedDevice?.name || sourceDevice.name;
-            learnSwitchMac(toDevice.id, frame.sourceMac, learnedDeviceId, ingressPort);
-            frame.events.push(`Switch ${toDevice.name} learned ${learnedDeviceName} MAC (${frame.sourceMac}) → ${ingressPort}`);
+    const reverseTopologyPath = [...topologyPath].reverse();
+    let reverseInitialDestMac = sourceDevice.mac;
 
-            const nextHopId = topologyPath[i + 2];
-            const expectedEgressPort = nextHopId ? getPortForSwitchAndNeighbor(toDevice.id, nextHopId) : null;
-
-            const destEntry = getSwitchMacEntry(toDevice.id, frame.destinationMac);
-            if (!destEntry) {
-                frame.events.push(`Destination MAC (${frame.destinationMac}) unknown in MAC table`);
-                frame.events.push(`Switch ${toDevice.name} flooded frame on all ports except ${ingressPort}`);
-                action = 'FLOOD';
-            } else if (destEntry.port === ingressPort) {
-                frame.events.push(`Destination MAC (${frame.destinationMac}) found on incoming port ${ingressPort}`);
-                frame.events.push(`Switch ${toDevice.name} filtered (dropped) frame — destination is on incoming segment`);
-                action = 'DROP';
-                return {
-                    success: false,
-                    reason: `Switch ${toDevice.name} filtered frame (destination is on ingress port ${ingressPort}).`,
-                    path: traversedPath,
-                    action: 'DROP',
-                    events: frame.events,
-                    packet: frame.packet
-                };
-            } else if (expectedEgressPort && destEntry.port === expectedEgressPort) {
-                frame.events.push(`Destination MAC found in MAC table → ${destEntry.port}`);
-                frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}`);
-                if (action !== 'FLOOD') {
-                    action = 'FORWARD';
-                }
-            } else if (expectedEgressPort && destEntry.port !== expectedEgressPort) {
-                frame.events.push(`Destination MAC mapped to ${destEntry.port} (mismatch with path to destination)`);
-                frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}; frame misdirected and dropped`);
-                action = 'DROP';
-                return {
-                    success: false,
-                    reason: `Switch ${toDevice.name} misdirected frame via ${destEntry.port}.`,
-                    path: traversedPath,
-                    action: 'DROP',
-                    events: frame.events,
-                    packet: frame.packet
-                };
-            } else {
-                frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}`);
+    if (!sameSubnet) {
+        const revFirstRouterIndex = reverseTopologyPath.findIndex((id) => getDeviceById(id)?.type === 'router');
+        if (revFirstRouterIndex !== -1) {
+            const revRouter = getDeviceById(reverseTopologyPath[revFirstRouterIndex]);
+            const revPrevHopId = reverseTopologyPath[revFirstRouterIndex - 1];
+            const revIngressPort = getPortForRouterAndNeighbor(revRouter.id, revPrevHopId);
+            const revIngressIface = revRouter?.interfaces?.[revIngressPort];
+            if (revIngressIface && revIngressIface.mac) {
+                reverseInitialDestMac = revIngressIface.mac;
             }
-        } else if (toDevice.type === 'router') {
-            const ingressPort = getPortForRouterAndNeighbor(toDevice.id, fromId);
-            const nextHopId = topologyPath[i + 2];
-            const egressPort = nextHopId ? getPortForRouterAndNeighbor(toDevice.id, nextHopId) : null;
-            const ingressIface = toDevice.interfaces?.[ingressPort];
-            const egressIface = egressPort ? toDevice.interfaces?.[egressPort] : null;
-
-            frame.events.push(`Frame received by ${toDevice.name} on ${ingressPort}`);
-
-            if (!ingressPort || !egressPort || !ingressIface || !egressIface) {
-                frame.events.push(`Router ${toDevice.name} could not resolve routing interfaces`);
-                return {
-                    success: false,
-                    reason: `Router ${toDevice.name} interface error.`,
-                    path: traversedPath,
-                    action: 'DROP',
-                    events: frame.events,
-                    packet: frame.packet
-                };
-            }
-
-            frame.packet.ttl = Math.max(0, frame.packet.ttl - 1);
-            frame.events.push(`Router ${toDevice.name} decremented IP TTL to ${frame.packet.ttl}`);
-
-            if (frame.packet.ttl <= 0) {
-                frame.events.push(`Router ${toDevice.name} dropped packet: Time to Live (TTL) expired in transit`);
-                return {
-                    success: false,
-                    reason: `Time to Live (TTL) expired at router ${toDevice.name}.`,
-                    path: traversedPath,
-                    action: 'DROP',
-                    events: frame.events,
-                    packet: frame.packet
-                };
-            }
-
-            frame.events.push(`Router ${toDevice.name} routed frame from ${ingressPort} to ${egressPort}`);
-            frame.sourceMac = egressIface.mac;
-            frame.events.push(`Router ${toDevice.name} rewrote source MAC to ${egressIface.mac}`);
-            frame.destinationMac = destinationDevice.mac;
-            frame.events.push(`Router ${toDevice.name} set destination MAC to ${destinationDevice.mac}`);
         }
     }
 
-    frame.events.push(`${destinationDevice.name} received frame`);
+    const replyTtl = typeof options?.replyTtl === 'number' ? options.replyTtl : 64;
+    const replyPacket = {
+        sourceIp: destinationDevice.ip,
+        destinationIp: sourceDevice.ip,
+        protocol: 'ICMP',
+        ttl: replyTtl,
+        icmp: {
+            type: 'ECHO_REPLY',
+            code: 0,
+            identifier: frame.packet.icmp.identifier,
+            sequence: frame.packet.icmp.sequence
+        }
+    };
+
+    const replyFrame = {
+        sourceDeviceId: destinationDevice.id,
+        destinationDeviceId: sourceDevice.id,
+        sourceMac: destinationDevice.mac,
+        destinationMac: reverseInitialDestMac,
+        etherType: 'IPv4',
+        packet: replyPacket,
+        path: reverseTopologyPath,
+        events: frame.events
+    };
+
+    const reverseResult = simulatePathTransmission(replyFrame, destinationDevice, sourceDevice, reverseTopologyPath);
+
+    if (!reverseResult.success) {
+        return {
+            success: false,
+            reason: reverseResult.reason,
+            path: reverseResult.path,
+            action: reverseResult.action,
+            events: replyFrame.events,
+            packet: replyFrame.packet
+        };
+    }
+
+    replyFrame.events.push(`${sourceDevice.name} received ICMP Echo Reply`);
 
     return {
         success: true,
         reason: '',
-        path: traversedPath,
-        action,
-        events: frame.events,
-        packet: frame.packet
+        path: forwardResult.path,
+        action: forwardResult.action,
+        events: replyFrame.events,
+        packet: replyFrame.packet
     };
 }
 
