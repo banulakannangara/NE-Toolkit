@@ -1606,6 +1606,109 @@ function renderPropertiesPanel() {
     refreshInspectorValidation(selected);
 }
 
+function renderHopDecisionCard(hop) {
+    if (!hop) return '';
+    const deviceName = escapeHtml(hop.deviceName || hop.deviceId || 'Device');
+    const rawAction = String(hop.action || 'UNKNOWN').toUpperCase();
+    const actionClass = rawAction === 'FORWARD' ? 'forward' :
+                        rawAction === 'ROUTE' ? 'route' :
+                        rawAction === 'FLOOD' ? 'flood' :
+                        rawAction === 'DROP' ? 'drop' : 'forward';
+
+    const items = [];
+
+    const ingress = hop.ingressPort || hop.ingressInterface;
+    if (ingress) {
+        items.push({ label: 'Ingress', value: ingress });
+    }
+
+    if (hop.egressPort) {
+        items.push({ label: 'Egress', value: hop.egressPort });
+    } else if (hop.egressInterface) {
+        items.push({ label: 'Egress', value: hop.egressInterface });
+    } else if (Array.isArray(hop.egressPorts) && hop.egressPorts.length) {
+        items.push({ label: 'Egress', value: hop.egressPorts.join(', ') });
+    }
+
+    if (hop.reason) {
+        const reasonLabels = {
+            'known-unicast': 'Known Unicast',
+            'unknown-unicast': 'Unknown Unicast',
+            'broadcast': 'Broadcast',
+            'filtered-same-port': 'Filtered (Same Port)',
+            'port-mismatch': 'Port Mismatch',
+            'ttl-expired': 'TTL Expired'
+        };
+        items.push({ label: 'Reason', value: reasonLabels[hop.reason] || hop.reason });
+    }
+
+    if (typeof hop.ttl === 'number') {
+        if (hop.action === 'ROUTE') {
+            items.push({ label: 'TTL', value: `${hop.ttl + 1} → ${hop.ttl}` });
+        } else if (hop.action === 'DROP' && hop.reason === 'ttl-expired') {
+            items.push({ label: 'TTL', value: '1 → 0 (Expired)' });
+        } else {
+            items.push({ label: 'TTL', value: String(hop.ttl) });
+        }
+    }
+
+    if (hop.sourceMac) {
+        items.push({ label: 'Source MAC', value: hop.sourceMac });
+    }
+
+    if (hop.destinationMac) {
+        items.push({ label: 'Destination MAC', value: hop.destinationMac });
+    }
+
+    const itemsHtml = items.map((item) => `
+        <div class="hop-decision-item">
+            <span>${escapeHtml(item.label)}</span>
+            <strong>${escapeHtml(item.value)}</strong>
+        </div>
+    `).join('');
+
+    return `
+        <div class="hop-decision-card">
+            <div class="hop-decision-header">
+                <span class="hop-decision-device">${deviceName}</span>
+                <span class="badge badge--${actionClass}">${escapeHtml(rawAction)}</span>
+            </div>
+            <div class="hop-decision-grid">
+                ${itemsHtml}
+            </div>
+        </div>
+    `;
+}
+
+function renderHopDecisionsSection(hopActions, reverseHopActions) {
+    if (!Array.isArray(hopActions) || hopActions.length === 0) {
+        return '';
+    }
+
+    const forwardCards = hopActions.map((hop) => renderHopDecisionCard(hop)).join('');
+    let reverseHtml = '';
+
+    if (Array.isArray(reverseHopActions) && reverseHopActions.length > 0) {
+        const reverseCards = reverseHopActions.map((hop) => renderHopDecisionCard(hop)).join('');
+        reverseHtml = `
+            <div class="hop-decisions-subheading">Return Path — ICMP Echo Reply</div>
+            <div class="hop-decision-list">
+                ${reverseCards}
+            </div>
+        `;
+    }
+
+    return `
+        <div class="hop-decisions">
+            <h4>HOP DECISIONS</h4>
+            <div class="hop-decision-list">
+                ${forwardCards}
+            </div>
+            ${reverseHtml}
+        </div>
+    `;
+}
+
 function getSendFramePanelHtml() {
     const sourceDevice = getDeviceById(networkState.sendFrameState?.sourceId);
     const sourceName = sourceDevice ? escapeHtml(sourceDevice.name) : 'Not selected';
@@ -1619,6 +1722,10 @@ function getSendFramePanelHtml() {
             : 'Frame delivered';
     const eventsHtml = networkState.lastFrameResult?.events?.map((event, index) => `
             <li class="frame-log-item"><strong>${index + 1}.</strong><span>${escapeHtml(event)}</span></li>`).join('') || '';
+    const hopDecisionsHtml = renderHopDecisionsSection(
+        networkState.lastFrameResult?.hopActions,
+        networkState.lastFrameResult?.reverseHopActions
+    );
 
     return cleanDisplayText(`
         <div class="property-card">
@@ -1658,6 +1765,7 @@ function getSendFramePanelHtml() {
                             <strong>${escapeHtml(networkState.lastFrameResult.path.map((id) => getDeviceById(id)?.name || id).join(' → '))}</strong>
                         </div>
                     </div>
+                    ${hopDecisionsHtml}
                     <div class="frame-log">
                         <h4>EVENT LOG</h4>
                         <ul class="frame-log-list">

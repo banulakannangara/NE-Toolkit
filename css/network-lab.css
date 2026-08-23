@@ -791,3 +791,116 @@ body {
     }
 }
 
+/* Hop Decision Inspector Styles */
+.badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.65rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.badge--forward {
+    background: rgba(81, 207, 102, 0.16);
+    color: #51cf66;
+    border: 1px solid rgba(81, 207, 102, 0.35);
+}
+
+.badge--route {
+    background: rgba(0, 212, 255, 0.16);
+    color: #00d4ff;
+    border: 1px solid rgba(0, 212, 255, 0.35);
+}
+
+.badge--flood {
+    background: rgba(255, 209, 102, 0.16);
+    color: #ffd166;
+    border: 1px solid rgba(255, 209, 102, 0.35);
+}
+
+.badge--drop {
+    background: rgba(255, 138, 128, 0.16);
+    color: #ff8a80;
+    border: 1px solid rgba(255, 138, 128, 0.35);
+}
+
+.hop-decisions {
+    margin-top: 0.85rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.hop-decisions h4 {
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--lab-muted);
+    margin-bottom: 0.6rem;
+    text-transform: uppercase;
+}
+
+.hop-decision-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+}
+
+.hop-decision-card {
+    padding: 0.6rem 0.75rem;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.hop-decision-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.4rem;
+}
+
+.hop-decision-device {
+    font-weight: 700;
+    font-size: 0.82rem;
+    color: var(--lab-text);
+}
+
+.hop-decision-grid {
+    display: grid;
+    gap: 0.25rem;
+    font-size: 0.76rem;
+    color: var(--lab-muted);
+}
+
+.hop-decision-item {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.hop-decision-item span {
+    color: var(--lab-muted);
+}
+
+.hop-decision-item strong {
+    color: var(--lab-text);
+    font-family: "Courier New", monospace;
+    font-size: 0.74rem;
+    text-align: right;
+    word-break: break-all;
+}
+
+.hop-decisions-subheading {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--lab-accent-2);
+    margin: 0.65rem 0 0.35rem 0;
+    text-transform: uppercase;
+}
+
