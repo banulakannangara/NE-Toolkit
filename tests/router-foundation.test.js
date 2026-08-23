@@ -251,6 +251,7 @@ function resetLab() {
     networkState.lastFrameResult = null;
     networkState.switchRuntime = {};
     networkState.routerRuntime = {};
+    networkState.arpRuntime = {};
     networkState.typeCounters = {};
     networkState.connectionCounter = 0;
     networkState.connectionTestState = null;
@@ -1529,6 +1530,80 @@ runTest('42. Existing same-subnet PC -> Switch -> PC Send Frame regression still
     assert.strictEqual(result2.success, true);
     assert.strictEqual(result2.action, 'FORWARD');
     assert.strictEqual(result2.packet.ttl, 64);
+});
+
+// 43. Initial ARP cache is empty on devices
+runTest('43. Initial ARP cache is empty on devices', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+
+    const pcTable = getArpTable('PC0');
+    assert.ok(Array.isArray(pcTable), 'ARP table must be an array');
+    assert.strictEqual(pcTable.length, 0, 'Initial PC ARP table must be empty');
+
+    const routerTable = getArpTable('Router0');
+    assert.ok(Array.isArray(routerTable), 'Router ARP table must be an array');
+    assert.strictEqual(routerTable.length, 0, 'Initial Router ARP table must be empty');
+
+    assert.strictEqual(lookupArp('PC0', '192.168.1.1'), null, 'Lookup on empty table returns null');
+});
+
+// 44. ARP learning, lookup, and entry update
+runTest('44. ARP learning, lookup, and entry update', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+
+    const entry = learnArp('PC0', '192.168.1.1', '00:1A:2B:3C:4D:5E');
+    assert.ok(entry, 'learnArp must return created entry');
+    assert.strictEqual(entry.ip, '192.168.1.1');
+    assert.strictEqual(entry.mac, '00:1A:2B:3C:4D:5E');
+
+    const lookedUpMac = lookupArp('PC0', '192.168.1.1');
+    assert.strictEqual(lookedUpMac, '00:1A:2B:3C:4D:5E', 'lookupArp must return learned MAC');
+
+    const table = getArpTable('PC0');
+    assert.strictEqual(table.length, 1);
+
+    // Update same IP with new MAC
+    learnArp('PC0', '192.168.1.1', 'AA:BB:CC:DD:EE:FF');
+    assert.strictEqual(table.length, 1, 'Updating existing IP must not create duplicate entry');
+    assert.strictEqual(lookupArp('PC0', '192.168.1.1'), 'AA:BB:CC:DD:EE:FF', 'Lookup must return updated MAC');
+});
+
+// 45. Clear ARP table for specific device and globally
+runTest('45. Clear ARP table for specific device and globally', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('pc', 300, 100);
+
+    learnArp('PC0', '192.168.1.1', '00:11:22:33:44:55');
+    learnArp('PC1', '192.168.1.2', '66:77:88:99:AA:BB');
+
+    assert.strictEqual(getArpTable('PC0').length, 1);
+    assert.strictEqual(getArpTable('PC1').length, 1);
+
+    clearArpTable('PC0');
+    assert.strictEqual(getArpTable('PC0').length, 0, 'PC0 table must be cleared');
+    assert.strictEqual(getArpTable('PC1').length, 1, 'PC1 table must remain intact');
+
+    clearArpTable(); // Global clear
+    assert.strictEqual(getArpTable('PC1').length, 0, 'Global clear must reset all ARP tables');
+});
+
+// 46. Snapshot restoration preserves ARP tables
+runTest('46. Snapshot restoration preserves ARP tables', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    learnArp('PC0', '192.168.1.254', 'FE:DC:BA:98:76:54');
+
+    const snapshot = createLabSnapshot();
+
+    resetLab();
+    assert.strictEqual(getArpTable('PC0').length, 0, 'resetLab must clear ARP tables');
+
+    restoreSnapshot(snapshot);
+    assert.strictEqual(lookupArp('PC0', '192.168.1.254'), 'FE:DC:BA:98:76:54', 'Snapshot restore must restore ARP cache');
 });
 
 console.log('----------------------------------------------------');

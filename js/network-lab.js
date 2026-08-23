@@ -41,6 +41,7 @@ const networkState = {
     lastFrameResult: null,
     switchRuntime: {},
     routerRuntime: {},
+    arpRuntime: {},
     typeCounters: {},
     connectionCounter: 0,
     connectionTestState: null,
@@ -159,7 +160,8 @@ function createLabSnapshot() {
         connectionTestState: networkState.connectionTestState,
         lastConnectionTestResult: networkState.lastConnectionTestResult,
         switchRuntime: networkState.switchRuntime,
-        routerRuntime: networkState.routerRuntime
+        routerRuntime: networkState.routerRuntime,
+        arpRuntime: networkState.arpRuntime
     }));
 }
 
@@ -496,6 +498,7 @@ function clearCanvas() {
     cancelFrameAnimation();
     networkState.switchRuntime = {};
     networkState.routerRuntime = {};
+    networkState.arpRuntime = {};
     networkState.typeCounters = {};
     networkState.connectionCounter = 0;
     networkState.connectionTestState = null;
@@ -563,6 +566,9 @@ function deleteDevice(deviceId) {
     networkState.selectedConnectionId = null;
     networkState.connectionSourceId = null;
     delete networkState.routerRuntime[deviceId];
+    if (networkState.arpRuntime) {
+        delete networkState.arpRuntime[deviceId];
+    }
     delete inspectorDrafts[deviceId];
 
     updateStatus(`${device.name} removed.`);
@@ -974,6 +980,7 @@ function restoreSnapshot(snapshot) {
     networkState.lastConnectionTestResult = snapshot.lastConnectionTestResult || null;
     networkState.switchRuntime = snapshot.switchRuntime || {};
     networkState.routerRuntime = snapshot.routerRuntime || {};
+    networkState.arpRuntime = snapshot.arpRuntime || {};
     inspectorDrafts = {};
 }
 
@@ -2822,6 +2829,68 @@ function learnSwitchMac(switchId, sourceMac, sourceDeviceId, portLabel) {
 function clearSwitchMacTable(switchId) {
     const runtime = getSwitchRuntime(switchId);
     runtime.macTable = [];
+}
+
+function getArpRuntime(deviceId) {
+    if (!networkState.arpRuntime) {
+        networkState.arpRuntime = {};
+    }
+    if (!networkState.arpRuntime[deviceId]) {
+        networkState.arpRuntime[deviceId] = {
+            arpTable: []
+        };
+    }
+    return networkState.arpRuntime[deviceId];
+}
+
+function getArpTable(deviceId) {
+    const runtime = getArpRuntime(deviceId);
+    return runtime.arpTable;
+}
+
+function lookupArp(deviceId, ip) {
+    if (!ip) {
+        return null;
+    }
+    const table = getArpTable(deviceId);
+    const entry = table.find((item) => item.ip === ip);
+    return entry ? entry.mac : null;
+}
+
+function learnArp(deviceId, ip, mac, options = {}) {
+    if (!ip || !mac) {
+        return null;
+    }
+    const runtime = getArpRuntime(deviceId);
+    const normalizedMac = normalizeMacAddress(mac) || mac;
+    const existing = runtime.arpTable.find((entry) => entry.ip === ip);
+    if (existing) {
+        existing.mac = normalizedMac;
+        if (options.interface) {
+            existing.interface = options.interface;
+        }
+        existing.learnedAt = new Date().toISOString();
+        return existing;
+    }
+
+    const entry = {
+        ip,
+        mac: normalizedMac,
+        interface: options.interface || null,
+        type: options.type || 'dynamic',
+        learnedAt: new Date().toISOString()
+    };
+    runtime.arpTable.push(entry);
+    return entry;
+}
+
+function clearArpTable(deviceId) {
+    if (!deviceId) {
+        networkState.arpRuntime = {};
+        return;
+    }
+    const runtime = getArpRuntime(deviceId);
+    runtime.arpTable = [];
 }
 
 function validateSendFrameEndpoints(sourceDevice, destinationDevice) {
