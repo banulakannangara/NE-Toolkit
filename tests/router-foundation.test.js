@@ -695,6 +695,226 @@ runTest('19. Subsequent Send Frame uses learned MAC for FORWARD action', () => {
     assert.strictEqual(networkState.lastFrameResult.action, 'FORWARD');
 });
 
+// 20. Valid PC -> Router -> Server inter-subnet communication
+runTest('20. Valid PC -> Router -> Server inter-subnet communication succeeds', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    const result = analyzeCommunication(pc, server);
+    assert.strictEqual(result.possible, true, 'Layer-3 path PC0 -> Router0 -> Server0 should be possible');
+    assert.deepStrictEqual(result.path, ['PC0', 'Router0', 'Server0']);
+    assert.strictEqual(result.sourceIp, '192.168.1.10');
+    assert.strictEqual(result.destinationIp, '10.0.0.10');
+});
+
+// 21. Valid PC -> Switch -> Router -> Switch -> Server inter-subnet communication
+runTest('21. Valid PC -> Switch -> Router -> Switch -> Server inter-subnet communication succeeds', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 150, 100);
+    addDevice('router', 250, 100);
+    addDevice('switch', 350, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[2];
+    const server = networkState.devices[4];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Router0');
+    addConnection('Router0', 'Switch1');
+    addConnection('Switch1', 'Server0');
+
+    const result = analyzeCommunication(pc, server);
+    assert.strictEqual(result.possible, true, 'Inter-subnet path with intermediate switches should succeed');
+    assert.deepStrictEqual(result.path, ['PC0', 'Switch0', 'Router0', 'Switch1', 'Server0']);
+});
+
+// 22. Different subnets with no router fails
+runTest('22. Different subnets with no router on the path fails', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Server0');
+
+    const result = analyzeCommunication(pc, server);
+    assert.strictEqual(result.possible, false);
+    assert.ok(result.reason.includes('no router'), 'Reason should indicate no router on path');
+});
+
+// 23. Wrong or missing source gateway fails
+runTest('23. Wrong or missing source gateway fails inter-subnet communication', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = ''; // Missing gateway
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    // Missing source gateway
+    const result1 = analyzeCommunication(pc, server);
+    assert.strictEqual(result1.possible, false);
+    assert.ok(result1.reason.includes('gateway'), 'Must mention gateway');
+
+    // Wrong source gateway (mismatch with router Gig0/0)
+    pc.gateway = '192.168.1.254';
+    const result2 = analyzeCommunication(pc, server);
+    assert.strictEqual(result2.possible, false);
+    assert.ok(result2.reason.includes('match') || result2.reason.includes('gateway'));
+});
+
+// 24. Router missing destination-side interface fails
+runTest('24. Router missing destination-side interface on required subnet fails', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '172.16.1.1'; // Not on 10.0.0.0/24 subnet!
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    const result = analyzeCommunication(pc, server);
+    assert.strictEqual(result.possible, false);
+    assert.ok(result.reason.includes('destination subnet') || result.reason.includes('not on'));
+});
+
+// 25. Invalid destination gateway fails
+runTest('25. Invalid destination gateway fails inter-subnet communication', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.254'; // Doesn't match router interface 10.0.0.1
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    const result = analyzeCommunication(pc, server);
+    assert.strictEqual(result.possible, false);
+    assert.ok(result.reason.includes('Destination default gateway'));
+});
+
+// 26. Existing same-subnet communication still succeeds
+runTest('26. Existing same-subnet communication still succeeds', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('pc', 300, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[1];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'PC1');
+
+    const result = analyzeCommunication(pc0, pc1);
+    assert.strictEqual(result.possible, true);
+    assert.strictEqual(result.network, '192.168.1.0/24');
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

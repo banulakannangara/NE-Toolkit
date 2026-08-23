@@ -2999,18 +2999,100 @@ function analyzeCommunication(sourceDevice, targetDevice) {
         return { possible: false, reason: 'Incomplete subnet configuration.', path: [] };
     }
 
-    if (normalizedMaskA !== normalizedMaskB) {
-        return { possible: false, reason: 'Endpoint subnet masks do not match.', path: [] };
+    const sameSubnet = normalizedMaskA === normalizedMaskB
+        && isSameSubnet(sourceDevice.ip, targetDevice.ip, normalizedMaskA)
+        && isSameSubnet(sourceDevice.ip, targetDevice.ip, normalizedMaskB);
+
+    if (sameSubnet) {
+        const path = findTopologyPath(sourceDevice.id, targetDevice.id);
+        if (!path.length || path.length < 2) {
+            return { possible: false, reason: 'No topology path exists.', path: [] };
+        }
+
+        return {
+            possible: true,
+            reason: '',
+            path,
+            sourceName: sourceDevice.name,
+            sourceIp: sourceDevice.ip,
+            destinationName: targetDevice.name,
+            destinationIp: targetDevice.ip,
+            network: `${calculateNetworkAddress(sourceDevice.ip, normalizedMaskA)}/${getPrefixLengthFromMask(normalizedMaskA)}`
+        };
     }
 
-    if (!isSameSubnet(sourceDevice.ip, targetDevice.ip, normalizedMaskA)
-        || !isSameSubnet(sourceDevice.ip, targetDevice.ip, normalizedMaskB)) {
-        return { possible: false, reason: 'Devices are on different subnets.', path: [] };
-    }
-
+    // Inter-subnet communication via Router
     const path = findTopologyPath(sourceDevice.id, targetDevice.id);
     if (!path.length || path.length < 2) {
         return { possible: false, reason: 'No topology path exists.', path: [] };
+    }
+
+    const routerIndices = [];
+    path.forEach((id, index) => {
+        const dev = getDeviceById(id);
+        if (dev?.type === 'router') {
+            routerIndices.push(index);
+        }
+    });
+
+    if (!routerIndices.length) {
+        return { possible: false, reason: 'Devices are on different subnets and no router exists on the path.', path };
+    }
+
+    const firstRouterIndex = routerIndices[0];
+    const firstRouterId = path[firstRouterIndex];
+    const firstRouter = getDeviceById(firstRouterId);
+    const prevHopId = path[firstRouterIndex - 1];
+    const ingressPort = getPortForRouterAndNeighbor(firstRouter.id, prevHopId);
+
+    if (!ingressPort || !firstRouter.interfaces?.[ingressPort]) {
+        return { possible: false, reason: `No connected interface found on router ${firstRouter.name} toward ${sourceDevice.name}.`, path };
+    }
+
+    const ingressIface = firstRouter.interfaces[ingressPort];
+    if (!ingressIface.ip || !isValidIPv4(ingressIface.ip)) {
+        return { possible: false, reason: `Router ${firstRouter.name} interface ${ingressPort} has no valid IP configured.`, path };
+    }
+
+    if (!sourceDevice.gateway || !isValidIPv4(sourceDevice.gateway)) {
+        return { possible: false, reason: `Source device ${sourceDevice.name} has no default gateway configured.`, path };
+    }
+
+    if (sourceDevice.gateway !== ingressIface.ip) {
+        return { possible: false, reason: `Source default gateway (${sourceDevice.gateway}) does not match router interface IP (${ingressIface.ip}).`, path };
+    }
+
+    if (!isSameSubnet(sourceDevice.ip, ingressIface.ip, normalizedMaskA)) {
+        return { possible: false, reason: `Source default gateway (${sourceDevice.gateway}) is not on the source subnet.`, path };
+    }
+
+    const lastRouterIndex = routerIndices[routerIndices.length - 1];
+    const lastRouterId = path[lastRouterIndex];
+    const lastRouter = getDeviceById(lastRouterId);
+    const nextHopId = path[lastRouterIndex + 1];
+    const egressPort = getPortForRouterAndNeighbor(lastRouter.id, nextHopId);
+
+    if (!egressPort || !lastRouter.interfaces?.[egressPort]) {
+        return { possible: false, reason: `No connected interface found on router ${lastRouter.name} toward ${targetDevice.name}.`, path };
+    }
+
+    const egressIface = lastRouter.interfaces[egressPort];
+    if (!egressIface.ip || !isValidIPv4(egressIface.ip)) {
+        return { possible: false, reason: `Router ${lastRouter.name} interface ${egressPort} has no valid IP configured.`, path };
+    }
+
+    if (!isSameSubnet(egressIface.ip, targetDevice.ip, normalizedMaskB)) {
+        return { possible: false, reason: `Router ${lastRouter.name} interface ${egressPort} (${egressIface.ip}) is not on the destination subnet.`, path };
+    }
+
+    const trimmedDestGateway = targetDevice.gateway ? targetDevice.gateway.trim() : '';
+    if (trimmedDestGateway) {
+        if (!isValidIPv4(trimmedDestGateway)) {
+            return { possible: false, reason: `Destination default gateway (${trimmedDestGateway}) is not a valid IPv4 address.`, path };
+        }
+        if (trimmedDestGateway !== egressIface.ip) {
+            return { possible: false, reason: `Destination default gateway (${trimmedDestGateway}) does not match router interface IP (${egressIface.ip}).`, path };
+        }
     }
 
     return {
@@ -3021,7 +3103,7 @@ function analyzeCommunication(sourceDevice, targetDevice) {
         sourceIp: sourceDevice.ip,
         destinationName: targetDevice.name,
         destinationIp: targetDevice.ip,
-        network: `${calculateNetworkAddress(sourceDevice.ip, normalizedMaskA)}/${getPrefixLengthFromMask(normalizedMaskA)}`
+        network: `${calculateNetworkAddress(sourceDevice.ip, normalizedMaskA)}/${getPrefixLengthFromMask(normalizedMaskA)} → ${calculateNetworkAddress(targetDevice.ip, normalizedMaskB)}/${getPrefixLengthFromMask(normalizedMaskB)}`
     };
 }
 
