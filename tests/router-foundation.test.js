@@ -1606,6 +1606,90 @@ runTest('46. Snapshot restoration preserves ARP tables', () => {
     assert.strictEqual(lookupArp('PC0', '192.168.1.254'), 'FE:DC:BA:98:76:54', 'Snapshot restore must restore ARP cache');
 });
 
+// 47. Same-subnet next-hop resolves to destination IP
+runTest('47. Same-subnet next-hop resolves to destination IP', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('pc', 300, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[1];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    const nextHop = resolveNextHopIp(pc0, pc1);
+    assert.strictEqual(nextHop, '192.168.1.20', 'Same subnet must resolve to destination IP');
+});
+
+// 48. Inter-subnet next-hop resolves to source default gateway
+runTest('48. Inter-subnet next-hop resolves to source default gateway', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('server', 300, 100);
+
+    const pc0 = networkState.devices[0];
+    const server0 = networkState.devices[1];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    server0.ip = '10.0.0.10';
+    server0.subnetMask = '255.255.255.0';
+    server0.gateway = '10.0.0.1';
+
+    const nextHop = resolveNextHopIp(pc0, server0);
+    assert.strictEqual(nextHop, '192.168.1.1', 'Different subnet must resolve to source default gateway');
+});
+
+// 49. Missing source gateway is handled correctly
+runTest('49. Missing source gateway is handled correctly', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('server', 300, 100);
+
+    const pc0 = networkState.devices[0];
+    const server0 = networkState.devices[1];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = ''; // Missing gateway
+
+    server0.ip = '10.0.0.10';
+    server0.subnetMask = '255.255.255.0';
+    server0.gateway = '10.0.0.1';
+
+    const nextHop = resolveNextHopIp(pc0, server0);
+    assert.strictEqual(nextHop, null, 'Missing gateway for inter-subnet communication must return null');
+});
+
+// 50. Invalid/malformed gateway is handled correctly
+runTest('50. Invalid/malformed gateway is handled correctly', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('server', 300, 100);
+
+    const pc0 = networkState.devices[0];
+    const server0 = networkState.devices[1];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = 'invalid.gateway.ip'; // Malformed gateway
+
+    server0.ip = '10.0.0.10';
+    server0.subnetMask = '255.255.255.0';
+
+    const nextHop1 = resolveNextHopIp(pc0, server0);
+    assert.strictEqual(nextHop1, null, 'Malformed gateway string must return null');
+
+    pc0.gateway = '999.999.999.999'; // Out-of-range IP
+    const nextHop2 = resolveNextHopIp(pc0, server0);
+    assert.strictEqual(nextHop2, null, 'Out of range gateway IP must return null');
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

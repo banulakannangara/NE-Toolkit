@@ -2893,6 +2893,38 @@ function clearArpTable(deviceId) {
     runtime.arpTable = [];
 }
 
+function resolveNextHopIp(sourceDevice, destinationDevice) {
+    if (!sourceDevice || !destinationDevice) {
+        return null;
+    }
+
+    if (!isValidIPv4(sourceDevice.ip) || !isValidIPv4(destinationDevice.ip)) {
+        return null;
+    }
+
+    const normalizedMaskA = normalizeSubnetMask(sourceDevice.subnetMask);
+    const normalizedMaskB = normalizeSubnetMask(destinationDevice.subnetMask);
+
+    if (!normalizedMaskA || !normalizedMaskB) {
+        return null;
+    }
+
+    const sameSubnet = normalizedMaskA === normalizedMaskB
+        && isSameSubnet(sourceDevice.ip, destinationDevice.ip, normalizedMaskA)
+        && isSameSubnet(sourceDevice.ip, destinationDevice.ip, normalizedMaskB);
+
+    if (sameSubnet) {
+        return destinationDevice.ip;
+    }
+
+    const rawGateway = typeof sourceDevice.gateway === 'string' ? sourceDevice.gateway.trim() : '';
+    if (!rawGateway || !isValidIPv4(rawGateway)) {
+        return null;
+    }
+
+    return rawGateway;
+}
+
 function validateSendFrameEndpoints(sourceDevice, destinationDevice) {
     if (!sourceDevice || !destinationDevice) {
         return { valid: false, reason: 'Missing source or destination device.' };
