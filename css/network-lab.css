@@ -975,3 +975,89 @@ body {
     box-shadow: 0 0 16px rgba(81, 207, 102, 0.4), 0 4px 14px rgba(0, 0, 0, 0.4);
 }
 
+/* Packet Inspector Styles */
+.packet-inspector {
+    margin-top: 0.85rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.packet-inspector h4 {
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--lab-muted);
+    margin-bottom: 0.6rem;
+    text-transform: uppercase;
+}
+
+.packet-inspector__summary {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.7rem;
+    border-radius: 8px;
+    background: rgba(0, 212, 255, 0.08);
+    border: 1px solid rgba(0, 212, 255, 0.22);
+    margin-bottom: 0.6rem;
+}
+
+.packet-inspector__summary-title {
+    font-weight: 700;
+    font-size: 0.78rem;
+    color: var(--lab-accent);
+}
+
+.packet-inspector__summary-endpoints {
+    font-family: "Courier New", monospace;
+    font-size: 0.72rem;
+    color: var(--lab-text);
+}
+
+.packet-inspector__section {
+    padding: 0.55rem 0.7rem;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    margin-bottom: 0.5rem;
+}
+
+.packet-inspector__section-title {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--lab-accent-2);
+    margin: 0 0 0.35rem 0;
+    text-transform: uppercase;
+}
+
+.packet-inspector__grid {
+    display: grid;
+    gap: 0.25rem;
+    font-size: 0.76rem;
+}
+
+.packet-inspector__item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.packet-inspector__label {
+    color: var(--lab-muted);
+    font-size: 0.74rem;
+}
+
+.packet-inspector__value {
+    color: var(--lab-text);
+    font-size: 0.74rem;
+    text-align: right;
+}
+
+.packet-inspector__value--mono {
+    font-family: "Courier New", monospace;
+    letter-spacing: -0.01em;
+}
+

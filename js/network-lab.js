@@ -1829,6 +1829,155 @@ function renderHopDecisionsSection(hopActions, reverseHopActions) {
     `;
 }
 
+function formatIcmpType(type) {
+    if (!type) return 'Echo Request';
+    const str = String(type).toUpperCase();
+    if (str === 'ECHO_REQUEST' || str === '8') return 'Echo Request';
+    if (str === 'ECHO_REPLY' || str === '0') return 'Echo Reply';
+    return type;
+}
+
+function formatProtocol(proto) {
+    if (!proto) return 'ICMP (1)';
+    const str = String(proto).toUpperCase();
+    if (str === 'ICMP' || str === '1') return 'ICMP (1)';
+    if (str === 'TCP' || str === '6') return 'TCP (6)';
+    if (str === 'UDP' || str === '17') return 'UDP (17)';
+    return proto;
+}
+
+function renderPacketInspector(packet, result) {
+    if (!packet && !result) {
+        return '';
+    }
+
+    const pkt = packet || result?.packet || {};
+    const path = result?.path || [];
+    const sourceDev = path.length ? getDeviceById(path[0]) : null;
+    const destDev = path.length ? getDeviceById(path[path.length - 1]) : null;
+
+    const sourceMac = sourceDev?.type === 'router'
+        ? (sourceDev.interfaces?.['Gig0/0']?.mac || sourceDev.mac || 'N/A')
+        : (sourceDev?.mac || result?.hopActions?.[0]?.sourceMac || 'N/A');
+
+    const destMac = result?.hopActions?.[0]?.destinationMac
+        || (sourceDev ? lookupArp(sourceDev.id, pkt.destinationIp) : null)
+        || destDev?.mac
+        || 'N/A';
+
+    const etherType = pkt.protocol === 'ARP' ? 'ARP (0x0806)' : 'IPv4 (0x0800)';
+
+    let summaryTitle = 'IPv4 Packet';
+    if (pkt.icmp) {
+        summaryTitle = pkt.icmp.type === 'ECHO_REPLY' ? 'ICMP Echo Reply' : 'ICMP Echo Request';
+    } else if (pkt.protocol) {
+        summaryTitle = `${pkt.protocol} Packet`;
+    }
+
+    const summaryEndpoints = (pkt.sourceIp && pkt.destinationIp)
+        ? `${pkt.sourceIp} → ${pkt.destinationIp}`
+        : (path.length >= 2 ? `${path[0]} → ${path[path.length - 1]}` : '');
+
+    const ethernetHtml = `
+        <div class="packet-inspector__section">
+            <h5 class="packet-inspector__section-title">ETHERNET FRAME</h5>
+            <div class="packet-inspector__grid">
+                <div class="packet-inspector__item">
+                    <span class="packet-inspector__label">Source MAC</span>
+                    <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(sourceMac)}</strong>
+                </div>
+                <div class="packet-inspector__item">
+                    <span class="packet-inspector__label">Destination MAC</span>
+                    <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(destMac)}</strong>
+                </div>
+                <div class="packet-inspector__item">
+                    <span class="packet-inspector__label">EtherType</span>
+                    <strong class="packet-inspector__value">${escapeHtml(etherType)}</strong>
+                </div>
+            </div>
+        </div>
+    `;
+
+    let ipv4Html = '';
+    if (pkt.sourceIp || pkt.destinationIp || typeof pkt.ttl === 'number') {
+        const protoText = formatProtocol(pkt.protocol || (pkt.icmp ? 'ICMP' : 'IPv4'));
+        ipv4Html = `
+            <div class="packet-inspector__section">
+                <h5 class="packet-inspector__section-title">IPv4 PACKET</h5>
+                <div class="packet-inspector__grid">
+                    ${pkt.sourceIp ? `
+                        <div class="packet-inspector__item">
+                            <span class="packet-inspector__label">Source IP</span>
+                            <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(pkt.sourceIp)}</strong>
+                        </div>
+                    ` : ''}
+                    ${pkt.destinationIp ? `
+                        <div class="packet-inspector__item">
+                            <span class="packet-inspector__label">Destination IP</span>
+                            <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(pkt.destinationIp)}</strong>
+                        </div>
+                    ` : ''}
+                    ${typeof pkt.ttl === 'number' ? `
+                        <div class="packet-inspector__item">
+                            <span class="packet-inspector__label">TTL</span>
+                            <strong class="packet-inspector__value">${escapeHtml(String(pkt.ttl))}</strong>
+                        </div>
+                    ` : ''}
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Protocol</span>
+                        <strong class="packet-inspector__value">${escapeHtml(protoText)}</strong>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    let icmpHtml = '';
+    if (pkt.icmp) {
+        const typeText = formatIcmpType(pkt.icmp.type);
+        const codeText = typeof pkt.icmp.code === 'number' ? String(pkt.icmp.code) : '0';
+        const idText = typeof pkt.icmp.identifier === 'number' ? String(pkt.icmp.identifier) : '1';
+        const seqText = typeof pkt.icmp.sequence === 'number' ? String(pkt.icmp.sequence) : '1';
+
+        icmpHtml = `
+            <div class="packet-inspector__section">
+                <h5 class="packet-inspector__section-title">ICMP</h5>
+                <div class="packet-inspector__grid">
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Type</span>
+                        <strong class="packet-inspector__value">${escapeHtml(typeText)}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Code</span>
+                        <strong class="packet-inspector__value">${escapeHtml(codeText)}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Identifier</span>
+                        <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(idText)}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Sequence</span>
+                        <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(seqText)}</strong>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    return `
+        <div class="packet-inspector">
+            <h4>PACKET INSPECTOR</h4>
+            <div class="packet-inspector__summary">
+                <div class="packet-inspector__summary-title">${escapeHtml(summaryTitle)}</div>
+                ${summaryEndpoints ? `<div class="packet-inspector__summary-endpoints">${escapeHtml(summaryEndpoints)}</div>` : ''}
+            </div>
+            ${ethernetHtml}
+            ${ipv4Html}
+            ${icmpHtml}
+        </div>
+    `;
+}
+
 function getSendFramePanelHtml() {
     const sourceDevice = getDeviceById(networkState.sendFrameState?.sourceId);
     const sourceName = sourceDevice ? escapeHtml(sourceDevice.name) : 'Not selected';
@@ -1842,6 +1991,10 @@ function getSendFramePanelHtml() {
             : 'Frame delivered';
     const eventsHtml = networkState.lastFrameResult?.events?.map((event, index) => `
             <li class="frame-log-item"><strong>${index + 1}.</strong><span>${escapeHtml(event)}</span></li>`).join('') || '';
+    const packetInspectorHtml = renderPacketInspector(
+        networkState.lastFrameResult?.packet,
+        networkState.lastFrameResult
+    );
     const hopDecisionsHtml = renderHopDecisionsSection(
         networkState.lastFrameResult?.hopActions,
         networkState.lastFrameResult?.reverseHopActions
@@ -1885,6 +2038,7 @@ function getSendFramePanelHtml() {
                             <strong>${escapeHtml(networkState.lastFrameResult.path.map((id) => getDeviceById(id)?.name || id).join(' → '))}</strong>
                         </div>
                     </div>
+                    ${packetInspectorHtml}
                     ${hopDecisionsHtml}
                     <div class="frame-log">
                         <h4>EVENT LOG</h4>
