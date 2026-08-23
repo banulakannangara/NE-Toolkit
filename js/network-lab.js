@@ -556,15 +556,21 @@ function deleteDevice(deviceId) {
 
     pushHistory();
     cancelFrameAnimation();
+    removeSwitchMacEntriesForDevice(deviceId);
+
     networkState.devices = networkState.devices.filter((item) => item.id !== deviceId);
     const removedConnections = networkState.connections.filter((connection) => connection.source === deviceId || connection.target === deviceId);
     networkState.connections = networkState.connections.filter((connection) => connection.source !== deviceId && connection.target !== deviceId);
-    removedConnections.forEach((connection) => releasePortAssignmentsForConnection(connection.id));
+    removedConnections.forEach((connection) => {
+        removeSwitchMacEntriesForConnection(connection.id);
+        releasePortAssignmentsForConnection(connection.id);
+    });
     if (networkState.selectedDeviceId === deviceId) {
         networkState.selectedDeviceId = null;
     }
     networkState.selectedConnectionId = null;
     networkState.connectionSourceId = null;
+    delete networkState.switchRuntime[deviceId];
     delete networkState.routerRuntime[deviceId];
     if (networkState.arpRuntime) {
         delete networkState.arpRuntime[deviceId];
@@ -589,6 +595,7 @@ function deleteConnection(connectionId) {
     pushHistory();
     cancelFrameAnimation();
     networkState.connections = networkState.connections.filter((item) => item.id !== connectionId);
+    removeSwitchMacEntriesForConnection(connectionId);
     releasePortAssignmentsForConnection(connectionId);
     if (networkState.selectedConnectionId === connectionId) {
         networkState.selectedConnectionId = null;
@@ -2792,6 +2799,179 @@ function releasePortAssignmentsForConnection(connectionId) {
     }
 }
 
+const DEFAULT_SWITCH_MAC_AGING_SECONDS = 300;
+
+function isMacEntryExpired(entry, agingTimeSeconds = DEFAULT_SWITCH_MAC_AGING_SECONDS, now = Date.now()) {
+    if (!entry || typeof entry !== 'object' || !entry.learnedAt) {
+        return false;
+    }
+    if (typeof agingTimeSeconds !== 'number' || agingTimeSeconds <= 0 || !Number.isFinite(agingTimeSeconds)) {
+        return false;
+    }
+    const learnedTime = new Date(entry.learnedAt).getTime();
+    if (Number.isNaN(learnedTime)) {
+        return false;
+    }
+    const currentTime = typeof now === 'number' ? now : (now instanceof Date ? now.getTime() : Date.now());
+    const ageMs = currentTime - learnedTime;
+    return ageMs >= (agingTimeSeconds * 1000);
+}
+
+function ageSwitchMacTable(switchId, agingTimeSeconds = DEFAULT_SWITCH_MAC_AGING_SECONDS, now = Date.now()) {
+    if (!networkState.switchRuntime || !networkState.switchRuntime[switchId]) {
+        return 0;
+    }
+    const runtime = networkState.switchRuntime[switchId];
+    if (!Array.isArray(runtime.macTable) || runtime.macTable.length === 0) {
+        return 0;
+    }
+    if (typeof agingTimeSeconds !== 'number' || agingTimeSeconds <= 0 || !Number.isFinite(agingTimeSeconds)) {
+        return 0;
+    }
+
+    const initialCount = runtime.macTable.length;
+    runtime.macTable = runtime.macTable.filter((entry) => !isMacEntryExpired(entry, agingTimeSeconds, now));
+    return initialCount - runtime.macTable.length;
+}
+
+function ageSwitchMacTables(agingTimeSeconds = DEFAULT_SWITCH_MAC_AGING_SECONDS, now = Date.now()) {
+    if (!networkState.switchRuntime) {
+        return 0;
+    }
+    let totalRemoved = 0;
+    for (const switchId of Object.keys(networkState.switchRuntime)) {
+        totalRemoved += ageSwitchMacTable(switchId, agingTimeSeconds, now);
+    }
+    return totalRemoved;
+}
+
+function removeSwitchMacEntriesForDevice(deviceId) {
+    if (!networkState.switchRuntime || !deviceId) {
+        return 0;
+    }
+
+    const device = getDeviceById(deviceId);
+    const targetMacs = new Set();
+    if (device) {
+        if (device.type === 'router' && device.interfaces) {
+            Object.values(device.interfaces).forEach((iface) => {
+                if (iface && iface.mac) {
+                    const norm = normalizeMacAddress(iface.mac);
+                    if (norm) targetMacs.add(norm);
+                }
+            });
+        } else if (device.mac) {
+            const norm = normalizeMacAddress(device.mac);
+            if (norm) targetMacs.add(norm);
+        }
+    }
+
+    let removedCount = 0;
+    Object.keys(networkState.switchRuntime).forEach((switchId) => {
+        const runtime = networkState.switchRuntime[switchId];
+        if (runtime && Array.isArray(runtime.macTable)) {
+            const before = runtime.macTable.length;
+            runtime.macTable = runtime.macTable.filter((entry) => {
+                const matchesDeviceId = entry.deviceId === deviceId;
+                const matchesMac = targetMacs.has(entry.mac);
+                return !matchesDeviceId && !matchesMac;
+            });
+            removedCount += (before - runtime.macTable.length);
+        }
+    });
+
+    return removedCount;
+}
+
+function removeSwitchMacEntriesForConnection(connectionId) {
+    if (!networkState.switchRuntime || !connectionId) {
+        return 0;
+    }
+
+    let removedCount = 0;
+    Object.keys(networkState.switchRuntime).forEach((switchId) => {
+        const runtime = networkState.switchRuntime[switchId];
+        if (runtime && runtime.ports && Object.prototype.hasOwnProperty.call(runtime.ports, connectionId)) {
+            const portLabel = runtime.ports[connectionId];
+            if (portLabel && Array.isArray(runtime.macTable)) {
+                const before = runtime.macTable.length;
+                runtime.macTable = runtime.macTable.filter((entry) => entry.port !== portLabel);
+                removedCount += (before - runtime.macTable.length);
+            }
+        }
+    });
+
+    return removedCount;
+}
+
+function isSwitchMacEntryValid(switchId, entry) {
+    if (!entry || !entry.mac || !entry.port) {
+        return false;
+    }
+    const runtime = networkState.switchRuntime?.[switchId];
+    if (!runtime || !runtime.ports) {
+        return false;
+    }
+
+    // 1. Device exists and MAC belongs to an existing device
+    const device = findDeviceByMac(entry.mac) || (entry.deviceId ? getDeviceById(entry.deviceId) : null);
+    if (!device) {
+        return false;
+    }
+
+    // 2. Validate MAC belongs to that device
+    if (device.type === 'router' && device.interfaces) {
+        const hasMac = Object.values(device.interfaces).some((iface) => iface && normalizeMacAddress(iface.mac) === entry.mac);
+        if (!hasMac) return false;
+    } else if (device.mac) {
+        if (normalizeMacAddress(device.mac) !== entry.mac) return false;
+    }
+
+    // 3. The recorded switch port exists in runtime.ports
+    const connectionId = Object.keys(runtime.ports).find((cId) => runtime.ports[cId] === entry.port);
+    if (!connectionId) {
+        return false;
+    }
+
+    // 4. The connection still exists in networkState.connections
+    const connection = getConnectionById(connectionId);
+    if (!connection) {
+        return false;
+    }
+
+    // 5. The connection is still attached to this switch
+    if (connection.source !== switchId && connection.target !== switchId) {
+        return false;
+    }
+
+    return true;
+}
+
+function cleanupStaleSwitchMacEntries(switchId) {
+    if (!networkState.switchRuntime || !networkState.switchRuntime[switchId]) {
+        return 0;
+    }
+    const runtime = networkState.switchRuntime[switchId];
+    if (!Array.isArray(runtime.macTable) || runtime.macTable.length === 0) {
+        return 0;
+    }
+
+    const initialCount = runtime.macTable.length;
+    runtime.macTable = runtime.macTable.filter((entry) => isSwitchMacEntryValid(switchId, entry));
+    return initialCount - runtime.macTable.length;
+}
+
+function cleanupAllStaleSwitchMacEntries() {
+    if (!networkState.switchRuntime) {
+        return 0;
+    }
+    let totalRemoved = 0;
+    for (const switchId of Object.keys(networkState.switchRuntime)) {
+        totalRemoved += cleanupStaleSwitchMacEntries(switchId);
+    }
+    return totalRemoved;
+}
+
 function getSwitchMacEntry(switchId, mac) {
     const runtime = getSwitchRuntime(switchId);
     const normalized = normalizeMacAddress(mac);
@@ -2955,8 +3135,8 @@ function validateSendFrameEndpoints(sourceDevice, destinationDevice) {
 }
 
 function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath) {
-    let action = 'FORWARD';
     const traversedPath = [topologyPath[0]];
+    const hopActions = [];
 
     for (let i = 0; i < topologyPath.length - 1; i += 1) {
         const fromId = topologyPath[i];
@@ -2970,13 +3150,19 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                 success: false,
                 reason: 'A device on the topology path is missing.',
                 path: traversedPath,
-                action: 'DROP'
+                action: 'DROP',
+                hopActions
             };
         }
 
         traversedPath.push(toId);
 
         if (toDevice.type === 'switch') {
+            const agingTime = typeof frame?.agingTimeSeconds === 'number' ? frame.agingTimeSeconds : DEFAULT_SWITCH_MAC_AGING_SECONDS;
+            const nowTime = typeof frame?.now === 'number' ? frame.now : (frame?.now instanceof Date ? frame.now.getTime() : Date.now());
+            ageSwitchMacTable(toDevice.id, agingTime, nowTime);
+            cleanupStaleSwitchMacEntries(toDevice.id);
+
             const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
             frame.events.push(`Frame entered ${toDevice.name} on ${ingressPort}`);
 
@@ -2988,40 +3174,102 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
 
             const nextHopId = topologyPath[i + 2];
             const expectedEgressPort = nextHopId ? getPortForSwitchAndNeighbor(toDevice.id, nextHopId) : null;
+            const runtime = getSwitchRuntime(toDevice.id);
+            const egressPorts = Object.values(runtime.ports).filter(p => p !== ingressPort);
 
-            const destEntry = getSwitchMacEntry(toDevice.id, frame.destinationMac);
-            if (!destEntry) {
+            const isBroadcast = frame.destinationMac === 'FF:FF:FF:FF:FF:FF';
+            const destEntry = isBroadcast ? null : getSwitchMacEntry(toDevice.id, frame.destinationMac);
+
+            if (isBroadcast) {
+                frame.events.push(`Switch ${toDevice.name} flooded broadcast frame (FF:FF:FF:FF:FF:FF) on all ports except ${ingressPort}`);
+                hopActions.push({
+                    deviceId: toDevice.id,
+                    deviceName: toDevice.name,
+                    type: 'switch',
+                    action: 'FLOOD',
+                    reason: 'broadcast',
+                    ingressPort,
+                    egressPorts,
+                    destinationMac: frame.destinationMac
+                });
+            } else if (!destEntry) {
                 frame.events.push(`Destination MAC (${frame.destinationMac}) unknown in MAC table`);
-                frame.events.push(`Switch ${toDevice.name} flooded frame on all ports except ${ingressPort}`);
-                action = 'FLOOD';
+                frame.events.push(`Switch ${toDevice.name} flooded unknown unicast frame on all ports except ${ingressPort}`);
+                hopActions.push({
+                    deviceId: toDevice.id,
+                    deviceName: toDevice.name,
+                    type: 'switch',
+                    action: 'FLOOD',
+                    reason: 'unknown-unicast',
+                    ingressPort,
+                    egressPorts,
+                    destinationMac: frame.destinationMac
+                });
             } else if (destEntry.port === ingressPort) {
                 frame.events.push(`Destination MAC (${frame.destinationMac}) found on incoming port ${ingressPort}`);
                 frame.events.push(`Switch ${toDevice.name} filtered (dropped) frame — destination is on incoming segment`);
-                action = 'DROP';
+                hopActions.push({
+                    deviceId: toDevice.id,
+                    deviceName: toDevice.name,
+                    type: 'switch',
+                    action: 'DROP',
+                    reason: 'filtered-same-port',
+                    ingressPort,
+                    destinationMac: frame.destinationMac
+                });
                 return {
                     success: false,
                     reason: `Switch ${toDevice.name} filtered frame (destination is on ingress port ${ingressPort}).`,
                     path: traversedPath,
-                    action: 'DROP'
+                    action: 'DROP',
+                    hopActions
                 };
             } else if (expectedEgressPort && destEntry.port === expectedEgressPort) {
                 frame.events.push(`Destination MAC found in MAC table → ${destEntry.port}`);
                 frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}`);
-                if (action !== 'FLOOD') {
-                    action = 'FORWARD';
-                }
+                hopActions.push({
+                    deviceId: toDevice.id,
+                    deviceName: toDevice.name,
+                    type: 'switch',
+                    action: 'FORWARD',
+                    reason: 'known-unicast',
+                    ingressPort,
+                    egressPort: destEntry.port,
+                    destinationMac: frame.destinationMac
+                });
             } else if (expectedEgressPort && destEntry.port !== expectedEgressPort) {
                 frame.events.push(`Destination MAC mapped to ${destEntry.port} (mismatch with path to destination)`);
                 frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}; frame misdirected and dropped`);
-                action = 'DROP';
+                hopActions.push({
+                    deviceId: toDevice.id,
+                    deviceName: toDevice.name,
+                    type: 'switch',
+                    action: 'DROP',
+                    reason: 'port-mismatch',
+                    ingressPort,
+                    egressPort: destEntry.port,
+                    expectedEgressPort,
+                    destinationMac: frame.destinationMac
+                });
                 return {
                     success: false,
                     reason: `Switch ${toDevice.name} misdirected frame via ${destEntry.port}.`,
                     path: traversedPath,
-                    action: 'DROP'
+                    action: 'DROP',
+                    hopActions
                 };
             } else {
                 frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}`);
+                hopActions.push({
+                    deviceId: toDevice.id,
+                    deviceName: toDevice.name,
+                    type: 'switch',
+                    action: 'FORWARD',
+                    reason: 'known-unicast',
+                    ingressPort,
+                    egressPort: destEntry.port,
+                    destinationMac: frame.destinationMac
+                });
             }
         } else if (toDevice.type === 'router') {
             const ingressPort = getPortForRouterAndNeighbor(toDevice.id, fromId);
@@ -3038,7 +3286,8 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     success: false,
                     reason: `Router ${toDevice.name} interface error.`,
                     path: traversedPath,
-                    action: 'DROP'
+                    action: 'DROP',
+                    hopActions
                 };
             }
 
@@ -3047,11 +3296,22 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
 
             if (frame.packet.ttl <= 0) {
                 frame.events.push(`Router ${toDevice.name} dropped packet: Time to Live (TTL) expired in transit`);
+                hopActions.push({
+                    deviceId: toDevice.id,
+                    deviceName: toDevice.name,
+                    type: 'router',
+                    action: 'DROP',
+                    reason: 'ttl-expired',
+                    ingressInterface: ingressPort,
+                    egressInterface: egressPort,
+                    ttl: 0
+                });
                 return {
                     success: false,
                     reason: `Time to Live (TTL) expired at router ${toDevice.name}.`,
                     path: traversedPath,
-                    action: 'DROP'
+                    action: 'DROP',
+                    hopActions
                 };
             }
 
@@ -3086,7 +3346,8 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     success: false,
                     reason: routerArpResult.reason,
                     path: traversedPath,
-                    action: 'DROP'
+                    action: 'DROP',
+                    hopActions
                 };
             }
 
@@ -3096,6 +3357,18 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
 
             frame.destinationMac = routerArpResult.targetMac;
             frame.events.push(`Router ${toDevice.name} set destination MAC to ${routerArpResult.targetMac}`);
+
+            hopActions.push({
+                deviceId: toDevice.id,
+                deviceName: toDevice.name,
+                type: 'router',
+                action: 'ROUTE',
+                ingressInterface: ingressPort,
+                egressInterface: egressPort,
+                ttl: frame.packet.ttl,
+                sourceMac: egressIface.mac,
+                destinationMac: frame.destinationMac
+            });
         }
     }
 
@@ -3103,7 +3376,8 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
         success: true,
         reason: '',
         path: traversedPath,
-        action
+        action: 'FORWARD',
+        hopActions
     };
 }
 
@@ -3113,7 +3387,8 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
             success: false,
             reason: 'Missing requester device or target IP.',
             path: requesterDevice ? [requesterDevice.id] : [],
-            events: ['Invalid ARP parameters']
+            events: ['Invalid ARP parameters'],
+            hopActions: []
         };
     }
 
@@ -3122,7 +3397,8 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
             success: false,
             reason: `Invalid target IP address: ${targetIp}`,
             path: [requesterDevice.id],
-            events: [`Invalid target IP address: ${targetIp}`]
+            events: [`Invalid target IP address: ${targetIp}`],
+            hopActions: []
         };
     }
 
@@ -3159,7 +3435,8 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
             success: false,
             reason: `Requester ${requesterDevice.name} has no valid interface configured for target IP ${targetIp}.`,
             path: [requesterDevice.id],
-            events: [`${requesterDevice.name} cannot resolve ARP: no local interface matches ${targetIp}`]
+            events: [`${requesterDevice.name} cannot resolve ARP: no local interface matches ${targetIp}`],
+            hopActions: []
         };
     }
 
@@ -3174,12 +3451,14 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
             path: [requesterDevice.id],
             events: [`${requesterDevice.name} ARP cache hit for ${targetIp} → ${cachedMac}`],
             requestPacket: null,
-            replyPacket: null
+            replyPacket: null,
+            hopActions: []
         };
     }
 
     // 2. CACHE MISS -> Simulate ARP Request / Reply
     const events = [];
+    const hopActions = [];
     const isTargetOnReqSubnet = isSameSubnet(reqIp, targetIp, reqMask);
 
     // Build explicit ARP Request packet
@@ -3234,7 +3513,8 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
             success: false,
             reason: `ARP resolution failed: No responder for IP ${targetIp} on local subnet.`,
             path: [requesterDevice.id],
-            events
+            events,
+            hopActions
         };
     }
 
@@ -3258,7 +3538,8 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
             success: false,
             reason: `ARP resolution failed: No physical path between ${requesterDevice.name} and ${targetDevice.name}.`,
             path: [requesterDevice.id],
-            events
+            events,
+            hopActions
         };
     }
 
@@ -3271,7 +3552,8 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
                 success: false,
                 reason: 'ARP broadcast cannot cross router boundary.',
                 path: arpPath.slice(0, i + 1),
-                events
+                events,
+                hopActions
             };
         }
     }
@@ -3288,7 +3570,8 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
                 success: false,
                 reason: 'A device on the topology path is missing.',
                 path: arpPath.slice(0, i + 1),
-                events
+                events,
+                hopActions
             };
         }
 
@@ -3297,6 +3580,18 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
             learnSwitchMac(toDevice.id, reqMac, requesterDevice.id, ingressPort);
             events.push(`Switch ${toDevice.name} learned ${requesterDevice.name} MAC (${reqMac}) → ${ingressPort}`);
             events.push(`Switch ${toDevice.name} flooded broadcast frame (FF:FF:FF:FF:FF:FF) on all ports except ${ingressPort}`);
+            const runtime = getSwitchRuntime(toDevice.id);
+            const egressPorts = Object.values(runtime.ports).filter(p => p !== ingressPort);
+            hopActions.push({
+                deviceId: toDevice.id,
+                deviceName: toDevice.name,
+                type: 'switch',
+                action: 'FLOOD',
+                reason: 'broadcast',
+                ingressPort,
+                egressPorts,
+                destinationMac: 'FF:FF:FF:FF:FF:FF'
+            });
         }
     }
 
@@ -3327,12 +3622,37 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
         const toDevice = getDeviceById(toId);
 
         if (toDevice && toDevice.type === 'switch') {
+            const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
+            learnSwitchMac(toDevice.id, targetMac, targetDevice.id, ingressPort);
+            events.push(`Switch ${toDevice.name} learned ${targetDevice.name} MAC (${targetMac}) → ${ingressPort}`);
+
             const destEntry = getSwitchMacEntry(toDevice.id, reqMac);
             if (destEntry) {
                 events.push(`Switch ${toDevice.name} forwarded unicast ARP Reply to ${requesterDevice.name} on ${destEntry.port}`);
+                hopActions.push({
+                    deviceId: toDevice.id,
+                    deviceName: toDevice.name,
+                    type: 'switch',
+                    action: 'FORWARD',
+                    reason: 'known-unicast',
+                    ingressPort,
+                    egressPort: destEntry.port,
+                    destinationMac: reqMac
+                });
             } else {
-                const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
+                const runtime = getSwitchRuntime(toDevice.id);
+                const egressPorts = Object.values(runtime.ports).filter(p => p !== ingressPort);
                 events.push(`Switch ${toDevice.name} flooded ARP Reply on all ports except ${ingressPort}`);
+                hopActions.push({
+                    deviceId: toDevice.id,
+                    deviceName: toDevice.name,
+                    type: 'switch',
+                    action: 'FLOOD',
+                    reason: 'unknown-unicast',
+                    ingressPort,
+                    egressPorts,
+                    destinationMac: reqMac
+                });
             }
         }
     }
@@ -3352,7 +3672,8 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
         path: arpPath,
         events,
         requestPacket,
-        replyPacket
+        replyPacket,
+        hopActions
     };
 }
 
@@ -3365,7 +3686,8 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             reason: 'No physical topology path exists between devices.',
             path: sourceDevice ? [sourceDevice.id] : [],
             action: 'DROP',
-            events: ['No topology connection between source and destination']
+            events: ['No topology connection between source and destination'],
+            hopActions: []
         };
     }
 
@@ -3383,7 +3705,8 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
                 reason: commAnalysis.reason,
                 path: commAnalysis.path && commAnalysis.path.length ? commAnalysis.path : [topologyPath[0]],
                 action: 'DROP',
-                events: [commAnalysis.reason]
+                events: [commAnalysis.reason],
+                hopActions: []
             };
         }
     }
@@ -3395,7 +3718,8 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             reason: 'Could not resolve next-hop IP address.',
             path: [topologyPath[0]],
             action: 'DROP',
-            events: ['Next-hop IP resolution failed']
+            events: ['Next-hop IP resolution failed'],
+            hopActions: []
         };
     }
 
@@ -3406,7 +3730,8 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             reason: arpResult.reason,
             path: arpResult.path,
             action: 'DROP',
-            events: arpResult.events
+            events: arpResult.events,
+            hopActions: arpResult.hopActions || []
         };
     }
 
@@ -3439,7 +3764,9 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
         etherType: 'IPv4',
         packet: packetPayload,
         path: topologyPath,
-        events: [...arpResult.events]
+        events: [...arpResult.events],
+        agingTimeSeconds: options?.agingTimeSeconds,
+        now: options?.now
     };
 
     if (isIcmp) {
@@ -3454,6 +3781,7 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             reason: forwardResult.reason,
             path: forwardResult.path,
             action: forwardResult.action,
+            hopActions: forwardResult.hopActions,
             events: frame.events,
             packet: frame.packet
         };
@@ -3466,6 +3794,7 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             reason: '',
             path: forwardResult.path,
             action: forwardResult.action,
+            hopActions: forwardResult.hopActions,
             events: frame.events,
             packet: frame.packet
         };
@@ -3513,7 +3842,9 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
         etherType: 'IPv4',
         packet: replyPacket,
         path: reverseTopologyPath,
-        events: frame.events
+        events: frame.events,
+        agingTimeSeconds: options?.agingTimeSeconds,
+        now: options?.now
     };
 
     const reverseResult = simulatePathTransmission(replyFrame, destinationDevice, sourceDevice, reverseTopologyPath);
@@ -3524,6 +3855,8 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             reason: reverseResult.reason,
             path: reverseResult.path,
             action: reverseResult.action,
+            hopActions: forwardResult.hopActions,
+            reverseHopActions: reverseResult.hopActions,
             events: replyFrame.events,
             packet: replyFrame.packet
         };
@@ -3536,6 +3869,8 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
         reason: '',
         path: forwardResult.path,
         action: forwardResult.action,
+        hopActions: forwardResult.hopActions,
+        reverseHopActions: reverseResult.hopActions,
         events: replyFrame.events,
         packet: replyFrame.packet
     };

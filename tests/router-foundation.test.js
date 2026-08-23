@@ -478,16 +478,16 @@ runTest('13. V5.1 Regression: PC-Switch-PC topology, MAC learning and frame tran
     const comm = analyzeCommunication(pc0, pc1);
     assert.strictEqual(comm.possible, true, 'Direct subnet communication between PC0 and PC1 must be possible');
 
-    // Simulate frame from PC0 to PC1
+    // Simulate frame from PC0 to PC1 (ARP exchange learns both MACs, subsequent frame is FORWARD)
     const frameResult = simulateSendFrame(pc0, pc1);
     assert.strictEqual(frameResult.success, true, 'Frame delivery from PC0 to PC1 must succeed');
-    assert.strictEqual(frameResult.action, 'FLOOD', 'Initial delivery should flood unknown MAC');
+    assert.strictEqual(frameResult.action, 'FORWARD', 'Delivery after ARP exchange should forward via learned MAC');
 
-    // Switch should have learned PC0 MAC
+    // Switch should have learned both PC0 and PC1 MACs during ARP exchange
     const switchMacs = getSwitchRuntime('Switch0').macTable;
-    assert.strictEqual(switchMacs.length, 1);
-    assert.strictEqual(switchMacs[0].mac, normalizeMacAddress(pc0.mac));
-    assert.strictEqual(switchMacs[0].port, 'Fa0/1');
+    assert.strictEqual(switchMacs.length, 2);
+    assert.ok(switchMacs.some(e => e.mac === normalizeMacAddress(pc0.mac) && e.port === 'Fa0/1'));
+    assert.ok(switchMacs.some(e => e.mac === normalizeMacAddress(pc1.mac) && e.port === 'Fa0/2'));
 
     // Send frame in reverse direction (PC1 -> PC0)
     const frameResult2 = simulateSendFrame(pc1, pc0);
@@ -639,7 +639,7 @@ runTest('18. Send Frame directly triggers animation lifecycle and frame packet c
     handleDeviceSelection('PC1', mockEvent);
     assert.ok(networkState.lastFrameResult);
     assert.strictEqual(networkState.lastFrameResult.success, true);
-    assert.strictEqual(networkState.lastFrameResult.action, 'FLOOD');
+    assert.strictEqual(networkState.lastFrameResult.action, 'FORWARD');
 
     // Check that frame packet element was created in frameAnimationLayer
     const layer = document.getElementById('frameAnimationLayer');
@@ -649,7 +649,7 @@ runTest('18. Send Frame directly triggers animation lifecycle and frame packet c
     // Check getSendFramePanelHtml renders properly
     const panelHtml = getSendFramePanelHtml();
     assert.ok(panelHtml.includes('Send Frame'));
-    assert.ok(panelHtml.includes('FLOOD'));
+    assert.ok(panelHtml.includes('FORWARD'));
     assert.ok(panelHtml.includes('PC0'));
     assert.ok(panelHtml.includes('PC1'));
 });
@@ -673,11 +673,11 @@ runTest('19. Subsequent Send Frame uses learned MAC for FORWARD action', () => {
 
     const mockEvent = { stopPropagation: () => {} };
 
-    // 1st transmission: PC0 -> PC1 (FLOOD)
+    // 1st transmission: PC0 -> PC1 (FORWARD after ARP learning)
     handleToolbarAction('sendFrame');
     handleDeviceSelection('PC0', mockEvent);
     handleDeviceSelection('PC1', mockEvent);
-    assert.strictEqual(networkState.lastFrameResult.action, 'FLOOD');
+    assert.strictEqual(networkState.lastFrameResult.action, 'FORWARD');
 
     // Finish 1st animation
     networkState.sendFrameState = {
@@ -1019,7 +1019,7 @@ runTest('29. Same-subnet Send Frame regression (PC0 -> Switch0 -> PC1)', () => {
 
     const result1 = simulateSendFrame(pc0, pc1);
     assert.strictEqual(result1.success, true);
-    assert.strictEqual(result1.action, 'FLOOD');
+    assert.strictEqual(result1.action, 'FORWARD');
 
     const result2 = simulateSendFrame(pc1, pc0);
     assert.strictEqual(result2.success, true);
@@ -1237,7 +1237,7 @@ runTest('35. Same-subnet Send Frame regression (TTL remains 64 across switch)', 
 
     const result1 = simulateSendFrame(pc0, pc1);
     assert.strictEqual(result1.success, true);
-    assert.strictEqual(result1.action, 'FLOOD');
+    assert.strictEqual(result1.action, 'FORWARD');
     assert.strictEqual(result1.packet.ttl, 64, 'TTL must remain 64 on switch hop');
 
     const result2 = simulateSendFrame(pc1, pc0);
@@ -1523,7 +1523,7 @@ runTest('42. Existing same-subnet PC -> Switch -> PC Send Frame regression still
 
     const result1 = simulateSendFrame(pc0, pc1);
     assert.strictEqual(result1.success, true);
-    assert.strictEqual(result1.action, 'FLOOD');
+    assert.strictEqual(result1.action, 'FORWARD');
     assert.strictEqual(result1.packet.ttl, 64);
 
     const result2 = simulateSendFrame(pc1, pc0);
@@ -2382,6 +2382,918 @@ runTest('68. Full V5.1-V5.5 regression with end-to-end ARP and ICMP', () => {
     restoreSnapshot(snap);
     assert.strictEqual(networkState.devices.length, 5);
     assert.strictEqual(lookupArp('Router0', '192.168.2.20'), pc1.mac);
+});
+
+// 69. Switch learns responder MAC during ARP Reply
+runTest('69. Switch learns responder MAC during ARP Reply', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    clearSwitchMacTable('Switch0');
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 0);
+
+    // Trigger cold ARP resolution
+    const arpRes = simulateArpResolution(pc0, pc1.ip);
+    assert.strictEqual(arpRes.success, true);
+
+    const swTable = getSwitchRuntime('Switch0').macTable;
+    assert.strictEqual(swTable.length, 2, 'Switch0 MAC table must contain both PC0 and PC1 entries after ARP exchange');
+
+    const pc0Entry = swTable.find(e => e.mac === normalizeMacAddress(pc0.mac));
+    assert.ok(pc0Entry, 'PC0 MAC entry must exist');
+    assert.strictEqual(pc0Entry.port, 'Fa0/1', 'PC0 must map to Fa0/1');
+
+    const pc1Entry = swTable.find(e => e.mac === normalizeMacAddress(pc1.mac));
+    assert.ok(pc1Entry, 'PC1 MAC entry must exist');
+    assert.strictEqual(pc1Entry.port, 'Fa0/2', 'PC1 must map to Fa0/2');
+});
+
+// 70. IPv4 frame forwarded as known-unicast after ARP resolution
+runTest('70. IPv4 frame forwarded as known-unicast after ARP resolution', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    const frameResult = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(frameResult.success, true);
+
+    // Destination MAC is known in Switch0's MAC table
+    const destEntry = getSwitchMacEntry('Switch0', pc1.mac);
+    assert.ok(destEntry, 'Destination MAC must be known in Switch0 MAC table');
+    assert.strictEqual(destEntry.port, 'Fa0/2');
+
+    // Switch forwarding event reports known-unicast forwarding
+    const events = frameResult.events.join(' | ');
+    assert.ok(events.includes('Switch0 forwarded frame through Fa0/2'), 'Must log unicast forward event on Fa0/2');
+    assert.strictEqual(frameResult.action, 'FORWARD', 'Action must be FORWARD');
+});
+
+// 71. ARP broadcast behavior verification
+runTest('71. ARP Request uses FF:FF:FF:FF:FF:FF and switch floods broadcast', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    const arpRes = simulateArpResolution(pc0, pc1.ip);
+    assert.strictEqual(arpRes.success, true);
+    assert.strictEqual(arpRes.requestPacket.targetMac, '00:00:00:00:00:00');
+    assert.ok(arpRes.events.some(e => e.includes('flooded broadcast frame (FF:FF:FF:FF:FF:FF) on all ports except Fa0/1')));
+});
+
+// 72. ARP cache mutual learning verification
+runTest('72. ARP cache mutual learning between requester and responder', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    simulateArpResolution(pc0, pc1.ip);
+
+    // Requester learned responder
+    assert.strictEqual(lookupArp('PC0', pc1.ip), pc1.mac, 'PC0 must cache PC1 IP -> MAC');
+    // Responder learned requester
+    assert.strictEqual(lookupArp('PC1', pc0.ip), pc0.mac, 'PC1 must cache PC0 IP -> MAC');
+});
+
+// 73. Known-unicast switch forwarding with per-hop action reporting
+runTest('73. Known-unicast switch forwarding records FORWARD in hopActions', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    const result = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.action, 'FORWARD');
+    assert.ok(Array.isArray(result.hopActions), 'hopActions must be an array');
+    assert.strictEqual(result.hopActions.length, 1);
+
+    const hop0 = result.hopActions[0];
+    assert.strictEqual(hop0.deviceId, 'Switch0');
+    assert.strictEqual(hop0.type, 'switch');
+    assert.strictEqual(hop0.action, 'FORWARD');
+    assert.strictEqual(hop0.reason, 'known-unicast');
+    assert.strictEqual(hop0.ingressPort, 'Fa0/1');
+    assert.strictEqual(hop0.egressPort, 'Fa0/2');
+    assert.strictEqual(hop0.destinationMac, pc1.mac);
+});
+
+// 74. Unknown-unicast flooding records FLOOD with excluded ingress port
+runTest('74. Unknown-unicast flooding records FLOOD in hopActions and excludes ingress port', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+    addDevice('server', 250, 250);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+    addConnection('Switch0', 'Server0');
+
+    clearSwitchMacTable('Switch0');
+
+    // Transmit frame directly with unknown destination MAC
+    const unknownMac = '02:AA:BB:CC:DD:EE';
+    const frame = {
+        sourceDeviceId: pc0.id,
+        destinationDeviceId: pc1.id,
+        sourceMac: pc0.mac,
+        destinationMac: unknownMac,
+        etherType: 'IPv4',
+        packet: { sourceIp: pc0.ip, destinationIp: pc1.ip, ttl: 64 },
+        path: ['PC0', 'Switch0', 'PC1'],
+        events: []
+    };
+
+    const result = simulatePathTransmission(frame, pc0, pc1, ['PC0', 'Switch0', 'PC1']);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.hopActions.length, 1);
+
+    const hop0 = result.hopActions[0];
+    assert.strictEqual(hop0.deviceId, 'Switch0');
+    assert.strictEqual(hop0.action, 'FLOOD');
+    assert.strictEqual(hop0.reason, 'unknown-unicast');
+    assert.strictEqual(hop0.ingressPort, 'Fa0/1');
+    assert.ok(Array.isArray(hop0.egressPorts));
+    assert.strictEqual(hop0.egressPorts.includes('Fa0/1'), false, 'Ingress port must be excluded from flood egress ports');
+    assert.ok(hop0.egressPorts.includes('Fa0/2'));
+    assert.ok(hop0.egressPorts.includes('Fa0/3'));
+});
+
+// 75. Broadcast flooding records FLOOD with broadcast reason
+runTest('75. Broadcast flooding records FLOOD with reason broadcast in hopActions', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    const arpRes = simulateArpResolution(pc0, pc1.ip);
+    assert.strictEqual(arpRes.success, true);
+    assert.ok(Array.isArray(arpRes.hopActions), 'ARP result must have hopActions');
+
+    const broadcastHop = arpRes.hopActions.find(h => h.reason === 'broadcast');
+    assert.ok(broadcastHop, 'Broadcast hop action must exist');
+    assert.strictEqual(broadcastHop.action, 'FLOOD');
+    assert.strictEqual(broadcastHop.destinationMac, 'FF:FF:FF:FF:FF:FF');
+    assert.strictEqual(broadcastHop.ingressPort, 'Fa0/1');
+});
+
+// 76. Multi-switch known-unicast preserves per-hop actions across switches and routers
+runTest('76. Multi-switch known-unicast preserves per-hop actions across switches and routers', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 150, 100);
+    addDevice('router', 300, 100);
+    addDevice('switch', 450, 100);
+    addDevice('server', 550, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[2];
+    const server = networkState.devices[4];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Router0');
+    addConnection('Router0', 'Switch1');
+    addConnection('Switch1', 'Server0');
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.action, 'FORWARD');
+    assert.ok(Array.isArray(result.hopActions));
+    assert.strictEqual(result.hopActions.length, 3, 'Must record Switch0, Router0, and Switch1 hop actions');
+
+    const [hop0, hop1, hop2] = result.hopActions;
+
+    // Switch0
+    assert.strictEqual(hop0.deviceId, 'Switch0');
+    assert.strictEqual(hop0.type, 'switch');
+    assert.strictEqual(hop0.action, 'FORWARD');
+    assert.strictEqual(hop0.ingressPort, 'Fa0/1');
+    assert.strictEqual(hop0.egressPort, 'Fa0/2');
+
+    // Router0
+    assert.strictEqual(hop1.deviceId, 'Router0');
+    assert.strictEqual(hop1.type, 'router');
+    assert.strictEqual(hop1.action, 'ROUTE');
+    assert.strictEqual(hop1.ingressInterface, 'Gig0/0');
+    assert.strictEqual(hop1.egressInterface, 'Gig0/1');
+    assert.strictEqual(hop1.ttl, 63);
+
+    // Switch1
+    assert.strictEqual(hop2.deviceId, 'Switch1');
+    assert.strictEqual(hop2.type, 'switch');
+    assert.strictEqual(hop2.action, 'FORWARD');
+    assert.strictEqual(hop2.ingressPort, 'Fa0/1');
+    assert.strictEqual(hop2.egressPort, 'Fa0/2');
+});
+
+// 77. Mixed forwarding preserves independent switch decisions
+runTest('77. Mixed forwarding preserves independent switch decisions in hopActions', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 150, 100);
+    addDevice('switch', 300, 100);
+    addDevice('pc', 450, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[3];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Switch1');
+    addConnection('Switch1', 'PC1');
+
+    // Teach Switch1 PC1's MAC directly on Fa0/2
+    learnSwitchMac('Switch1', pc1.mac, pc1.id, 'Fa0/2');
+
+    // Leave Switch0 unlearned for PC1's MAC
+    clearSwitchMacTable('Switch0');
+
+    // Send frame across path: PC0 -> Switch0 -> Switch1 -> PC1
+    const frame = {
+        sourceDeviceId: pc0.id,
+        destinationDeviceId: pc1.id,
+        sourceMac: pc0.mac,
+        destinationMac: pc1.mac,
+        etherType: 'IPv4',
+        packet: { sourceIp: pc0.ip, destinationIp: pc1.ip, ttl: 64 },
+        path: ['PC0', 'Switch0', 'Switch1', 'PC1'],
+        events: []
+    };
+
+    const result = simulatePathTransmission(frame, pc0, pc1, ['PC0', 'Switch0', 'Switch1', 'PC1']);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.hopActions.length, 2);
+
+    // Switch0 flooded (unknown-unicast)
+    assert.strictEqual(result.hopActions[0].deviceId, 'Switch0');
+    assert.strictEqual(result.hopActions[0].action, 'FLOOD');
+    assert.strictEqual(result.hopActions[0].reason, 'unknown-unicast');
+
+    // Switch1 forwarded (known-unicast)
+    assert.strictEqual(result.hopActions[1].deviceId, 'Switch1');
+    assert.strictEqual(result.hopActions[1].action, 'FORWARD');
+    assert.strictEqual(result.hopActions[1].reason, 'known-unicast');
+    assert.strictEqual(result.hopActions[1].egressPort, 'Fa0/2');
+});
+
+// 78. Same-port filtering drops frame
+runTest('78. Same-port destination MAC drops frame on incoming segment', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    // Artificially map PC1 MAC to Fa0/1 (the same port as PC0)
+    learnSwitchMac('Switch0', pc1.mac, pc1.id, 'Fa0/1');
+
+    const frame = {
+        sourceDeviceId: pc0.id,
+        destinationDeviceId: pc1.id,
+        sourceMac: pc0.mac,
+        destinationMac: pc1.mac,
+        etherType: 'IPv4',
+        packet: { sourceIp: pc0.ip, destinationIp: pc1.ip, ttl: 64 },
+        path: ['PC0', 'Switch0', 'PC1'],
+        events: []
+    };
+
+    const result = simulatePathTransmission(frame, pc0, pc1, ['PC0', 'Switch0', 'PC1']);
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.action, 'DROP');
+    assert.strictEqual(result.hopActions.length, 1);
+    assert.strictEqual(result.hopActions[0].action, 'DROP');
+    assert.strictEqual(result.hopActions[0].reason, 'filtered-same-port');
+});
+
+// 79. Fresh MAC entry does not expire
+runTest('79. Fresh MAC entry does not expire', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const mac = '02:11:22:33:44:55';
+    learnSwitchMac('Switch0', mac, 'PC0', 'Fa0/1');
+
+    const entry = getSwitchMacEntry('Switch0', mac);
+    assert.ok(entry, 'Entry should exist');
+    assert.strictEqual(isMacEntryExpired(entry, 300, Date.now()), false);
+
+    const removed = ageSwitchMacTable('Switch0', 300, Date.now());
+    assert.strictEqual(removed, 0, 'No entries should be removed');
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 1);
+});
+
+// 80. Expired MAC entry is removed
+runTest('80. Expired MAC entry is removed', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const mac = '02:11:22:33:44:55';
+    learnSwitchMac('Switch0', mac, 'PC0', 'Fa0/1');
+
+    const entry = getSwitchMacEntry('Switch0', mac);
+    assert.ok(entry);
+
+    const futureTime = Date.now() + 305000;
+    assert.strictEqual(isMacEntryExpired(entry, 300, futureTime), true);
+
+    const removed = ageSwitchMacTable('Switch0', 300, futureTime);
+    assert.strictEqual(removed, 1, 'Expired entry must be removed');
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 0);
+});
+
+// 81. Aging preserves fresh entries
+runTest('81. Aging preserves fresh entries', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const now = Date.now();
+
+    learnSwitchMac('Switch0', '02:11:11:11:11:11', 'PC0', 'Fa0/1');
+    learnSwitchMac('Switch0', '02:22:22:22:22:22', 'PC1', 'Fa0/2');
+
+    const table = getSwitchRuntime('Switch0').macTable;
+    // Set 1st entry to be 400 seconds old
+    table[0].learnedAt = new Date(now - 400000).toISOString();
+    // Set 2nd entry to be 50 seconds old
+    table[1].learnedAt = new Date(now - 50000).toISOString();
+
+    const removed = ageSwitchMacTable('Switch0', 300, now);
+    assert.strictEqual(removed, 1, 'Only 1 expired entry should be removed');
+    const updatedTable = getSwitchRuntime('Switch0').macTable;
+    assert.strictEqual(updatedTable.length, 1);
+    assert.strictEqual(updatedTable[0].mac, '02:22:22:22:22:22', 'Fresh entry must be preserved');
+});
+
+// 82. Expired destination becomes unknown unicast
+runTest('82. Expired destination becomes unknown unicast', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    // Learn PC1 MAC on Switch0 but make it expired (400 seconds old)
+    learnSwitchMac('Switch0', pc1.mac, pc1.id, 'Fa0/2');
+    const table = getSwitchRuntime('Switch0').macTable;
+    table[0].learnedAt = new Date(Date.now() - 400000).toISOString();
+
+    const frame = {
+        sourceDeviceId: pc0.id,
+        destinationDeviceId: pc1.id,
+        sourceMac: pc0.mac,
+        destinationMac: pc1.mac,
+        etherType: 'IPv4',
+        packet: { sourceIp: pc0.ip, destinationIp: pc1.ip, ttl: 64 },
+        path: ['PC0', 'Switch0', 'PC1'],
+        events: []
+    };
+
+    const result = simulatePathTransmission(frame, pc0, pc1, ['PC0', 'Switch0', 'PC1']);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.hopActions.length, 1);
+    assert.strictEqual(result.hopActions[0].action, 'FLOOD');
+    assert.strictEqual(result.hopActions[0].reason, 'unknown-unicast');
+});
+
+// 83. Relearning refreshes aging timestamp
+runTest('83. Relearning refreshes aging timestamp', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const mac = '02:AA:BB:CC:DD:EE';
+
+    learnSwitchMac('Switch0', mac, 'PC0', 'Fa0/1');
+    const entry = getSwitchMacEntry('Switch0', mac);
+    const oldTime = new Date(Date.now() - 100000).toISOString();
+    entry.learnedAt = oldTime;
+
+    // Relearn MAC
+    learnSwitchMac('Switch0', mac, 'PC0', 'Fa0/1');
+    const refreshedEntry = getSwitchMacEntry('Switch0', mac);
+    assert.notStrictEqual(refreshedEntry.learnedAt, oldTime);
+    assert.ok(new Date(refreshedEntry.learnedAt).getTime() > new Date(oldTime).getTime());
+});
+
+// 84. MAC mobility refreshes port and timestamp
+runTest('84. MAC mobility refreshes port and timestamp', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const mac = '02:AA:BB:CC:DD:EE';
+
+    learnSwitchMac('Switch0', mac, 'PC0', 'Fa0/1');
+    const initialTime = new Date(Date.now() - 50000).toISOString();
+    const entry = getSwitchMacEntry('Switch0', mac);
+    entry.learnedAt = initialTime;
+
+    // Same MAC seen on Fa0/2
+    learnSwitchMac('Switch0', mac, 'PC0', 'Fa0/2');
+    const table = getSwitchRuntime('Switch0').macTable;
+    assert.strictEqual(table.length, 1, 'Only one entry should exist for the MAC');
+    assert.strictEqual(table[0].port, 'Fa0/2', 'Port must update to Fa0/2');
+    assert.ok(new Date(table[0].learnedAt).getTime() > new Date(initialTime).getTime(), 'learnedAt must refresh');
+});
+
+// 85. Global aging affects all switches independently
+runTest('85. Global aging affects all switches independently', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    const now = Date.now();
+
+    learnSwitchMac('Switch0', '02:11:11:11:11:11', 'PC0', 'Fa0/1');
+    learnSwitchMac('Switch1', '02:22:22:22:22:22', 'PC1', 'Fa0/1');
+
+    // Make Switch0 entry expired, Switch1 entry fresh
+    getSwitchRuntime('Switch0').macTable[0].learnedAt = new Date(now - 400000).toISOString();
+    getSwitchRuntime('Switch1').macTable[0].learnedAt = new Date(now - 10000).toISOString();
+
+    const totalRemoved = ageSwitchMacTables(300, now);
+    assert.strictEqual(totalRemoved, 1, 'Total removed entries should be 1');
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 0, 'Switch0 entry should be removed');
+    assert.strictEqual(getSwitchRuntime('Switch1').macTable.length, 1, 'Switch1 entry should remain');
+});
+
+// 86. ARP cache is unaffected by MAC aging
+runTest('86. ARP cache is unaffected by MAC aging', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc1.ip = '192.168.1.20';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    // Populate both ARP and Switch MAC tables
+    learnArp('PC0', pc1.ip, pc1.mac);
+    learnSwitchMac('Switch0', pc1.mac, pc1.id, 'Fa0/2');
+
+    assert.strictEqual(lookupArp('PC0', pc1.ip), pc1.mac);
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 1);
+
+    // Age switch MAC table past expiration
+    const now = Date.now();
+    getSwitchRuntime('Switch0').macTable[0].learnedAt = new Date(now - 400000).toISOString();
+    ageSwitchMacTable('Switch0', 300, now);
+
+    // Switch MAC entry is gone, but PC0 ARP cache is intact
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 0, 'Switch MAC entry must be removed');
+    assert.strictEqual(lookupArp('PC0', pc1.ip), pc1.mac, 'ARP entry must remain unaffected');
+});
+
+// 87. Device deletion removes MAC entry
+runTest('87. Device deletion removes MAC entry from switches', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+
+    const pc0 = networkState.devices[0];
+    addConnection('PC0', 'Switch0');
+    learnSwitchMac('Switch0', pc0.mac, pc0.id, 'Fa0/1');
+
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 1);
+    deleteDevice('PC0');
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 0, 'PC0 MAC must be removed upon device deletion');
+});
+
+// 88. Router deletion removes all interface MAC entries
+runTest('88. Router deletion removes all interface MAC entries from switches', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('switch', 400, 100);
+
+    const router = networkState.devices[1];
+    addConnection('Switch0', 'Router0');
+    addConnection('Router0', 'Switch1');
+
+    const mac0 = router.interfaces['Gig0/0'].mac;
+    const mac1 = router.interfaces['Gig0/1'].mac;
+
+    learnSwitchMac('Switch0', mac0, 'Router0', 'Fa0/1');
+    learnSwitchMac('Switch1', mac1, 'Router0', 'Fa0/1');
+
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 1);
+    assert.strictEqual(getSwitchRuntime('Switch1').macTable.length, 1);
+
+    deleteDevice('Router0');
+
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 0, 'Switch0 Router0 MAC entry must be removed');
+    assert.strictEqual(getSwitchRuntime('Switch1').macTable.length, 0, 'Switch1 Router0 MAC entry must be removed');
+});
+
+// 89. Connection deletion removes MAC learned on that port
+runTest('89. Connection deletion removes MAC learned on that port', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+
+    const pc0 = networkState.devices[0];
+    addConnection('PC0', 'Switch0');
+    const connId = networkState.connections[0].id;
+    learnSwitchMac('Switch0', pc0.mac, pc0.id, 'Fa0/1');
+
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 1);
+    deleteConnection(connId);
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 0, 'MAC learned on deleted connection must be removed');
+});
+
+// 90. Unrelated MAC entries survive connection deletion
+runTest('90. Unrelated MAC entries survive connection deletion', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    learnSwitchMac('Switch0', pc0.mac, pc0.id, 'Fa0/1');
+    learnSwitchMac('Switch0', pc1.mac, pc1.id, 'Fa0/2');
+
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 2);
+
+    const conn0 = networkState.connections[0].id;
+    deleteConnection(conn0);
+
+    const table = getSwitchRuntime('Switch0').macTable;
+    assert.strictEqual(table.length, 1, 'Only PC0 MAC should be removed');
+    assert.strictEqual(table[0].mac, normalizeMacAddress(pc1.mac), 'PC1 MAC must survive');
+});
+
+// 91. Stale port mapping is detected
+runTest('91. Stale port mapping is detected and removed by cleanupStaleSwitchMacEntries', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+
+    const pc0 = networkState.devices[0];
+    addConnection('PC0', 'Switch0');
+
+    // Add entry on disconnected/invalid port Fa0/99
+    getSwitchRuntime('Switch0').macTable.push({
+        mac: pc0.mac,
+        port: 'Fa0/99',
+        deviceId: 'PC0',
+        learnedAt: new Date().toISOString()
+    });
+
+    assert.strictEqual(isSwitchMacEntryValid('Switch0', getSwitchRuntime('Switch0').macTable[0]), false);
+    const removed = cleanupStaleSwitchMacEntries('Switch0');
+    assert.strictEqual(removed, 1);
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 0);
+});
+
+// 92. Valid MAC entry survives cleanup
+runTest('92. Valid MAC entry survives cleanup', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+
+    const pc0 = networkState.devices[0];
+    addConnection('PC0', 'Switch0');
+    learnSwitchMac('Switch0', pc0.mac, pc0.id, 'Fa0/1');
+
+    const entry = getSwitchRuntime('Switch0').macTable[0];
+    assert.strictEqual(isSwitchMacEntryValid('Switch0', entry), true);
+
+    const removed = cleanupStaleSwitchMacEntries('Switch0');
+    assert.strictEqual(removed, 0);
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 1);
+});
+
+// 93. Reconnection does not preserve old port mapping
+runTest('93. Reconnection does not preserve old port mapping', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    addConnection('PC0', 'Switch0'); // Fa0/1
+    addConnection('Switch0', 'Server0'); // Fa0/2
+
+    learnSwitchMac('Switch0', pc0.mac, pc0.id, 'Fa0/1');
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable[0].port, 'Fa0/1');
+
+    // Delete connection
+    deleteConnection(networkState.connections[0].id);
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 0);
+
+    // Reconnect PC0 on new connection (will get Fa0/1 or next available)
+    addConnection('PC0', 'Switch0');
+    learnSwitchMac('Switch0', pc0.mac, pc0.id, 'Fa0/1');
+
+    const table = getSwitchRuntime('Switch0').macTable;
+    assert.strictEqual(table.length, 1);
+});
+
+// 94. Stale entry cannot cause incorrect forwarding
+runTest('94. Stale entry cannot cause incorrect forwarding and results in FLOOD', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc1.ip = '192.168.1.20';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    // Manually inject a stale mapping for PC1 on non-existent port Fa0/99
+    getSwitchRuntime('Switch0').macTable.push({
+        mac: pc1.mac,
+        port: 'Fa0/99',
+        deviceId: 'PC1',
+        learnedAt: new Date().toISOString()
+    });
+
+    const frame = {
+        sourceDeviceId: pc0.id,
+        destinationDeviceId: pc1.id,
+        sourceMac: pc0.mac,
+        destinationMac: pc1.mac,
+        etherType: 'IPv4',
+        packet: { sourceIp: pc0.ip, destinationIp: pc1.ip, ttl: 64 },
+        path: ['PC0', 'Switch0', 'PC1'],
+        events: []
+    };
+
+    const result = simulatePathTransmission(frame, pc0, pc1, ['PC0', 'Switch0', 'PC1']);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.hopActions.length, 1);
+    assert.strictEqual(result.hopActions[0].action, 'FLOOD');
+    assert.strictEqual(result.hopActions[0].reason, 'unknown-unicast');
+});
+
+// 95. Global stale cleanup works independently
+runTest('95. Global stale cleanup works independently across switches', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('switch', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Switch1');
+
+    learnSwitchMac('Switch0', pc0.mac, pc0.id, 'Fa0/1'); // valid
+    // Add stale entry on Switch1
+    getSwitchRuntime('Switch1').macTable.push({
+        mac: '02:99:99:99:99:99',
+        port: 'Fa0/99',
+        deviceId: 'PC99',
+        learnedAt: new Date().toISOString()
+    });
+
+    const totalRemoved = cleanupAllStaleSwitchMacEntries();
+    assert.strictEqual(totalRemoved, 1);
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 1, 'Valid entry on Switch0 must remain');
+    assert.strictEqual(getSwitchRuntime('Switch1').macTable.length, 0, 'Stale entry on Switch1 must be removed');
+});
+
+// 96. ARP state remains independent of MAC cleanup
+runTest('96. ARP state remains independent of MAC cleanup', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc1.ip = '192.168.1.20';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    learnArp('PC0', pc1.ip, pc1.mac);
+    learnSwitchMac('Switch0', pc1.mac, pc1.id, 'Fa0/2');
+
+    // Delete connection between Switch0 and PC1
+    const conn1 = networkState.connections[1].id;
+    deleteConnection(conn1);
+
+    // Switch0 MAC table cleaned, PC0 ARP cache intact
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 0);
+    assert.strictEqual(lookupArp('PC0', pc1.ip), pc1.mac, 'PC0 ARP cache entry must remain intact');
+});
+
+// 97. Snapshot/restore preserves valid MAC tables
+runTest('97. Snapshot/restore preserves valid MAC tables', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    learnSwitchMac('Switch0', pc0.mac, pc0.id, 'Fa0/1');
+    learnSwitchMac('Switch0', pc1.mac, pc1.id, 'Fa0/2');
+
+    const snap = createLabSnapshot();
+    assert.strictEqual(snap.switchRuntime['Switch0'].macTable.length, 2);
+
+    // Mutate topology
+    deleteDevice('PC0');
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 1);
+
+    // Restore snapshot
+    restoreSnapshot(snap);
+    assert.strictEqual(networkState.devices.length, 3);
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 2);
+    assert.strictEqual(isSwitchMacEntryValid('Switch0', getSwitchRuntime('Switch0').macTable[0]), true);
+    assert.strictEqual(isSwitchMacEntryValid('Switch0', getSwitchRuntime('Switch0').macTable[1]), true);
+});
+
+// 98. Full V5.1-V5.6 end-to-end regression
+runTest('98. Full V5.1-V5.6 end-to-end regression with routing, ARP, MAC learning, aging, and lifecycle cleanup', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 150, 100);
+    addDevice('router', 300, 100);
+    addDevice('switch', 450, 100);
+    addDevice('server', 550, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[2];
+    const server = networkState.devices[4];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Router0');
+    addConnection('Router0', 'Switch1');
+    addConnection('Switch1', 'Server0');
+
+    // 1. Initial ping with cold ARP
+    const result1 = simulateSendFrame(pc, server, { icmp: { identifier: 1, sequence: 1 } });
+    assert.strictEqual(result1.success, true);
+    assert.strictEqual(result1.action, 'FORWARD');
+    assert.strictEqual(result1.hopActions.length, 3);
+    assert.strictEqual(lookupArp('PC0', '192.168.1.1'), router.interfaces['Gig0/0'].mac);
+    assert.strictEqual(lookupArp('Router0', '10.0.0.10'), server.mac);
+
+    // 2. Both switches learned MACs
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 2);
+    assert.strictEqual(getSwitchRuntime('Switch1').macTable.length, 2);
+
+    // 3. Second ping with warm ARP
+    const result2 = simulateSendFrame(pc, server, { icmp: { identifier: 1, sequence: 2 } });
+    assert.strictEqual(result2.success, true);
+    assert.strictEqual(result2.action, 'FORWARD');
+
+    // 4. Delete connection on Switch1 side (Switch1 <-> Server0)
+    const connSwitch1Server = networkState.connections.find(c => (c.source === 'Switch1' && c.target === 'Server0') || (c.source === 'Server0' && c.target === 'Switch1'));
+    assert.ok(connSwitch1Server);
+    deleteConnection(connSwitch1Server.id);
+
+    // Switch1 Server0 MAC removed on deleted port, Router0 MAC remains on intact port
+    assert.strictEqual(getSwitchRuntime('Switch1').macTable.length, 1);
+    assert.strictEqual(getSwitchRuntime('Switch1').macTable[0].mac, normalizeMacAddress(router.interfaces['Gig0/1'].mac));
+    assert.strictEqual(getSwitchRuntime('Switch0').macTable.length, 2);
+    assert.strictEqual(lookupArp('Router0', '10.0.0.10'), server.mac);
 });
 
 console.log('----------------------------------------------------');
