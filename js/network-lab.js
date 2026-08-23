@@ -2853,7 +2853,7 @@ function validateSendFrameEndpoints(sourceDevice, destinationDevice) {
     return { valid: true, path };
 }
 
-function simulateSendFrame(sourceDevice, destinationDevice) {
+function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
     const topologyPath = findTopologyPath(sourceDevice.id, destinationDevice.id);
 
     if (!topologyPath || topologyPath.length < 2) {
@@ -2898,12 +2898,19 @@ function simulateSendFrame(sourceDevice, destinationDevice) {
         }
     }
 
+    const initialTtl = typeof options?.initialTtl === 'number' ? options.initialTtl : 64;
+
     const frame = {
         sourceDeviceId: sourceDevice.id,
         destinationDeviceId: destinationDevice.id,
         sourceMac: sourceDevice.mac,
         destinationMac: initialDestMac,
         etherType: 'IPv4',
+        packet: {
+            sourceIp: sourceDevice.ip,
+            destinationIp: destinationDevice.ip,
+            ttl: initialTtl
+        },
         path: topologyPath,
         events: []
     };
@@ -2924,7 +2931,8 @@ function simulateSendFrame(sourceDevice, destinationDevice) {
                 reason: 'A device on the topology path is missing.',
                 path: traversedPath,
                 action: 'DROP',
-                events: frame.events
+                events: frame.events,
+                packet: frame.packet
             };
         }
 
@@ -2957,7 +2965,8 @@ function simulateSendFrame(sourceDevice, destinationDevice) {
                     reason: `Switch ${toDevice.name} filtered frame (destination is on ingress port ${ingressPort}).`,
                     path: traversedPath,
                     action: 'DROP',
-                    events: frame.events
+                    events: frame.events,
+                    packet: frame.packet
                 };
             } else if (expectedEgressPort && destEntry.port === expectedEgressPort) {
                 frame.events.push(`Destination MAC found in MAC table → ${destEntry.port}`);
@@ -2974,7 +2983,8 @@ function simulateSendFrame(sourceDevice, destinationDevice) {
                     reason: `Switch ${toDevice.name} misdirected frame via ${destEntry.port}.`,
                     path: traversedPath,
                     action: 'DROP',
-                    events: frame.events
+                    events: frame.events,
+                    packet: frame.packet
                 };
             } else {
                 frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}`);
@@ -2995,7 +3005,23 @@ function simulateSendFrame(sourceDevice, destinationDevice) {
                     reason: `Router ${toDevice.name} interface error.`,
                     path: traversedPath,
                     action: 'DROP',
-                    events: frame.events
+                    events: frame.events,
+                    packet: frame.packet
+                };
+            }
+
+            frame.packet.ttl = Math.max(0, frame.packet.ttl - 1);
+            frame.events.push(`Router ${toDevice.name} decremented IP TTL to ${frame.packet.ttl}`);
+
+            if (frame.packet.ttl <= 0) {
+                frame.events.push(`Router ${toDevice.name} dropped packet: Time to Live (TTL) expired in transit`);
+                return {
+                    success: false,
+                    reason: `Time to Live (TTL) expired at router ${toDevice.name}.`,
+                    path: traversedPath,
+                    action: 'DROP',
+                    events: frame.events,
+                    packet: frame.packet
                 };
             }
 
@@ -3014,7 +3040,8 @@ function simulateSendFrame(sourceDevice, destinationDevice) {
         reason: '',
         path: traversedPath,
         action,
-        events: frame.events
+        events: frame.events,
+        packet: frame.packet
     };
 }
 

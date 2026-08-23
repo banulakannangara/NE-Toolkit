@@ -1058,6 +1058,193 @@ runTest('30. Inter-subnet invalid gateway refuses Send Frame and returns DROP', 
     assert.ok(result.reason.includes('gateway') || result.reason.includes('match'));
 });
 
+// 31. IPv4 packet creation inside Ethernet frame
+runTest('31. IPv4 packet creation inside Ethernet frame', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    assert.ok(result.packet, 'Packet object must exist inside frame result');
+    assert.strictEqual(result.packet.sourceIp, '192.168.1.10');
+    assert.strictEqual(result.packet.destinationIp, '10.0.0.10');
+});
+
+// 32. Single router TTL decrement (64 -> 63)
+runTest('32. Single router TTL decrement (64 -> 63)', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.packet.ttl, 63, 'TTL must be decremented from 64 to 63');
+    assert.strictEqual(result.packet.sourceIp, '192.168.1.10', 'Source IP must remain unchanged');
+    assert.strictEqual(result.packet.destinationIp, '10.0.0.10', 'Destination IP must remain unchanged');
+
+    const events = result.events.join(' | ');
+    assert.ok(events.includes('Router0 decremented IP TTL to 63'), 'Must log TTL decrement event');
+});
+
+// 33. Multi-router TTL decrement (64 -> 63 -> 62)
+runTest('33. Multi-router TTL decrement (64 -> 63 -> 62)', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    // Router0: Gig0/0 facing PC (192.168.1.1/24), Gig0/1 facing Router1 (172.16.1.1/24)
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    // Router1: Gig0/0 facing Router0 (172.16.1.2/24), Gig0/1 facing Server (10.0.0.1/24)
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true, 'Multi-router simulation must succeed');
+    assert.strictEqual(result.packet.ttl, 62, 'TTL must be decremented from 64 to 62');
+
+    const events = result.events.join(' | ');
+    assert.ok(events.includes('Router0 decremented IP TTL to 63'), 'Router0 must log TTL 63');
+    assert.ok(events.includes('Router1 decremented IP TTL to 62'), 'Router1 must log TTL 62');
+});
+
+// 34. TTL expiration at router (TTL reaches 0 -> DROP)
+runTest('34. TTL expiration at router (initialTtl = 1 -> TTL drops to 0 -> DROP)', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    // Run simulation with initialTtl = 1
+    const result = simulateSendFrame(pc, server, { initialTtl: 1 });
+    assert.strictEqual(result.success, false, 'Simulation must fail on TTL expiration');
+    assert.strictEqual(result.action, 'DROP', 'Action must be DROP');
+    assert.strictEqual(result.packet.ttl, 0, 'TTL must be 0');
+    assert.deepStrictEqual(result.path, ['PC0', 'Router0'], 'Path must stop at dropping router');
+    assert.ok(result.reason.includes('TTL') || result.reason.includes('Time to Live'), 'Reason must explain TTL drop');
+
+    const events = result.events.join(' | ');
+    assert.ok(events.includes('Router0 decremented IP TTL to 0'), 'Must log TTL decremented to 0');
+    assert.ok(events.includes('Router0 dropped packet: Time to Live (TTL) expired in transit'), 'Must log TTL expiration drop event');
+    assert.strictEqual(events.includes('Server0 received frame'), false, 'Server must not receive the frame');
+});
+
+// 35. Same-subnet Send Frame regression (TTL remains 64 across switch)
+runTest('35. Same-subnet Send Frame regression (TTL remains 64 across switch)', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    const result1 = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(result1.success, true);
+    assert.strictEqual(result1.action, 'FLOOD');
+    assert.strictEqual(result1.packet.ttl, 64, 'TTL must remain 64 on switch hop');
+
+    const result2 = simulateSendFrame(pc1, pc0);
+    assert.strictEqual(result2.success, true);
+    assert.strictEqual(result2.action, 'FORWARD');
+    assert.strictEqual(result2.packet.ttl, 64, 'TTL must remain 64 on return frame');
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
