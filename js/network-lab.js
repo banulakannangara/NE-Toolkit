@@ -744,7 +744,7 @@ function handleDeviceSelection(deviceId, event) {
 
             networkState.selectedDeviceId = deviceId;
             networkState.selectedConnectionId = null;
-            networkState.lastFrameResult = simulateSendFrame(sourceDevice, destinationDevice);
+            networkState.lastFrameResult = simulateSendFrame(sourceDevice, destinationDevice, { icmp: true });
             networkState.lastFrameResult.animationState = 'in-progress';
             networkState.sendFrameState = {
                 phase: 'animating',
