@@ -1118,3 +1118,23 @@ body {
     box-shadow: 0 0 12px rgba(34, 211, 238, 0.3), 0 4px 14px rgba(0, 0, 0, 0.4);
 }
 
+.frame-hop-badge--icmp-request {
+    background: rgba(14, 28, 56, 0.95);
+    color: #93c5fd;
+    border: 1px solid rgba(147, 197, 253, 0.6);
+    box-shadow: 0 0 12px rgba(147, 197, 253, 0.3), 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.frame-hop-badge--icmp-reply {
+    background: rgba(10, 36, 46, 0.95);
+    color: #5eead4;
+    border: 1px solid rgba(94, 234, 212, 0.6);
+    box-shadow: 0 0 12px rgba(94, 234, 212, 0.3), 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.frame-hop-badge--ping-success {
+    background: rgba(12, 44, 24, 0.96);
+    color: #86efac;
+    border: 1px solid rgba(134, 239, 172, 0.8);
+    box-shadow: 0 0 16px rgba(134, 239, 172, 0.45), 0 4px 14px rgba(0, 0, 0, 0.4);
+}

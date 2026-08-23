@@ -3574,6 +3574,334 @@ runTest('106. Test H — Router interface IP/MAC change invalidates correspondin
     assert.strictEqual(lookupArp('Router0', '10.0.0.10'), server.mac, 'Router ARP entry for Server0 must remain intact');
 });
 
+// 107. ICMP Send Frame produces Echo Request + Reply roundtrip when ICMP mode is explicitly enabled
+runTest('107. ICMP Send Frame produces Echo Request + Reply roundtrip when ICMP mode is explicitly enabled', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    const result = simulateSendFrame(pc0, pc1, {
+        icmp: {
+            type: 'ECHO_REQUEST',
+            identifier: 42,
+            sequence: 7
+        }
+    });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.action, 'FORWARD');
+    assert.strictEqual(result.packet.protocol, 'ICMP');
+    assert.strictEqual(result.packet.icmp.type, 'ECHO_REPLY');
+    assert.strictEqual(result.packet.sourceIp, '192.168.1.20');
+    assert.strictEqual(result.packet.destinationIp, '192.168.1.10');
+    assert.strictEqual(result.packet.icmp.identifier, 42);
+    assert.strictEqual(result.packet.icmp.sequence, 7);
+    assert.ok(result.events.some(e => e.includes('sent ICMP Echo Request')));
+    assert.ok(result.events.some(e => e.includes('received ICMP Echo Request')));
+    assert.ok(result.events.some(e => e.includes('generated ICMP Echo Reply')));
+    assert.ok(result.events.some(e => e.includes('received ICMP Echo Reply')));
+});
+
+// 108. Full end-to-end flow with cold ARP, Switch Flooding, Router Forwarding, TTL decrement, and Echo Reply
+runTest('108. Full end-to-end flow with cold ARP, Switch Flooding, Router Forwarding, TTL decrement, and Echo Reply', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 150, 100);
+    addDevice('router', 300, 100);
+    addDevice('switch', 450, 100);
+    addDevice('server', 550, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[2];
+    const server = networkState.devices[4];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Router0');
+    addConnection('Router0', 'Switch1');
+    addConnection('Switch1', 'Server0');
+
+    const result = simulateSendFrame(pc, server, {
+        icmp: {
+            type: 'ECHO_REQUEST',
+            identifier: 100,
+            sequence: 1
+        }
+    });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.action, 'FORWARD');
+    assert.strictEqual(result.hopActions.length, 3, 'Must have 3 forward hop decisions (Switch0, Router0, Switch1)');
+    assert.strictEqual(result.reverseHopActions.length, 3, 'Must have 3 reverse hop decisions (Switch1, Router0, Switch0)');
+
+    // Forward Switch0 decision
+    const fwdSwitch0 = result.hopActions.find(h => h.deviceId === 'Switch0');
+    assert.strictEqual(fwdSwitch0.action, 'FORWARD');
+
+    // Forward Router0 decision
+    const fwdRouter0 = result.hopActions.find(h => h.deviceId === 'Router0');
+    assert.strictEqual(fwdRouter0.action, 'ROUTE');
+    assert.strictEqual(fwdRouter0.ttl, 63);
+
+    // Reverse Router0 decision
+    const revRouter0 = result.reverseHopActions.find(h => h.deviceId === 'Router0');
+    assert.strictEqual(revRouter0.action, 'ROUTE');
+    assert.strictEqual(revRouter0.ttl, 63);
+});
+
+// 109. Warm ARP uses cache and skips ARP broadcast for second ICMP transmission
+runTest('109. Warm ARP uses cache and skips ARP broadcast for second ICMP transmission', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    server.ip = '192.168.1.20';
+    server.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Server0');
+
+    // Run 1: Cold ARP
+    const result1 = simulateSendFrame(pc, server, { icmp: true });
+    assert.strictEqual(result1.success, true);
+    assert.strictEqual(result1.arpResult.cacheHit, false);
+
+    // Run 2: Warm ARP
+    const result2 = simulateSendFrame(pc, server, { icmp: true });
+    assert.strictEqual(result2.success, true);
+    assert.strictEqual(result2.arpResult.cacheHit, true);
+    const hasArpBroadcast = result2.events.some(e => e.includes('broadcast ARP Request'));
+    assert.strictEqual(hasArpBroadcast, false, 'Warm ICMP ping must not generate ARP broadcast');
+});
+
+// 110. TTL decrement on both forward and reverse router hops
+runTest('110. TTL decrement on both forward and reverse router hops', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('server', 350, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    const result = simulateSendFrame(pc, server, {
+        initialTtl: 64,
+        replyTtl: 64,
+        icmp: { type: 'ECHO_REQUEST', identifier: 1, sequence: 1 }
+    });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.packet.ttl, 63, 'Reply arriving at source must have TTL 63');
+
+    const fwdTtlEvents = result.events.filter(e => e.includes('Router0 decremented IP TTL to 63'));
+    assert.strictEqual(fwdTtlEvents.length, 2, 'Must log TTL decrement on both forward and reverse paths');
+});
+
+// 111. Echo Reply preserves identifier and sequence values from the request
+runTest('111. Echo Reply preserves identifier and sequence values from the request', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    const testId = 4321;
+    const testSeq = 9876;
+
+    const result = simulateSendFrame(pc, server, {
+        icmp: {
+            type: 'ECHO_REQUEST',
+            identifier: testId,
+            sequence: testSeq
+        }
+    });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.packet.icmp.type, 'ECHO_REPLY');
+    assert.strictEqual(result.packet.icmp.identifier, testId);
+    assert.strictEqual(result.packet.icmp.sequence, testSeq);
+});
+
+// 112. Event ordering follows chronological protocol flow
+runTest('112. Event ordering follows chronological protocol flow', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 150, 100);
+    addDevice('router', 300, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    const result = simulateSendFrame(pc, server, { icmp: true });
+    assert.strictEqual(result.success, true);
+
+    const events = result.events;
+
+    const idxArpReq = events.findIndex(e => e.includes('broadcast ARP Request'));
+    const idxArpRep = events.findIndex(e => e.includes('received ARP Reply'));
+    const idxEchoReqSent = events.findIndex(e => e.includes('sent ICMP Echo Request'));
+    const idxEchoReqRecv = events.findIndex(e => e.includes('received ICMP Echo Request'));
+    const idxEchoRepGen = events.findIndex(e => e.includes('generated ICMP Echo Reply'));
+    const idxEchoRepRecv = events.findIndex(e => e.includes('received ICMP Echo Reply'));
+
+    assert.ok(idxArpReq !== -1, 'Must have ARP Request event');
+    assert.ok(idxArpRep !== -1, 'Must have ARP Reply event');
+    assert.ok(idxEchoReqSent !== -1, 'Must have Echo Request sent event');
+    assert.ok(idxEchoReqRecv !== -1, 'Must have Echo Request received event');
+    assert.ok(idxEchoRepGen !== -1, 'Must have Echo Reply generated event');
+    assert.ok(idxEchoRepRecv !== -1, 'Must have Echo Reply received event');
+
+    assert.ok(idxArpReq < idxArpRep, 'ARP Request must precede ARP Reply');
+    assert.ok(idxArpRep < idxEchoReqSent, 'ARP resolution must precede ICMP Echo Request sending');
+    assert.ok(idxEchoReqSent < idxEchoReqRecv, 'Echo Request sending must precede arrival');
+    assert.ok(idxEchoReqRecv < idxEchoRepGen, 'Echo Request arrival must precede Echo Reply generation');
+    assert.ok(idxEchoRepGen < idxEchoRepRecv, 'Echo Reply generation must precede Echo Reply arrival at source');
+});
+
+// 113. Host IP/subnet configuration undo and redo restores complete device state
+runTest('113. Host IP/subnet configuration undo and redo restores complete device state', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('pc', 300, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[1];
+
+    // Configure PC0
+    networkState.selectedDeviceId = pc0.id;
+    inspectorDrafts[pc0.id] = {
+        ip: '192.168.1.10',
+        subnetMask: '255.255.255.0',
+        gateway: '192.168.1.1'
+    };
+    applyDeviceConfiguration();
+
+    assert.strictEqual(pc0.ip, '192.168.1.10');
+    assert.strictEqual(pc0.subnetMask, '255.255.255.0');
+    assert.strictEqual(pc0.gateway, '192.168.1.1');
+
+    // Configure PC1
+    networkState.selectedDeviceId = pc1.id;
+    inspectorDrafts[pc1.id] = {
+        ip: '192.168.1.20',
+        subnetMask: '255.255.255.0',
+        gateway: '192.168.1.1'
+    };
+    applyDeviceConfiguration();
+
+    assert.strictEqual(pc1.ip, '192.168.1.20');
+    assert.strictEqual(pc1.subnetMask, '255.255.255.0');
+    assert.strictEqual(pc1.gateway, '192.168.1.1');
+
+    // Undo PC1 configuration
+    undo();
+    const restoredPc1 = getDeviceById('PC1');
+    const restoredPc0 = getDeviceById('PC0');
+
+    // PC1 must be reverted to previous state
+    assert.strictEqual(restoredPc1.ip, '', 'PC1 IP should be restored to initial empty state');
+    assert.strictEqual(restoredPc1.subnetMask, '', 'PC1 subnetMask should be restored to initial empty state');
+    // PC0 must remain completely intact
+    assert.strictEqual(restoredPc0.ip, '192.168.1.10', 'PC0 IP must remain intact after undoing PC1 change');
+    assert.strictEqual(restoredPc0.subnetMask, '255.255.255.0', 'PC0 subnetMask must remain intact');
+    assert.strictEqual(restoredPc0.gateway, '192.168.1.1', 'PC0 gateway must remain intact');
+
+    // Redo PC1 configuration
+    redo();
+    const redonePc1 = getDeviceById('PC1');
+    const redonePc0 = getDeviceById('PC0');
+
+    assert.strictEqual(redonePc1.ip, '192.168.1.20', 'Redo must restore PC1 IP');
+    assert.strictEqual(redonePc1.subnetMask, '255.255.255.0', 'Redo must restore PC1 subnetMask');
+    assert.strictEqual(redonePc1.gateway, '192.168.1.1', 'Redo must restore PC1 gateway');
+    assert.strictEqual(redonePc0.ip, '192.168.1.10', 'PC0 IP must remain intact after redo');
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

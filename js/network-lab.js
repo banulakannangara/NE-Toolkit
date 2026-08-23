@@ -521,6 +521,12 @@ function selectDevice(deviceId) {
     networkState.selectedConnectionId = null;
     networkState.mode = 'select';
     networkState.connectionSourceId = null;
+    if (networkState.sendFrameState && networkState.sendFrameState.phase === 'complete') {
+        networkState.sendFrameState = null;
+    }
+    if (networkState.connectionTestState && networkState.connectionTestState.phase === 'complete') {
+        networkState.connectionTestState = null;
+    }
     updateToolbarButtons();
     updateStatus(`Selected ${deviceId}.`);
     render();
@@ -531,6 +537,12 @@ function selectConnection(connectionId) {
     networkState.selectedDeviceId = null;
     networkState.mode = 'select';
     networkState.connectionSourceId = null;
+    if (networkState.sendFrameState && networkState.sendFrameState.phase === 'complete') {
+        networkState.sendFrameState = null;
+    }
+    if (networkState.connectionTestState && networkState.connectionTestState.phase === 'complete') {
+        networkState.connectionTestState = null;
+    }
     updateToolbarButtons();
     updateStatus(`Selected ${connectionId}.`);
     render();
@@ -540,6 +552,12 @@ function clearSelection() {
     networkState.selectedDeviceId = null;
     networkState.selectedConnectionId = null;
     networkState.connectionSourceId = null;
+    if (networkState.sendFrameState && networkState.sendFrameState.phase === 'complete') {
+        networkState.sendFrameState = null;
+    }
+    if (networkState.connectionTestState && networkState.connectionTestState.phase === 'complete') {
+        networkState.connectionTestState = null;
+    }
     render();
 }
 
@@ -664,7 +682,7 @@ function addConnection(sourceId, targetId) {
 function handleDeviceSelection(deviceId, event) {
     event.stopPropagation();
 
-    if (networkState.sendFrameState) {
+    if (networkState.sendFrameState && networkState.sendFrameState.phase !== 'complete') {
         const selectedDevice = getDeviceById(deviceId);
         if (!selectedDevice) {
             return;
@@ -775,7 +793,7 @@ function handleDeviceSelection(deviceId, event) {
         }
     }
 
-    if (networkState.connectionTestState) {
+    if (networkState.connectionTestState && networkState.connectionTestState.phase !== 'complete') {
         const selectedDevice = getDeviceById(deviceId);
         if (selectedDevice && !isCommunicationEndpoint(selectedDevice)) {
             networkState.connectionTestState = {
@@ -975,20 +993,21 @@ function redo() {
 }
 
 function restoreSnapshot(snapshot) {
-    networkState.devices = snapshot.devices || [];
-    networkState.connections = snapshot.connections || [];
-    networkState.selectedDeviceId = snapshot.selectedDeviceId || null;
-    networkState.selectedConnectionId = snapshot.selectedConnectionId || null;
-    networkState.mode = snapshot.mode || 'select';
-    networkState.pendingDeviceType = snapshot.pendingDeviceType || 'pc';
-    networkState.typeCounters = snapshot.typeCounters || {};
-    networkState.connectionCounter = typeof snapshot.connectionCounter === 'number' ? snapshot.connectionCounter : 0;
-    networkState.connectionSourceId = snapshot.connectionSourceId || null;
-    networkState.connectionTestState = snapshot.connectionTestState || null;
-    networkState.lastConnectionTestResult = snapshot.lastConnectionTestResult || null;
-    networkState.switchRuntime = snapshot.switchRuntime || {};
-    networkState.routerRuntime = snapshot.routerRuntime || {};
-    networkState.arpRuntime = snapshot.arpRuntime || {};
+    const cloned = JSON.parse(JSON.stringify(snapshot));
+    networkState.devices = cloned.devices || [];
+    networkState.connections = cloned.connections || [];
+    networkState.selectedDeviceId = cloned.selectedDeviceId || null;
+    networkState.selectedConnectionId = cloned.selectedConnectionId || null;
+    networkState.mode = cloned.mode || 'select';
+    networkState.pendingDeviceType = cloned.pendingDeviceType || 'pc';
+    networkState.typeCounters = cloned.typeCounters || {};
+    networkState.connectionCounter = typeof cloned.connectionCounter === 'number' ? cloned.connectionCounter : 0;
+    networkState.connectionSourceId = cloned.connectionSourceId || null;
+    networkState.connectionTestState = cloned.connectionTestState || null;
+    networkState.lastConnectionTestResult = cloned.lastConnectionTestResult || null;
+    networkState.switchRuntime = cloned.switchRuntime || {};
+    networkState.routerRuntime = cloned.routerRuntime || {};
+    networkState.arpRuntime = cloned.arpRuntime || {};
     inspectorDrafts = {};
 }
 
@@ -1074,9 +1093,11 @@ function renderDevices() {
             selectDevice(device.id);
         });
         element.addEventListener('pointerdown', (event) => {
-            // For Test Connection and Send Frame modes, do NOT consume the event here.
-            // Those modes rely on the `click` event reaching handleDeviceSelection.
-            if (networkState.connectionTestState || networkState.sendFrameState) {
+            // For Test Connection and Send Frame modes when actively selecting endpoints,
+            // do NOT consume the event here. Those modes rely on the `click` event reaching handleDeviceSelection.
+            const isEndpointSelectionActive = (networkState.connectionTestState && networkState.connectionTestState.phase !== 'complete') ||
+                (networkState.sendFrameState && networkState.sendFrameState.phase !== 'complete');
+            if (isEndpointSelectionActive) {
                 return;
             }
 
@@ -1166,9 +1187,9 @@ function endPointerDrag() {
 function getHopBadgeConfig(hopAction, isDrop = false, isDelivered = false, options = {}) {
     if (isDelivered) {
         return {
-            title: '✓ DELIVERED',
-            subtitle: '',
-            modifier: 'delivered'
+            title: options.isIcmp ? 'PING SUCCESS' : '✓ DELIVERED',
+            subtitle: options.isIcmp ? 'Echo Reply Received' : '',
+            modifier: options.isIcmp ? 'ping-success' : 'delivered'
         };
     }
 
@@ -1185,6 +1206,22 @@ function getHopBadgeConfig(hopAction, isDrop = false, isDelivered = false, optio
             title: 'ARP REPLY',
             subtitle: `${options.targetIp} → ${options.targetMac || ''}`,
             modifier: 'arp-reply'
+        };
+    }
+
+    if (options.isIcmpRequest) {
+        return {
+            title: 'ICMP ECHO REQUEST',
+            subtitle: options.subtitle || '',
+            modifier: 'icmp-request'
+        };
+    }
+
+    if (options.isIcmpReply) {
+        return {
+            title: 'ICMP ECHO REPLY',
+            subtitle: options.subtitle || '',
+            modifier: 'icmp-reply'
         };
     }
 
@@ -1283,16 +1320,23 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
     layer.appendChild(badge);
 
     const hopActions = options.hopActions || networkState.lastFrameResult?.hopActions || [];
+    const reverseHopActions = options.reverseHopActions || networkState.lastFrameResult?.reverseHopActions || [];
     const arpResult = options.arpResult || networkState.lastFrameResult?.arpResult;
+    const packetInfo = options.packet || networkState.lastFrameResult?.packet;
+    const isIcmp = Boolean(packetInfo?.icmp && reverseHopActions.length > 0);
 
     const animation = {
         packet,
         badge,
-        path: [...path],
+        forwardPath: [...path],
+        reversePath: [...path].reverse(),
         hopActions,
+        reverseHopActions,
         arpResult,
+        isIcmp,
         animationFrame: null,
         cleanupTimer: null,
+        turnaroundTimer: null,
         cancelled: false
     };
     frameAnimation = animation;
@@ -1310,7 +1354,7 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
         `;
     };
 
-    const finish = (delivered, reason = '') => {
+    const finish = (delivered, reason = '', finalNodeId = null) => {
         if (frameAnimation !== animation || animation.cancelled) {
             return;
         }
@@ -1318,16 +1362,25 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
         if (animation.animationFrame) {
             window.cancelAnimationFrame(animation.animationFrame);
         }
+        if (animation.turnaroundTimer) {
+            window.clearTimeout(animation.turnaroundTimer);
+        }
+
+        const endNodeId = finalNodeId || (delivered
+            ? (isIcmp ? path[0] : path[path.length - 1])
+            : path[path.length - 1]);
 
         packet.classList.remove('is-moving');
         packet.classList.add(delivered ? 'is-delivered' : 'is-dropped');
         clearFrameDeviceHighlights();
+
         if (delivered) {
-            setFrameDeviceHighlight(path[path.length - 1], 'is-frame-destination');
-            setBadgeConfig(getHopBadgeConfig(null, false, true));
+            setFrameDeviceHighlight(endNodeId, 'is-frame-destination');
+            setBadgeConfig(getHopBadgeConfig(null, false, true, { isIcmp }));
         } else {
-            setFrameDeviceHighlight(path[path.length - 1], 'is-frame-dropped');
-            const dropHop = hopActions.find((h) => h.deviceId === path[path.length - 1] && h.action === 'DROP') || hopActions.slice(-1)[0];
+            setFrameDeviceHighlight(endNodeId, 'is-frame-dropped');
+            const dropHop = (animation.isReverse ? reverseHopActions : hopActions).find((h) => h.deviceId === endNodeId && h.action === 'DROP')
+                || (animation.isReverse ? reverseHopActions : hopActions).slice(-1)[0];
             setBadgeConfig(getHopBadgeConfig(dropHop || { action: 'DROP', reason }, true, false));
         }
 
@@ -1344,29 +1397,106 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
             } else {
                 callbacks.onDropped?.(reason || dropReason || 'Topology changed before the frame reached its destination.');
             }
-        }, delivered ? 480 : 720);
+        }, delivered ? 500 : 720);
     };
 
-    const animateHop = (hopIndex) => {
+    const animateReverseHop = (hopIndex) => {
         if (frameAnimation !== animation || animation.cancelled) {
             return;
         }
 
-        const sourceId = path[hopIndex];
-        const targetId = path[hopIndex + 1];
+        const curPath = animation.reversePath;
+        const sourceId = curPath[hopIndex];
+        const targetId = curPath[hopIndex + 1];
         const initialSource = getDeviceCenter(sourceId);
         const initialTarget = getDeviceCenter(targetId);
         if (!initialSource || !initialTarget) {
-            finish(false, 'A device on the topology path is no longer available.');
+            finish(false, 'A device on the reverse topology path is no longer available.', sourceId);
             return;
         }
 
         clearFrameDeviceHighlights();
-        setFrameDeviceHighlight(path[0], 'is-frame-source');
+        setFrameDeviceHighlight(curPath[0], 'is-frame-source');
         if (hopIndex > 0) {
             setFrameDeviceHighlight(sourceId, 'is-frame-hop');
         }
-        setFrameDeviceHighlight(targetId, hopIndex === path.length - 2 ? (isDelivered ? 'is-frame-destination' : 'is-frame-dropped') : 'is-frame-hop');
+        setFrameDeviceHighlight(targetId, hopIndex === curPath.length - 2 ? (isDelivered ? 'is-frame-destination' : 'is-frame-dropped') : 'is-frame-hop');
+
+        if (hopIndex > 0) {
+            const hopAction = reverseHopActions.find((h) => h.deviceId === sourceId);
+            setBadgeConfig(getHopBadgeConfig(hopAction, false, false));
+        } else {
+            setBadgeConfig(getHopBadgeConfig(null, false, false, {
+                isIcmpReply: true,
+                subtitle: `${sourceId} → ${curPath[curPath.length - 1]}`
+            }));
+        }
+
+        const distance = Math.hypot(initialTarget.x - initialSource.x, initialTarget.y - initialSource.y);
+        const duration = clamp(distance * 2.2, 420, 1100);
+        const startedAt = performance.now();
+        packet.classList.add('is-moving');
+
+        const move = (now) => {
+            if (frameAnimation !== animation || animation.cancelled) {
+                return;
+            }
+
+            const source = getDeviceCenter(sourceId);
+            const target = getDeviceCenter(targetId);
+            if (!source || !target) {
+                finish(false, 'A device on the reverse path was removed.', sourceId);
+                return;
+            }
+
+            const progress = Math.min(1, (now - startedAt) / duration);
+            const x = source.x + (target.x - source.x) * progress;
+            const y = source.y + (target.y - source.y) * progress;
+            packet.style.left = `${x}px`;
+            packet.style.top = `${y}px`;
+            badge.style.left = `${x}px`;
+            badge.style.top = `${y - 38}px`;
+
+            if (progress < 1) {
+                animation.animationFrame = window.requestAnimationFrame(move);
+                return;
+            }
+
+            if (hopIndex < curPath.length - 2) {
+                animateReverseHop(hopIndex + 1);
+            } else {
+                finish(isDelivered, dropReason, curPath[curPath.length - 1]);
+            }
+        };
+
+        packet.style.left = `${initialSource.x}px`;
+        packet.style.top = `${initialSource.y}px`;
+        badge.style.left = `${initialSource.x}px`;
+        badge.style.top = `${initialSource.y - 38}px`;
+        animation.animationFrame = window.requestAnimationFrame(move);
+    };
+
+    const animateForwardHop = (hopIndex) => {
+        if (frameAnimation !== animation || animation.cancelled) {
+            return;
+        }
+
+        const curPath = animation.forwardPath;
+        const sourceId = curPath[hopIndex];
+        const targetId = curPath[hopIndex + 1];
+        const initialSource = getDeviceCenter(sourceId);
+        const initialTarget = getDeviceCenter(targetId);
+        if (!initialSource || !initialTarget) {
+            finish(false, 'A device on the topology path is no longer available.', sourceId);
+            return;
+        }
+
+        clearFrameDeviceHighlights();
+        setFrameDeviceHighlight(curPath[0], 'is-frame-source');
+        if (hopIndex > 0) {
+            setFrameDeviceHighlight(sourceId, 'is-frame-hop');
+        }
+        setFrameDeviceHighlight(targetId, hopIndex === curPath.length - 2 ? (isDelivered ? 'is-frame-destination' : 'is-frame-dropped') : 'is-frame-hop');
 
         if (hopIndex > 0) {
             const hopAction = hopActions.find((h) => h.deviceId === sourceId);
@@ -1377,6 +1507,11 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
                 setBadgeConfig(getHopBadgeConfig(null, false, false, {
                     isArpRequest: true,
                     targetIp: arpResult.targetIp
+                }));
+            } else if (isIcmp) {
+                setBadgeConfig(getHopBadgeConfig(null, false, false, {
+                    isIcmpRequest: true,
+                    subtitle: `${sourceId} → ${curPath[curPath.length - 1]}`
                 }));
             } else {
                 setBadgeConfig({
@@ -1400,7 +1535,7 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
             const source = getDeviceCenter(sourceId);
             const target = getDeviceCenter(targetId);
             if (!source || !target) {
-                finish(false, 'A device on the topology path was removed.');
+                finish(false, 'A device on the topology path was removed.', sourceId);
                 return;
             }
 
@@ -1417,10 +1552,40 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
                 return;
             }
 
-            if (hopIndex < path.length - 2) {
-                animateHop(hopIndex + 1);
+            if (hopIndex < curPath.length - 2) {
+                animateForwardHop(hopIndex + 1);
             } else {
-                finish(isDelivered, dropReason);
+                const forwardSucceeded = Boolean(networkState.lastFrameResult?.events?.some((e) => e.includes('received ICMP Echo Request') || e.includes('generated ICMP Echo Reply')))
+                    || (isDelivered && !isIcmp);
+
+                if (!forwardSucceeded) {
+                    finish(false, dropReason, curPath[curPath.length - 1]);
+                    return;
+                }
+
+                if (!isIcmp) {
+                    finish(true, '', curPath[curPath.length - 1]);
+                    return;
+                }
+
+                // ICMP Destination Turnaround
+                const destNodeId = curPath[curPath.length - 1];
+                setFrameDeviceHighlight(destNodeId, 'is-frame-destination');
+                packet.classList.remove('is-moving');
+                setBadgeConfig({
+                    title: 'ICMP ECHO REQUEST',
+                    subtitle: 'Received • Generating Reply',
+                    modifier: 'icmp-reply'
+                });
+
+                animation.turnaroundTimer = window.setTimeout(() => {
+                    if (frameAnimation !== animation || animation.cancelled) {
+                        return;
+                    }
+                    animation.isReverse = true;
+                    packet.innerHTML = '<span class="frame-packet__icon">REPLY</span>';
+                    animateReverseHop(0);
+                }, 400);
             }
         };
 
@@ -1431,7 +1596,7 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
         animation.animationFrame = window.requestAnimationFrame(move);
     };
 
-    animateHop(0);
+    animateForwardHop(0);
 }
 
 function showFrameDrop(deviceId) {
@@ -1479,6 +1644,9 @@ function cancelFrameAnimation() {
     }
     if (frameAnimation.cleanupTimer) {
         window.clearTimeout(frameAnimation.cleanupTimer);
+    }
+    if (frameAnimation.turnaroundTimer) {
+        window.clearTimeout(frameAnimation.turnaroundTimer);
     }
     frameAnimation.packet?.remove();
     frameAnimation.badge?.remove();
