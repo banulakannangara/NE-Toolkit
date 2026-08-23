@@ -2855,15 +2855,6 @@ function validateSendFrameEndpoints(sourceDevice, destinationDevice) {
 
 function simulateSendFrame(sourceDevice, destinationDevice) {
     const topologyPath = findTopologyPath(sourceDevice.id, destinationDevice.id);
-    const frame = {
-        sourceDeviceId: sourceDevice.id,
-        destinationDeviceId: destinationDevice.id,
-        sourceMac: sourceDevice.mac,
-        destinationMac: destinationDevice.mac,
-        etherType: 'IPv4',
-        path: topologyPath,
-        events: []
-    };
 
     if (!topologyPath || topologyPath.length < 2) {
         return {
@@ -2874,6 +2865,48 @@ function simulateSendFrame(sourceDevice, destinationDevice) {
             events: ['No topology connection between source and destination']
         };
     }
+
+    const normalizedMaskA = normalizeSubnetMask(sourceDevice.subnetMask);
+    const normalizedMaskB = normalizeSubnetMask(destinationDevice.subnetMask);
+    const sameSubnet = normalizedMaskA && normalizedMaskB && normalizedMaskA === normalizedMaskB
+        && isSameSubnet(sourceDevice.ip, destinationDevice.ip, normalizedMaskA)
+        && isSameSubnet(sourceDevice.ip, destinationDevice.ip, normalizedMaskB);
+
+    let initialDestMac = destinationDevice.mac;
+
+    if (!sameSubnet) {
+        const commAnalysis = analyzeCommunication(sourceDevice, destinationDevice);
+        if (!commAnalysis.possible) {
+            return {
+                success: false,
+                reason: commAnalysis.reason,
+                path: commAnalysis.path && commAnalysis.path.length ? commAnalysis.path : [topologyPath[0]],
+                action: 'DROP',
+                events: [commAnalysis.reason]
+            };
+        }
+
+        const firstRouterIndex = topologyPath.findIndex((id) => getDeviceById(id)?.type === 'router');
+        if (firstRouterIndex !== -1) {
+            const firstRouter = getDeviceById(topologyPath[firstRouterIndex]);
+            const prevHopId = topologyPath[firstRouterIndex - 1];
+            const ingressPort = getPortForRouterAndNeighbor(firstRouter.id, prevHopId);
+            const ingressIface = firstRouter?.interfaces?.[ingressPort];
+            if (ingressIface && ingressIface.mac) {
+                initialDestMac = ingressIface.mac;
+            }
+        }
+    }
+
+    const frame = {
+        sourceDeviceId: sourceDevice.id,
+        destinationDeviceId: destinationDevice.id,
+        sourceMac: sourceDevice.mac,
+        destinationMac: initialDestMac,
+        etherType: 'IPv4',
+        path: topologyPath,
+        events: []
+    };
 
     let action = 'FORWARD';
     const traversedPath = [topologyPath[0]];
@@ -2901,8 +2934,11 @@ function simulateSendFrame(sourceDevice, destinationDevice) {
             const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
             frame.events.push(`Frame entered ${toDevice.name} on ${ingressPort}`);
 
-            learnSwitchMac(toDevice.id, frame.sourceMac, sourceDevice.id, ingressPort);
-            frame.events.push(`Switch ${toDevice.name} learned ${sourceDevice.name} MAC (${frame.sourceMac}) → ${ingressPort}`);
+            const learnedDevice = findDeviceByMac(frame.sourceMac, null, networkState.devices);
+            const learnedDeviceId = learnedDevice?.id || sourceDevice.id;
+            const learnedDeviceName = learnedDevice?.name || sourceDevice.name;
+            learnSwitchMac(toDevice.id, frame.sourceMac, learnedDeviceId, ingressPort);
+            frame.events.push(`Switch ${toDevice.name} learned ${learnedDeviceName} MAC (${frame.sourceMac}) → ${ingressPort}`);
 
             const nextHopId = topologyPath[i + 2];
             const expectedEgressPort = nextHopId ? getPortForSwitchAndNeighbor(toDevice.id, nextHopId) : null;
@@ -2943,6 +2979,31 @@ function simulateSendFrame(sourceDevice, destinationDevice) {
             } else {
                 frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}`);
             }
+        } else if (toDevice.type === 'router') {
+            const ingressPort = getPortForRouterAndNeighbor(toDevice.id, fromId);
+            const nextHopId = topologyPath[i + 2];
+            const egressPort = nextHopId ? getPortForRouterAndNeighbor(toDevice.id, nextHopId) : null;
+            const ingressIface = toDevice.interfaces?.[ingressPort];
+            const egressIface = egressPort ? toDevice.interfaces?.[egressPort] : null;
+
+            frame.events.push(`Frame received by ${toDevice.name} on ${ingressPort}`);
+
+            if (!ingressPort || !egressPort || !ingressIface || !egressIface) {
+                frame.events.push(`Router ${toDevice.name} could not resolve routing interfaces`);
+                return {
+                    success: false,
+                    reason: `Router ${toDevice.name} interface error.`,
+                    path: traversedPath,
+                    action: 'DROP',
+                    events: frame.events
+                };
+            }
+
+            frame.events.push(`Router ${toDevice.name} routed frame from ${ingressPort} to ${egressPort}`);
+            frame.sourceMac = egressIface.mac;
+            frame.events.push(`Router ${toDevice.name} rewrote source MAC to ${egressIface.mac}`);
+            frame.destinationMac = destinationDevice.mac;
+            frame.events.push(`Router ${toDevice.name} set destination MAC to ${destinationDevice.mac}`);
         }
     }
 

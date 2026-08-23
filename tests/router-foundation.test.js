@@ -915,6 +915,149 @@ runTest('26. Existing same-subnet communication still succeeds', () => {
     assert.strictEqual(result.network, '192.168.1.0/24');
 });
 
+// 27. Send Frame PC0 -> Router0 -> Server0 Layer-3 simulation
+runTest('27. Send Frame PC0 -> Router0 -> Server0 Layer-3 routing simulation', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true, 'Inter-subnet frame should succeed');
+    assert.deepStrictEqual(result.path, ['PC0', 'Router0', 'Server0']);
+
+    const events = result.events.join(' | ');
+    assert.ok(events.includes('Frame received by Router0 on Gig0/0'), 'Must log router ingress on Gig0/0');
+    assert.ok(events.includes('Router0 routed frame from Gig0/0 to Gig0/1'), 'Must log router routing decision');
+    assert.ok(events.includes('Router0 rewrote source MAC to ' + router.interfaces['Gig0/1'].mac), 'Must log source MAC rewrite');
+    assert.ok(events.includes('Router0 set destination MAC to ' + server.mac), 'Must log destination MAC update');
+    assert.ok(events.includes('Server0 received frame'), 'Must log server received frame');
+});
+
+// 28. Send Frame PC0 -> Switch0 -> Router0 -> Switch1 -> Server0 multi-hop
+runTest('28. Send Frame PC0 -> Switch0 -> Router0 -> Switch1 -> Server0 multi-hop routing', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 150, 100);
+    addDevice('router', 250, 100);
+    addDevice('switch', 350, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[2];
+    const server = networkState.devices[4];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Router0');
+    addConnection('Router0', 'Switch1');
+    addConnection('Switch1', 'Server0');
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true, 'Multi-hop inter-subnet frame should succeed');
+
+    // Switch0 should learn PC0 MAC
+    const sw0Macs = getSwitchRuntime('Switch0').macTable;
+    assert.ok(sw0Macs.some(e => e.mac === normalizeMacAddress(pc.mac)), 'Switch0 must learn PC0 MAC');
+
+    // Switch1 on downstream LAN should learn Router0 Gig0/1 MAC (not PC0 MAC!)
+    const sw1Macs = getSwitchRuntime('Switch1').macTable;
+    assert.ok(sw1Macs.some(e => e.mac === normalizeMacAddress(router.interfaces['Gig0/1'].mac)), 'Switch1 must learn Router0 Gig0/1 MAC');
+    assert.strictEqual(sw1Macs.some(e => e.mac === normalizeMacAddress(pc.mac)), false, 'Switch1 must NOT learn PC0 MAC directly');
+});
+
+// 29. Same-subnet Send Frame regression test
+runTest('29. Same-subnet Send Frame regression (PC0 -> Switch0 -> PC1)', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    const result1 = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(result1.success, true);
+    assert.strictEqual(result1.action, 'FLOOD');
+
+    const result2 = simulateSendFrame(pc1, pc0);
+    assert.strictEqual(result2.success, true);
+    assert.strictEqual(result2.action, 'FORWARD');
+});
+
+// 30. Inter-subnet invalid gateway refuses Send Frame
+runTest('30. Inter-subnet invalid gateway refuses Send Frame and returns DROP', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.99'; // Invalid gateway
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.action, 'DROP');
+    assert.ok(result.reason.includes('gateway') || result.reason.includes('match'));
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
