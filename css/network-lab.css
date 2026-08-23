@@ -904,3 +904,74 @@ body {
     text-transform: uppercase;
 }
 
+/* Floating Canvas Hop Action Badges */
+.frame-hop-badge {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.1rem;
+    padding: 0.25rem 0.6rem;
+    border-radius: 8px;
+    font-size: 0.62rem;
+    font-weight: 700;
+    line-height: 1.2;
+    white-space: nowrap;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 5;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+    will-change: left, top;
+    transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.frame-hop-badge__title {
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    font-size: 0.65rem;
+    text-transform: uppercase;
+}
+
+.frame-hop-badge__subtitle {
+    font-size: 0.58rem;
+    opacity: 0.9;
+    font-family: "Courier New", monospace;
+    font-weight: 600;
+}
+
+.frame-hop-badge--forward {
+    background: rgba(13, 37, 26, 0.95);
+    color: #51cf66;
+    border: 1px solid rgba(81, 207, 102, 0.6);
+    box-shadow: 0 0 12px rgba(81, 207, 102, 0.25), 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.frame-hop-badge--route {
+    background: rgba(10, 31, 50, 0.95);
+    color: #00d4ff;
+    border: 1px solid rgba(0, 212, 255, 0.6);
+    box-shadow: 0 0 12px rgba(0, 212, 255, 0.25), 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.frame-hop-badge--flood {
+    background: rgba(43, 34, 11, 0.95);
+    color: #ffd166;
+    border: 1px solid rgba(255, 209, 102, 0.6);
+    box-shadow: 0 0 12px rgba(255, 209, 102, 0.25), 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.frame-hop-badge--drop {
+    background: rgba(45, 16, 16, 0.95);
+    color: #ff8a80;
+    border: 1px solid rgba(255, 138, 128, 0.6);
+    box-shadow: 0 0 12px rgba(255, 138, 128, 0.25), 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.frame-hop-badge--delivered {
+    background: rgba(13, 45, 26, 0.96);
+    color: #b1ffc3;
+    border: 1px solid rgba(177, 255, 195, 0.7);
+    box-shadow: 0 0 16px rgba(81, 207, 102, 0.4), 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+

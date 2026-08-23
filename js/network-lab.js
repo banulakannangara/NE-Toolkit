@@ -1162,7 +1162,75 @@ function endPointerDrag() {
     render();
 }
 
-function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReason = '') {
+function getHopBadgeConfig(hopAction, isDrop = false, isDelivered = false) {
+    if (isDelivered) {
+        return {
+            title: '✓ DELIVERED',
+            subtitle: '',
+            modifier: 'delivered'
+        };
+    }
+
+    if (!hopAction) {
+        return null;
+    }
+
+    const action = String(hopAction.action || '').toUpperCase();
+    if (action === 'FORWARD') {
+        const ingress = hopAction.ingressPort || hopAction.ingressInterface || '';
+        const egress = hopAction.egressPort || hopAction.egressInterface || '';
+        const ports = (ingress && egress) ? `${ingress} → ${egress}` : (egress || ingress);
+        return {
+            title: 'FORWARD',
+            subtitle: ports,
+            modifier: 'forward'
+        };
+    }
+
+    if (action === 'FLOOD') {
+        const reason = hopAction.reason === 'broadcast' ? 'Broadcast' : 'Unknown Unicast';
+        return {
+            title: 'FLOOD',
+            subtitle: reason,
+            modifier: 'flood'
+        };
+    }
+
+    if (action === 'ROUTE') {
+        const ingress = hopAction.ingressInterface || hopAction.ingressPort || '';
+        const egress = hopAction.egressInterface || hopAction.egressPort || '';
+        const ifaces = (ingress && egress) ? `${ingress} → ${egress}` : (egress || ingress);
+        const ttlText = typeof hopAction.ttl === 'number' ? `TTL ${hopAction.ttl + 1} → ${hopAction.ttl}` : '';
+        const subtitle = [ifaces, ttlText].filter(Boolean).join(' • ');
+        return {
+            title: 'ROUTE',
+            subtitle,
+            modifier: 'route'
+        };
+    }
+
+    if (action === 'DROP') {
+        const reasonLabels = {
+            'ttl-expired': 'TTL Expired',
+            'filtered-same-port': 'Same Port Filter',
+            'port-mismatch': 'Port Mismatch'
+        };
+        const reason = reasonLabels[hopAction.reason] || hopAction.reason || 'Dropped';
+        return {
+            title: 'DROP',
+            subtitle: reason,
+            modifier: 'drop'
+        };
+    }
+
+    return {
+        title: action || 'FRAME',
+        subtitle: '',
+        modifier: 'forward'
+    };
+}
+
+function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReason = '', options = {}) {
     cancelFrameAnimation();
 
     if (!Array.isArray(path) || path.length < 2) {
@@ -1182,14 +1250,36 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
     packet.innerHTML = '<span class="frame-packet__icon">FRAME</span>';
     layer.appendChild(packet);
 
+    const badge = document.createElement('div');
+    badge.className = 'frame-hop-badge';
+    badge.setAttribute('aria-hidden', 'true');
+    layer.appendChild(badge);
+
+    const hopActions = options.hopActions || networkState.lastFrameResult?.hopActions || [];
+
     const animation = {
         packet,
+        badge,
         path: [...path],
+        hopActions,
         animationFrame: null,
         cleanupTimer: null,
         cancelled: false
     };
     frameAnimation = animation;
+
+    const setBadgeConfig = (config) => {
+        if (!config) {
+            badge.style.display = 'none';
+            return;
+        }
+        badge.style.display = 'flex';
+        badge.className = `frame-hop-badge frame-hop-badge--${config.modifier}`;
+        badge.innerHTML = `
+            <span class="frame-hop-badge__title">${escapeHtml(config.title)}</span>
+            ${config.subtitle ? `<span class="frame-hop-badge__subtitle">${escapeHtml(config.subtitle)}</span>` : ''}
+        `;
+    };
 
     const finish = (delivered, reason = '') => {
         if (frameAnimation !== animation || animation.cancelled) {
@@ -1205,8 +1295,11 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
         clearFrameDeviceHighlights();
         if (delivered) {
             setFrameDeviceHighlight(path[path.length - 1], 'is-frame-destination');
+            setBadgeConfig(getHopBadgeConfig(null, false, true));
         } else {
             setFrameDeviceHighlight(path[path.length - 1], 'is-frame-dropped');
+            const dropHop = hopActions.find((h) => h.deviceId === path[path.length - 1] && h.action === 'DROP') || hopActions.slice(-1)[0];
+            setBadgeConfig(getHopBadgeConfig(dropHop || { action: 'DROP', reason }, true, false));
         }
 
         animation.cleanupTimer = window.setTimeout(() => {
@@ -1215,6 +1308,7 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
             }
             clearFrameDeviceHighlights();
             packet.remove();
+            badge.remove();
             frameAnimation = null;
             if (delivered) {
                 callbacks.onDelivered?.();
@@ -1245,6 +1339,17 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
         }
         setFrameDeviceHighlight(targetId, hopIndex === path.length - 2 ? (isDelivered ? 'is-frame-destination' : 'is-frame-dropped') : 'is-frame-hop');
 
+        if (hopIndex > 0) {
+            const hopAction = hopActions.find((h) => h.deviceId === sourceId);
+            setBadgeConfig(getHopBadgeConfig(hopAction));
+        } else {
+            setBadgeConfig({
+                title: 'FRAME',
+                subtitle: `${sourceId} → ${targetId}`,
+                modifier: 'forward'
+            });
+        }
+
         const distance = Math.hypot(initialTarget.x - initialSource.x, initialTarget.y - initialSource.y);
         const duration = clamp(distance * 2.2, 420, 1100);
         const startedAt = performance.now();
@@ -1267,6 +1372,8 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
             const y = source.y + (target.y - source.y) * progress;
             packet.style.left = `${x}px`;
             packet.style.top = `${y}px`;
+            badge.style.left = `${x}px`;
+            badge.style.top = `${y - 38}px`;
 
             if (progress < 1) {
                 animation.animationFrame = window.requestAnimationFrame(move);
@@ -1282,6 +1389,8 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
 
         packet.style.left = `${initialSource.x}px`;
         packet.style.top = `${initialSource.y}px`;
+        badge.style.left = `${initialSource.x}px`;
+        badge.style.top = `${initialSource.y - 38}px`;
         animation.animationFrame = window.requestAnimationFrame(move);
     };
 
@@ -1304,10 +1413,20 @@ function showFrameDrop(deviceId) {
     packet.style.left = `${position.x}px`;
     packet.style.top = `${position.y}px`;
     layer.appendChild(packet);
+
+    const badge = document.createElement('div');
+    badge.className = 'frame-hop-badge frame-hop-badge--drop';
+    badge.setAttribute('aria-hidden', 'true');
+    badge.innerHTML = '<span class="frame-hop-badge__title">DROP</span><span class="frame-hop-badge__subtitle">Pre-flight check</span>';
+    badge.style.left = `${position.x}px`;
+    badge.style.top = `${position.y - 38}px`;
+    layer.appendChild(badge);
+
     setFrameDeviceHighlight(deviceId, 'is-frame-dropped');
 
     window.setTimeout(() => {
         packet.remove();
+        badge.remove();
         clearFrameDeviceHighlights();
     }, 720);
 }
@@ -1325,6 +1444,7 @@ function cancelFrameAnimation() {
         window.clearTimeout(frameAnimation.cleanupTimer);
     }
     frameAnimation.packet?.remove();
+    frameAnimation.badge?.remove();
     frameAnimation = null;
     clearFrameDeviceHighlights();
 }
