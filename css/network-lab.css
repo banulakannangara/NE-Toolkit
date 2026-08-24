@@ -114,6 +114,28 @@ body {
 
 .lab-panel {
     padding: 1rem;
+    overflow-y: auto;
+    max-height: calc(100vh - 140px);
+    scrollbar-width: thin;
+    scrollbar-color: rgba(0, 212, 255, 0.28) transparent;
+}
+
+.lab-panel::-webkit-scrollbar {
+    width: 6px;
+}
+
+.lab-panel::-webkit-scrollbar-track {
+    background: rgba(8, 16, 33, 0.5);
+    border-radius: 4px;
+}
+
+.lab-panel::-webkit-scrollbar-thumb {
+    background: rgba(0, 212, 255, 0.25);
+    border-radius: 4px;
+}
+
+.lab-panel::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 212, 255, 0.45);
 }
 
 .panel-heading {
@@ -480,6 +502,27 @@ body {
     border-radius: 12px;
     background: rgba(0, 212, 255, 0.08);
     border: 1px solid rgba(0, 212, 255, 0.18);
+    overflow-x: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(0, 212, 255, 0.28) transparent;
+}
+
+.property-summary::-webkit-scrollbar {
+    height: 6px;
+}
+
+.property-summary::-webkit-scrollbar-track {
+    background: rgba(8, 16, 33, 0.5);
+    border-radius: 4px;
+}
+
+.property-summary::-webkit-scrollbar-thumb {
+    background: rgba(0, 212, 255, 0.25);
+    border-radius: 4px;
+}
+
+.property-summary::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 212, 255, 0.45);
 }
 
 .property-summary h4 {
