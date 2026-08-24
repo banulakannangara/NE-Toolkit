@@ -1167,6 +1167,12 @@ runTest('33. Multi-router TTL decrement (64 -> 63 -> 62)', () => {
     addConnection('Router0', 'Router1');
     addConnection('Router1', 'Server0');
 
+    addStaticRoute(r0.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.2'
+    });
+
     const result = simulateSendFrame(pc, server);
     assert.strictEqual(result.success, true, 'Multi-router simulation must succeed');
     assert.strictEqual(result.packet.ttl, 62, 'TTL must be decremented from 64 to 62');
@@ -2320,6 +2326,12 @@ runTest('67. TTL decrement still works across routers with egress ARP', () => {
     addConnection('PC0', 'Router0');
     addConnection('Router0', 'Router1');
     addConnection('Router1', 'Server0');
+
+    addStaticRoute(r0.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.2'
+    });
 
     const result = simulateSendFrame(pc, server, { initialTtl: 64 });
     assert.strictEqual(result.success, true);
@@ -3900,6 +3912,2828 @@ runTest('113. Host IP/subnet configuration undo and redo restores complete devic
     assert.strictEqual(redonePc1.subnetMask, '255.255.255.0', 'Redo must restore PC1 subnetMask');
     assert.strictEqual(redonePc1.gateway, '192.168.1.1', 'Redo must restore PC1 gateway');
     assert.strictEqual(redonePc0.ip, '192.168.1.10', 'PC0 IP must remain intact after redo');
+});
+
+// 114. Router with no valid interfaces returns empty routing table
+runTest('114. Router with no valid interfaces returns empty routing table', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    const routes = getRouterRoutingTable(router.id);
+    assert.ok(Array.isArray(routes), 'Routing table must be an array');
+    assert.strictEqual(routes.length, 0, 'Router with unconfigured interfaces must have 0 routes');
+});
+
+// 115. Router with one configured interface produces one Connected (C) route
+runTest('115. Router with one configured interface produces one Connected (C) route', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const routes = getRouterRoutingTable(router.id);
+    assert.strictEqual(routes.length, 1, 'Must have exactly 1 connected route');
+
+    const route = routes[0];
+    assert.strictEqual(route.type, 'connected');
+    assert.strictEqual(route.code, 'C');
+    assert.strictEqual(route.network, '192.168.1.0');
+    assert.strictEqual(route.subnetMask, '255.255.255.0');
+    assert.strictEqual(route.prefixLength, 24);
+    assert.strictEqual(route.cidr, '192.168.1.0/24');
+    assert.strictEqual(route.interface, 'Gig0/0');
+    assert.strictEqual(route.nextHop, null);
+    assert.strictEqual(route.metric, 0);
+    assert.strictEqual(route.status, 'active');
+});
+
+// 116. Router with multiple configured interfaces produces multiple Connected (C) routes
+runTest('116. Router with multiple configured interfaces produces multiple Connected (C) routes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.0.0.0';
+
+    const routes = getRouterRoutingTable(router);
+    assert.strictEqual(routes.length, 2, 'Must have 2 connected routes');
+
+    const route0 = routes.find(r => r.interface === 'Gig0/0');
+    const route1 = routes.find(r => r.interface === 'Gig0/1');
+
+    assert.ok(route0, 'Must have route for Gig0/0');
+    assert.strictEqual(route0.network, '192.168.1.0');
+    assert.strictEqual(route0.cidr, '192.168.1.0/24');
+    assert.strictEqual(route0.code, 'C');
+
+    assert.ok(route1, 'Must have route for Gig0/1');
+    assert.strictEqual(route1.network, '10.0.0.0');
+    assert.strictEqual(route1.cidr, '10.0.0.0/8');
+    assert.strictEqual(route1.code, 'C');
+});
+
+// 117. Route network calculation for non-classful subnets (/27, /30)
+runTest('117. Route network calculation for non-classful subnets (/27, /30)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    router.interfaces['Gig0/0'].ip = '172.16.5.67';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.224'; // /27 -> network 172.16.5.64
+    router.interfaces['Gig0/1'].ip = '192.168.10.33';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.252'; // /30 -> network 192.168.10.32
+
+    const routes = getRouterRoutingTable(router.id);
+    assert.strictEqual(routes.length, 2);
+
+    const r0 = routes.find(r => r.interface === 'Gig0/0');
+    assert.strictEqual(r0.network, '172.16.5.64');
+    assert.strictEqual(r0.prefixLength, 27);
+    assert.strictEqual(r0.cidr, '172.16.5.64/27');
+
+    const r1 = routes.find(r => r.interface === 'Gig0/1');
+    assert.strictEqual(r1.network, '192.168.10.32');
+    assert.strictEqual(r1.prefixLength, 30);
+    assert.strictEqual(r1.cidr, '192.168.10.32/30');
+});
+
+// 118. Route update after interface IP change
+runTest('118. Route update after interface IP change', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    let routes = getRouterRoutingTable(router.id);
+    assert.strictEqual(routes[0].network, '192.168.1.0');
+
+    // Change IP to 192.168.20.1
+    router.interfaces['Gig0/0'].ip = '192.168.20.1';
+    routes = getRouterRoutingTable(router.id);
+
+    assert.strictEqual(routes.length, 1);
+    assert.strictEqual(routes[0].network, '192.168.20.0');
+    assert.strictEqual(routes[0].cidr, '192.168.20.0/24');
+});
+
+// 119. Route update after subnet change
+runTest('119. Route update after subnet change', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    let routes = getRouterRoutingTable(router.id);
+    assert.strictEqual(routes[0].prefixLength, 24);
+
+    // Change subnet mask to 255.255.0.0 (/16)
+    router.interfaces['Gig0/0'].subnetMask = '255.255.0.0';
+    routes = getRouterRoutingTable(router.id);
+
+    assert.strictEqual(routes.length, 1);
+    assert.strictEqual(routes[0].network, '192.168.0.0');
+    assert.strictEqual(routes[0].prefixLength, 16);
+    assert.strictEqual(routes[0].cidr, '192.168.0.0/16');
+});
+
+// 120. Route removal after interface becomes invalid/cleared
+runTest('120. Route removal after interface becomes invalid/cleared', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.0.0.0';
+
+    assert.strictEqual(getRouterRoutingTable(router.id).length, 2);
+
+    // Clear Gig0/0 IP
+    router.interfaces['Gig0/0'].ip = '';
+    let routes = getRouterRoutingTable(router.id);
+    assert.strictEqual(routes.length, 1);
+    assert.strictEqual(routes[0].interface, 'Gig0/1');
+
+    // Disable Gig0/1
+    router.interfaces['Gig0/1'].status = 'down';
+    routes = getRouterRoutingTable(router.id);
+    assert.strictEqual(routes.length, 0);
+});
+
+// 121. Router routing table integrates with Apply Changes and Undo/Redo
+runTest('121. Router routing table integrates with Apply Changes and Undo/Redo', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    // Initial: 0 routes
+    assert.strictEqual(getRouterRoutingTable(router.id).length, 0);
+
+    // Apply configuration through inspector
+    networkState.selectedDeviceId = router.id;
+    inspectorDrafts[router.id] = {
+        'interfaces.Gig0/0.ip': '192.168.1.1',
+        'interfaces.Gig0/0.subnetMask': '255.255.255.0',
+        'interfaces.Gig0/1.ip': '10.0.0.1',
+        'interfaces.Gig0/1.subnetMask': '255.0.0.0'
+    };
+    applyDeviceConfiguration();
+
+    const appliedRoutes = getRouterRoutingTable(router.id);
+    assert.strictEqual(appliedRoutes.length, 2);
+    assert.strictEqual(appliedRoutes[0].cidr, '192.168.1.0/24');
+    assert.strictEqual(appliedRoutes[1].cidr, '10.0.0.0/8');
+
+    // Undo configuration
+    undo();
+    const restoredRouter = getDeviceById('Router0');
+    const undoneRoutes = getRouterRoutingTable(restoredRouter.id);
+    assert.strictEqual(undoneRoutes.length, 0, 'Undo must revert routing table to 0 routes');
+
+    // Redo configuration
+    redo();
+    const redoneRouter = getDeviceById('Router0');
+    const redoneRoutes = getRouterRoutingTable(redoneRouter.id);
+    assert.strictEqual(redoneRoutes.length, 2, 'Redo must restore both connected routes');
+    assert.strictEqual(redoneRoutes[0].cidr, '192.168.1.0/24');
+    assert.strictEqual(redoneRoutes[1].cidr, '10.0.0.0/8');
+});
+
+// 122. Valid static route creation and properties
+runTest('122. Valid static route creation and properties', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const res = addStaticRoute(router.id, {
+        network: '10.50.0.0',
+        subnetMask: '255.255.0.0',
+        nextHop: '192.168.1.254',
+        metric: 2
+    });
+
+    assert.strictEqual(res.success, true);
+    assert.ok(res.route, 'Must return created route');
+    assert.strictEqual(res.route.type, 'static');
+    assert.strictEqual(res.route.code, 'S');
+    assert.strictEqual(res.route.network, '10.50.0.0');
+    assert.strictEqual(res.route.subnetMask, '255.255.0.0');
+    assert.strictEqual(res.route.prefixLength, 16);
+    assert.strictEqual(res.route.cidr, '10.50.0.0/16');
+    assert.strictEqual(res.route.nextHop, '192.168.1.254');
+    assert.strictEqual(res.route.interface, 'Gig0/0');
+    assert.strictEqual(res.route.metric, 2);
+    assert.strictEqual(res.route.status, 'active');
+});
+
+// 123. Static route appears as S in router routing table alongside C routes
+runTest('123. Static route appears as S in router routing table alongside C routes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(router.id, {
+        network: '172.16.0.0',
+        subnetMask: '255.255.0.0',
+        nextHop: '192.168.1.2'
+    });
+
+    const routes = getRouterRoutingTable(router.id);
+    assert.strictEqual(routes.length, 2, 'Must have 1 connected route and 1 static route');
+
+    const cRoute = routes.find(r => r.code === 'C');
+    const sRoute = routes.find(r => r.code === 'S');
+
+    assert.ok(cRoute, 'Must contain Connected route');
+    assert.strictEqual(cRoute.cidr, '192.168.1.0/24');
+
+    assert.ok(sRoute, 'Must contain Static route');
+    assert.strictEqual(sRoute.cidr, '172.16.0.0/16');
+    assert.strictEqual(sRoute.nextHop, '192.168.1.2');
+});
+
+// 124. Valid next-hop on connected subnet is accepted and interface auto-resolved
+runTest('124. Valid next-hop on connected subnet is accepted and interface auto-resolved', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    const res = addStaticRoute(router.id, {
+        network: '172.20.0.0',
+        subnetMask: '255.255.0.0',
+        nextHop: '10.0.0.2'
+    });
+
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.route.interface, 'Gig0/1', 'Must resolve to interface Gig0/1 which connects to 10.0.0.0/24');
+});
+
+// 125. Unreachable next-hop is rejected
+runTest('125. Unreachable next-hop is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const res = addStaticRoute(router.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.0.0.0',
+        nextHop: '8.8.8.8' // unreachable
+    });
+
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('unreachable'));
+});
+
+// 126. Invalid destination IP is rejected
+runTest('126. Invalid destination IP is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const res = addStaticRoute(router.id, {
+        network: '999.999.999.999',
+        subnetMask: '255.255.255.0',
+        nextHop: '192.168.1.2'
+    });
+
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('destination'));
+});
+
+// 127. Invalid subnet mask is rejected
+runTest('127. Invalid subnet mask is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const res = addStaticRoute(router.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.255.0.255', // non-contiguous
+        nextHop: '192.168.1.2'
+    });
+
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('subnet mask'));
+});
+
+// 128. Invalid next-hop IP is rejected
+runTest('128. Invalid next-hop IP is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const res = addStaticRoute(router.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.0.0.0',
+        nextHop: 'invalid-ip'
+    });
+
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('next-hop'));
+});
+
+// 129. Non-existent interface is rejected
+runTest('129. Non-existent interface is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    const res = addStaticRoute(router.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.0.0.0',
+        interface: 'FastEthernet0/99'
+    });
+
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('does not exist'));
+});
+
+// 130. Down interface is rejected
+runTest('130. Down interface is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].status = 'down';
+
+    const res = addStaticRoute(router.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.0.0.0',
+        interface: 'Gig0/0'
+    });
+
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('down'));
+});
+
+// 131. Route requiring either nextHop or interface is enforced
+runTest('131. Route requiring either nextHop or interface is enforced', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    const res = addStaticRoute(router.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.0.0.0'
+    });
+
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('Either next-hop IP or egress interface'));
+});
+
+// 132. Duplicate static route is rejected
+runTest('132. Duplicate static route is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const res1 = addStaticRoute(router.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.0.0.0',
+        nextHop: '192.168.1.2'
+    });
+    assert.strictEqual(res1.success, true);
+
+    const res2 = addStaticRoute(router.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.0.0.0',
+        nextHop: '192.168.1.2'
+    });
+    assert.strictEqual(res2.success, false);
+    assert.ok(res2.reason.includes('identical'));
+});
+
+// 133. Overlapping static routes with different prefix lengths are allowed
+runTest('133. Overlapping static routes with different prefix lengths are allowed', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const res1 = addStaticRoute(router.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.0.0.0', // /8
+        nextHop: '192.168.1.2'
+    });
+    const res2 = addStaticRoute(router.id, {
+        network: '10.1.0.0',
+        subnetMask: '255.255.0.0', // /16
+        nextHop: '192.168.1.3'
+    });
+    const res3 = addStaticRoute(router.id, {
+        network: '10.1.1.0',
+        subnetMask: '255.255.255.0', // /24
+        nextHop: '192.168.1.4'
+    });
+
+    assert.strictEqual(res1.success, true);
+    assert.strictEqual(res2.success, true);
+    assert.strictEqual(res3.success, true);
+
+    const routes = getRouterRoutingTable(router.id);
+    const staticRoutes = routes.filter(r => r.code === 'S');
+    assert.strictEqual(staticRoutes.length, 3, 'Must retain all 3 overlapping static routes');
+});
+
+// 134. Static route removal succeeds and only removes target route
+runTest('134. Static route removal succeeds and only removes target route', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const res1 = addStaticRoute(router.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.0.0.0',
+        nextHop: '192.168.1.2'
+    });
+    const res2 = addStaticRoute(router.id, {
+        network: '172.16.0.0',
+        subnetMask: '255.255.0.0',
+        nextHop: '192.168.1.3'
+    });
+
+    const routeIdToRemove = res1.route.id;
+    const remRes = removeStaticRoute(router.id, routeIdToRemove);
+    assert.strictEqual(remRes.success, true);
+
+    const routes = getRouterRoutingTable(router.id);
+    const staticRoutes = routes.filter(r => r.code === 'S');
+    assert.strictEqual(staticRoutes.length, 1);
+    assert.strictEqual(staticRoutes[0].cidr, '172.16.0.0/16');
+
+    // Removing non-existent route returns failure
+    const remNonExistent = removeStaticRoute(router.id, 'non-existent-id');
+    assert.strictEqual(remNonExistent.success, false);
+});
+
+// 135. Connected routes remain unaffected by static route removal
+runTest('135. Connected routes remain unaffected by static route removal', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const res = addStaticRoute(router.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.0.0.0',
+        nextHop: '192.168.1.2'
+    });
+
+    removeStaticRoute(router.id, res.route.id);
+
+    const routes = getRouterRoutingTable(router.id);
+    assert.strictEqual(routes.length, 1);
+    assert.strictEqual(routes[0].code, 'C');
+    assert.strictEqual(routes[0].cidr, '192.168.1.0/24');
+});
+
+// 136. Static routes are preserved through Undo and Redo snapshots
+runTest('136. Static routes are preserved through Undo and Redo snapshots', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    // Snapshot before static route
+    pushHistory();
+
+    // Add static route
+    addStaticRoute(router.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.0.0.0',
+        nextHop: '192.168.1.2'
+    });
+
+    assert.strictEqual(getRouterRoutingTable(router.id).filter(r => r.code === 'S').length, 1);
+
+    // Undo -> reverts to 0 static routes
+    undo();
+    assert.strictEqual(getRouterRoutingTable(router.id).filter(r => r.code === 'S').length, 0);
+
+    // Redo -> restores 1 static route
+    redo();
+    const redoneRoutes = getRouterRoutingTable(router.id).filter(r => r.code === 'S');
+    assert.strictEqual(redoneRoutes.length, 1);
+    assert.strictEqual(redoneRoutes[0].cidr, '10.0.0.0/8');
+    assert.strictEqual(redoneRoutes[0].nextHop, '192.168.1.2');
+});
+
+// 137. lookupRoute returns a matching Connected route
+runTest('137. lookupRoute returns a matching Connected route', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const result = lookupRoute(router.id, '192.168.1.50');
+    assert.strictEqual(result.success, true);
+    assert.ok(result.route, 'Must return route');
+    assert.strictEqual(result.route.code, 'C');
+    assert.strictEqual(result.route.cidr, '192.168.1.0/24');
+    assert.strictEqual(result.route.interface, 'Gig0/0');
+});
+
+// 138. lookupRoute returns a matching Static route
+runTest('138. lookupRoute returns a matching Static route', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(router.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.0.0.0',
+        nextHop: '192.168.1.254'
+    });
+
+    const result = lookupRoute(router.id, '10.5.6.7');
+    assert.strictEqual(result.success, true);
+    assert.ok(result.route);
+    assert.strictEqual(result.route.code, 'S');
+    assert.strictEqual(result.route.cidr, '10.0.0.0/8');
+    assert.strictEqual(result.route.nextHop, '192.168.1.254');
+});
+
+// 139. /24 beats /16
+runTest('139. /24 beats /16', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(router.id, {
+        network: '10.20.0.0',
+        subnetMask: '255.255.0.0', // /16
+        nextHop: '192.168.1.2'
+    });
+    addStaticRoute(router.id, {
+        network: '10.20.30.0',
+        subnetMask: '255.255.255.0', // /24
+        nextHop: '192.168.1.3'
+    });
+
+    const result = lookupRoute(router.id, '10.20.30.50');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.route.cidr, '10.20.30.0/24', '/24 must be selected over /16');
+    assert.strictEqual(result.route.nextHop, '192.168.1.3');
+});
+
+// 140. /16 beats /8
+runTest('140. /16 beats /8', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(router.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.0.0.0', // /8
+        nextHop: '192.168.1.2'
+    });
+    addStaticRoute(router.id, {
+        network: '10.20.0.0',
+        subnetMask: '255.255.0.0', // /16
+        nextHop: '192.168.1.3'
+    });
+
+    const result = lookupRoute(router.id, '10.20.99.1');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.route.cidr, '10.20.0.0/16', '/16 must be selected over /8');
+    assert.strictEqual(result.route.nextHop, '192.168.1.3');
+});
+
+// 141. Connected /24 beats Static /16
+runTest('141. Connected /24 beats Static /16', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    // Connected: 192.168.1.0/24 on Gig0/0
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    // Static: 192.168.0.0/16
+    addStaticRoute(router.id, {
+        network: '192.168.0.0',
+        subnetMask: '255.255.0.0',
+        nextHop: '192.168.1.254'
+    });
+
+    const result = lookupRoute(router.id, '192.168.1.50');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.route.code, 'C');
+    assert.strictEqual(result.route.cidr, '192.168.1.0/24');
+});
+
+// 142. Static /24 beats Connected /16
+runTest('142. Static /24 beats Connected /16', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    // Connected: 172.16.0.0/16 on Gig0/0
+    router.interfaces['Gig0/0'].ip = '172.16.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.0.0';
+
+    // Static: 172.16.50.0/24
+    addStaticRoute(router.id, {
+        network: '172.16.50.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.254'
+    });
+
+    const result = lookupRoute(router.id, '172.16.50.10');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.route.code, 'S');
+    assert.strictEqual(result.route.cidr, '172.16.50.0/24', 'Static /24 must beat Connected /16');
+});
+
+// 143. Default route /0 matches when no specific route exists
+runTest('143. Default route /0 matches when no specific route exists', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(router.id, {
+        network: '0.0.0.0',
+        subnetMask: '0.0.0.0',
+        nextHop: '192.168.1.254'
+    });
+
+    const result = lookupRoute(router.id, '8.8.8.8');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.route.code, 'S');
+    assert.strictEqual(result.route.cidr, '0.0.0.0/0');
+    assert.strictEqual(result.route.nextHop, '192.168.1.254');
+});
+
+// 144. Specific route beats default route
+runTest('144. Specific route beats default route', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(router.id, {
+        network: '0.0.0.0',
+        subnetMask: '0.0.0.0',
+        nextHop: '192.168.1.254'
+    });
+    addStaticRoute(router.id, {
+        network: '8.8.8.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '192.168.1.2'
+    });
+
+    const result = lookupRoute(router.id, '8.8.8.8');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.route.cidr, '8.8.8.0/24', 'Specific /24 must beat default /0');
+    assert.strictEqual(result.route.nextHop, '192.168.1.2');
+});
+
+// 145. No matching route returns NO_ROUTE
+runTest('145. No matching route returns NO_ROUTE', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const result = lookupRoute(router.id, '10.0.0.1');
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.reason, 'NO_ROUTE');
+});
+
+// 146. Invalid destination IP is rejected
+runTest('146. Invalid destination IP is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    assert.strictEqual(lookupRoute(router.id, 'invalid.ip').reason, 'INVALID_DESTINATION');
+    assert.strictEqual(lookupRoute(router.id, '').reason, 'INVALID_DESTINATION');
+    assert.strictEqual(lookupRoute(router.id, '999.999.999.999').reason, 'INVALID_DESTINATION');
+    assert.strictEqual(lookupRoute('non-existent-router', '10.0.0.1').reason, 'ROUTER_NOT_FOUND');
+});
+
+// 147. Equal-prefix Connected route wins over Static route
+runTest('147. Equal-prefix Connected route wins over Static route', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    // Static route with exact same network and mask: 192.168.1.0/24
+    addStaticRoute(router.id, {
+        network: '192.168.1.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '192.168.1.254'
+    });
+
+    const result = lookupRoute(router.id, '192.168.1.50');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.route.code, 'C', 'Connected route must win tie with Static route on equal prefix');
+});
+
+// 148. Equal-prefix Static routes select lower metric
+runTest('148. Equal-prefix Static routes select lower metric', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(router.id, {
+        id: 'route-high-metric',
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '192.168.1.2',
+        metric: 10
+    });
+    addStaticRoute(router.id, {
+        id: 'route-low-metric',
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '192.168.1.3',
+        metric: 2
+    });
+
+    const result = lookupRoute(router.id, '10.0.0.5');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.route.id, 'route-low-metric', 'Lower metric static route must win');
+    assert.strictEqual(result.route.metric, 2);
+    assert.strictEqual(result.route.nextHop, '192.168.1.3');
+});
+
+// 149. Equal-prefix and equal-metric Static routes use deterministic route ID ordering
+runTest('149. Equal-prefix and equal-metric Static routes use deterministic route ID ordering', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(router.id, {
+        id: 'route-B',
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '192.168.1.2',
+        metric: 1
+    });
+    addStaticRoute(router.id, {
+        id: 'route-A',
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '192.168.1.3',
+        metric: 1
+    });
+
+    const result = lookupRoute(router.id, '10.0.0.5');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.route.id, 'route-A', 'Deterministic ID sorting must choose route-A over route-B');
+});
+
+// 150. lookupRoute does not mutate routing state
+runTest('150. lookupRoute does not mutate routing state', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(router.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.0.0.0',
+        nextHop: '192.168.1.2'
+    });
+
+    const tableBefore = JSON.stringify(getRouterRoutingTable(router.id));
+    lookupRoute(router.id, '10.1.2.3');
+    lookupRoute(router.id, '192.168.1.50');
+    lookupRoute(router.id, '8.8.8.8');
+    const tableAfter = JSON.stringify(getRouterRoutingTable(router.id));
+
+    assert.strictEqual(tableBefore, tableAfter, 'Routing table must remain completely unchanged');
+});
+
+// 151. lookupRoute supports static route with nextHop
+runTest('151. lookupRoute supports static route with nextHop', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(router.id, {
+        network: '172.16.0.0',
+        subnetMask: '255.255.0.0',
+        nextHop: '192.168.1.254'
+    });
+
+    const result = lookupRoute(router.id, '172.16.10.20');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.route.nextHop, '192.168.1.254');
+    assert.strictEqual(result.route.interface, 'Gig0/0');
+});
+
+// 152. lookupRoute supports static route with interface only
+runTest('152. lookupRoute supports static route with interface only', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(router.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.0.0.0',
+        interface: 'Gig0/0'
+    });
+
+    const result = lookupRoute(router.id, '10.99.88.77');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.route.nextHop, null);
+    assert.strictEqual(result.route.interface, 'Gig0/0');
+});
+
+// 153. Router forwards using a Connected route
+runTest('153. Router forwards using a Connected route', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    const routerAction = result.hopActions.find(h => h.deviceId === router.id);
+    assert.ok(routerAction, 'Must record router hop action');
+    assert.strictEqual(routerAction.action, 'ROUTE');
+    assert.strictEqual(routerAction.route.code, 'C');
+    assert.strictEqual(routerAction.egressInterface, 'Gig0/1');
+});
+
+// 154. Router forwards using a Static route with nextHop
+runTest('154. Router forwards using a Static route with nextHop', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    addStaticRoute(r0.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.2'
+    });
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    const r0Action = result.hopActions.find(h => h.deviceId === r0.id);
+    assert.ok(r0Action);
+    assert.strictEqual(r0Action.route.code, 'S');
+    assert.strictEqual(r0Action.route.nextHop, '172.16.1.2');
+    assert.strictEqual(r0Action.egressInterface, 'Gig0/1');
+});
+
+// 155. Router forwards using a Static route with interface only
+runTest('155. Router forwards using a Static route with interface only', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    // Add static route on Router0 for 10.0.0.10/32 with interface only
+    addStaticRoute(router.id, {
+        network: '10.0.0.10',
+        subnetMask: '255.255.255.255',
+        interface: 'Gig0/1'
+    });
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    const routerAction = result.hopActions.find(h => h.deviceId === router.id);
+    assert.strictEqual(routerAction.route.code, 'S');
+    assert.strictEqual(routerAction.route.interface, 'Gig0/1');
+    assert.strictEqual(routerAction.route.nextHop, null);
+});
+
+// 156. Static route nextHop is used as ARP target
+runTest('156. Static route nextHop is used as ARP target', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    addStaticRoute(r0.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.2'
+    });
+
+    simulateSendFrame(pc, server);
+    // Router0 must learn Router1 (172.16.1.2), NOT Server0 (10.0.0.10)
+    assert.strictEqual(lookupArp(r0.id, '172.16.1.2'), r1.interfaces['Gig0/0'].mac);
+    assert.strictEqual(lookupArp(r0.id, '10.0.0.10'), null, 'Router0 must not ARP for final destination behind next-hop');
+});
+
+// 157. Final packet destination remains unchanged when using static nextHop
+runTest('157. Final packet destination remains unchanged when using static nextHop', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    addStaticRoute(r0.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.2'
+    });
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.packet.destinationIp, '10.0.0.10', 'Final destination must remain unchanged');
+    assert.strictEqual(result.packet.sourceIp, '192.168.1.10', 'Source IP must remain unchanged');
+});
+
+// 158. More-specific static route is used during forwarding
+runTest('158. More-specific static route is used during forwarding', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.20.30.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.20.30.50';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.20.30.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    // /8 broad route pointing to .99 (unreachable neighbor if used)
+    addStaticRoute(r0.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.0.0.0',
+        nextHop: '172.16.1.99'
+    });
+
+    // /24 specific route pointing to .2
+    addStaticRoute(r0.id, {
+        network: '10.20.30.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.2'
+    });
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    const r0Action = result.hopActions.find(h => h.deviceId === r0.id);
+    assert.strictEqual(r0Action.route.cidr, '10.20.30.0/24');
+    assert.strictEqual(r0Action.route.nextHop, '172.16.1.2');
+});
+
+// 159. Default route is used when no more-specific route exists
+runTest('159. Default route is used when no more-specific route exists', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    // Default route on Router0
+    addStaticRoute(r0.id, {
+        network: '0.0.0.0',
+        subnetMask: '0.0.0.0',
+        nextHop: '172.16.1.2'
+    });
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    const r0Action = result.hopActions.find(h => h.deviceId === r0.id);
+    assert.strictEqual(r0Action.route.cidr, '0.0.0.0/0');
+    assert.strictEqual(r0Action.route.nextHop, '172.16.1.2');
+});
+
+// 160. NO_ROUTE stops router forwarding safely
+runTest('160. NO_ROUTE stops router forwarding safely', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    // No static route configured on Router0 for 10.0.0.0/24!
+    const frame = {
+        sourceDeviceId: pc.id,
+        destinationDeviceId: server.id,
+        sourceMac: pc.mac,
+        destinationMac: r0.interfaces['Gig0/0'].mac,
+        etherType: 'IPv4',
+        packet: {
+            sourceIp: pc.ip,
+            destinationIp: server.ip,
+            ttl: 64
+        },
+        path: ['PC0', 'Router0', 'Router1', 'Server0'],
+        events: []
+    };
+
+    const result = simulatePathTransmission(frame, pc, server, ['PC0', 'Router0', 'Router1', 'Server0']);
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.action, 'DROP');
+    assert.ok(result.reason.includes('No route to destination'));
+});
+
+// 161. Down static-route egress interface stops forwarding safely
+runTest('161. Down static-route egress interface stops forwarding safely', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    addStaticRoute(r0.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.2'
+    });
+
+    // Set Gig0/1 down
+    r0.interfaces['Gig0/1'].status = 'down';
+
+    const frame = {
+        sourceDeviceId: pc.id,
+        destinationDeviceId: server.id,
+        sourceMac: pc.mac,
+        destinationMac: r0.interfaces['Gig0/0'].mac,
+        etherType: 'IPv4',
+        packet: {
+            sourceIp: pc.ip,
+            destinationIp: server.ip,
+            ttl: 64
+        },
+        path: ['PC0', 'Router0', 'Router1', 'Server0'],
+        events: []
+    };
+
+    const result = simulatePathTransmission(frame, pc, server, ['PC0', 'Router0', 'Router1', 'Server0']);
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.action, 'DROP');
+});
+
+// 162. Invalid/missing egress interface stops forwarding safely
+runTest('162. Invalid/missing egress interface stops forwarding safely', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    // Inject static route with corrupted interface
+    const runtime = getRouterRuntime(router.id);
+    runtime.staticRoutes.push({
+        id: 'corrupted-route',
+        type: 'static',
+        code: 'S',
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        prefixLength: 24,
+        cidr: '10.0.0.0/24',
+        nextHop: null,
+        interface: 'NonExistentPort',
+        metric: 1,
+        status: 'active'
+    });
+
+    addConnection('PC0', 'Router0');
+
+    const frame = {
+        sourceDeviceId: pc.id,
+        destinationDeviceId: server.id,
+        sourceMac: pc.mac,
+        destinationMac: router.interfaces['Gig0/0'].mac,
+        etherType: 'IPv4',
+        packet: {
+            sourceIp: pc.ip,
+            destinationIp: server.ip,
+            ttl: 64
+        },
+        path: ['PC0', 'Router0', 'Server0'],
+        events: []
+    };
+
+    const result = simulatePathTransmission(frame, pc, server, ['PC0', 'Router0', 'Server0']);
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.action, 'DROP');
+});
+
+// 163. TTL is decremented exactly once per router hop
+runTest('163. TTL is decremented exactly once per router hop', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    addStaticRoute(r0.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.2'
+    });
+
+    const result = simulateSendFrame(pc, server, { initialTtl: 64 });
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.packet.ttl, 62, '64 - 1 (Router0) - 1 (Router1) = 62');
+});
+
+// 164. Existing ICMP roundtrip still succeeds through a static route
+runTest('164. Existing ICMP roundtrip still succeeds through a static route', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    // Forward route on Router0
+    addStaticRoute(r0.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.2'
+    });
+    // Reverse route on Router1
+    addStaticRoute(r1.id, {
+        network: '192.168.1.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.1'
+    });
+
+    const result = simulateSendFrame(pc, server, {
+        icmp: { identifier: 7777, sequence: 1 }
+    });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.packet.protocol, 'ICMP');
+    assert.strictEqual(result.packet.icmp.type, 'ECHO_REPLY');
+    assert.strictEqual(result.packet.icmp.identifier, 7777);
+    assert.strictEqual(result.packet.ttl, 62);
+});
+
+// 165. Existing Connected-route forwarding behavior remains unchanged
+runTest('165. Existing Connected-route forwarding behavior remains unchanged', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 150, 100);
+    addDevice('router', 250, 100);
+    addDevice('switch', 350, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[2];
+    const server = networkState.devices[4];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Router0');
+    addConnection('Router0', 'Switch1');
+    addConnection('Switch1', 'Server0');
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.packet.ttl, 63);
+});
+
+// 166. Multi-router forwarding can traverse a static route
+runTest('166. Multi-router forwarding can traverse a static route', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    addStaticRoute(r0.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.2'
+    });
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    assert.deepStrictEqual(result.path, ['PC0', 'Router0', 'Router1', 'Server0']);
+});
+
+// 167. Static nextHop does not replace the packet's final destination
+runTest("167. Static nextHop does not replace the packet's final destination", () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    addStaticRoute(r0.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.2'
+    });
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.packet.destinationIp, '10.0.0.10');
+    assert.notStrictEqual(result.packet.destinationIp, '172.16.1.2');
+});
+
+// 168. Router forwarding uses lookupRoute() rather than an independent route-selection algorithm
+runTest('168. Router forwarding uses lookupRoute() rather than an independent route-selection algorithm', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    addStaticRoute(r0.id, {
+        id: 'special-static-route',
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.2'
+    });
+
+    const expectedRoute = lookupRoute(r0.id, '10.0.0.10').route;
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    const r0Action = result.hopActions.find(h => h.deviceId === r0.id);
+    assert.strictEqual(r0Action.route.id, expectedRoute.id);
+    assert.strictEqual(r0Action.route.id, 'special-static-route');
+});
+
+// 169. Three-router forward static route traversal (Scenario A)
+runTest('169. Three-router forward static route traversal', () => {
+    resetLab();
+    addDevice('pc', 50, 100);      // PC-A
+    addDevice('router', 150, 100);  // R1
+    addDevice('router', 250, 100);  // R2
+    addDevice('router', 350, 100);  // R3
+    addDevice('pc', 450, 100);      // PC-B
+
+    const pca = networkState.devices[0];
+    const r1 = networkState.devices[1];
+    const r2 = networkState.devices[2];
+    const r3 = networkState.devices[3];
+    const pcb = networkState.devices[4];
+
+    // PC-A: 192.168.10.10/24, GW: 192.168.10.1
+    pca.ip = '192.168.10.10';
+    pca.subnetMask = '255.255.255.0';
+    pca.gateway = '192.168.10.1';
+
+    // R1: Gig0/0 LAN-A (192.168.10.1/24), Gig0/1 Transit-1 (10.0.12.1/30)
+    r1.interfaces['Gig0/0'].ip = '192.168.10.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    // R2: Gig0/0 Transit-1 (10.0.12.2/30), Gig0/1 Transit-2 (10.0.23.1/30)
+    r2.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r2.interfaces['Gig0/1'].ip = '10.0.23.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    // R3: Gig0/0 Transit-2 (10.0.23.2/30), Gig0/1 LAN-B (192.168.30.1/24)
+    r3.interfaces['Gig0/0'].ip = '10.0.23.2';
+    r3.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r3.interfaces['Gig0/1'].ip = '192.168.30.1';
+    r3.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    // PC-B: 192.168.30.10/24, GW: 192.168.30.1
+    pcb.ip = '192.168.30.10';
+    pcb.subnetMask = '255.255.255.0';
+    pcb.gateway = '192.168.30.1';
+
+    addConnection(pca.id, r1.id);
+    addConnection(r1.id, r2.id);
+    addConnection(r2.id, r3.id);
+    addConnection(r3.id, pcb.id);
+
+    // Forward Static Routes
+    addStaticRoute(r1.id, { network: '192.168.30.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.2' });
+    addStaticRoute(r2.id, { network: '192.168.30.0', subnetMask: '255.255.255.0', nextHop: '10.0.23.2' });
+
+    const result = simulateSendFrame(pca, pcb);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.packet.ttl, 61, 'TTL must decrement 3 times: 64 -> 63 (R1) -> 62 (R2) -> 61 (R3)');
+    assert.strictEqual(result.packet.destinationIp, '192.168.30.10');
+    assert.strictEqual(result.packet.sourceIp, '192.168.10.10');
+    assert.deepStrictEqual(result.path, [pca.name, r1.name, r2.name, r3.name, pcb.name]);
+});
+
+// 170. Three-router reverse static route traversal (Scenario B)
+runTest('170. Three-router reverse static route traversal', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 150, 100);
+    addDevice('router', 250, 100);
+    addDevice('router', 350, 100);
+    addDevice('pc', 450, 100);
+
+    const pca = networkState.devices[0];
+    const r1 = networkState.devices[1];
+    const r2 = networkState.devices[2];
+    const r3 = networkState.devices[3];
+    const pcb = networkState.devices[4];
+
+    pca.ip = '192.168.10.10';
+    pca.subnetMask = '255.255.255.0';
+    pca.gateway = '192.168.10.1';
+
+    r1.interfaces['Gig0/0'].ip = '192.168.10.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r2.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r2.interfaces['Gig0/1'].ip = '10.0.23.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r3.interfaces['Gig0/0'].ip = '10.0.23.2';
+    r3.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r3.interfaces['Gig0/1'].ip = '192.168.30.1';
+    r3.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pcb.ip = '192.168.30.10';
+    pcb.subnetMask = '255.255.255.0';
+    pcb.gateway = '192.168.30.1';
+
+    addConnection(pca.id, r1.id);
+    addConnection(r1.id, r2.id);
+    addConnection(r2.id, r3.id);
+    addConnection(r3.id, pcb.id);
+
+    // Reverse Static Routes: PC-B -> PC-A
+    addStaticRoute(r3.id, { network: '192.168.10.0', subnetMask: '255.255.255.0', nextHop: '10.0.23.1' });
+    addStaticRoute(r2.id, { network: '192.168.10.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.1' });
+
+    const result = simulateSendFrame(pcb, pca);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.packet.ttl, 61);
+    assert.strictEqual(result.packet.destinationIp, '192.168.10.10');
+    assert.strictEqual(result.packet.sourceIp, '192.168.30.10');
+    assert.deepStrictEqual(result.path, [pcb.name, r3.name, r2.name, r1.name, pca.name]);
+});
+
+// 171. End-to-end ICMP request/reply across three routers (Scenario B)
+runTest('171. End-to-end ICMP request/reply across three routers', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 150, 100);
+    addDevice('router', 250, 100);
+    addDevice('router', 350, 100);
+    addDevice('pc', 450, 100);
+
+    const pca = networkState.devices[0];
+    const r1 = networkState.devices[1];
+    const r2 = networkState.devices[2];
+    const r3 = networkState.devices[3];
+    const pcb = networkState.devices[4];
+
+    pca.ip = '192.168.10.10';
+    pca.subnetMask = '255.255.255.0';
+    pca.gateway = '192.168.10.1';
+
+    r1.interfaces['Gig0/0'].ip = '192.168.10.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r2.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r2.interfaces['Gig0/1'].ip = '10.0.23.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r3.interfaces['Gig0/0'].ip = '10.0.23.2';
+    r3.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r3.interfaces['Gig0/1'].ip = '192.168.30.1';
+    r3.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pcb.ip = '192.168.30.10';
+    pcb.subnetMask = '255.255.255.0';
+    pcb.gateway = '192.168.30.1';
+
+    addConnection(pca.id, r1.id);
+    addConnection(r1.id, r2.id);
+    addConnection(r2.id, r3.id);
+    addConnection(r3.id, pcb.id);
+
+    // Forward routes
+    addStaticRoute(r1.id, { network: '192.168.30.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.2' });
+    addStaticRoute(r2.id, { network: '192.168.30.0', subnetMask: '255.255.255.0', nextHop: '10.0.23.2' });
+
+    // Reverse routes
+    addStaticRoute(r3.id, { network: '192.168.10.0', subnetMask: '255.255.255.0', nextHop: '10.0.23.1' });
+    addStaticRoute(r2.id, { network: '192.168.10.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.1' });
+
+    const result = simulateSendFrame(pca, pcb, {
+        icmp: { identifier: 9999, sequence: 1 }
+    });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.packet.protocol, 'ICMP');
+    assert.strictEqual(result.packet.icmp.type, 'ECHO_REPLY');
+    assert.strictEqual(result.packet.icmp.identifier, 9999);
+    assert.strictEqual(result.packet.ttl, 61);
+});
+
+// 172. Real forwarding LPM selection (Scenario C)
+runTest('172. Real forwarding LPM selection', () => {
+    resetLab();
+    addDevice('pc', 50, 100);       // PC
+    addDevice('router', 200, 100);   // R0
+    addDevice('router', 350, 100);   // R1
+    addDevice('server', 500, 100);   // Server
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    // PC: 192.168.1.10/24, GW: 192.168.1.1
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    // R0: Gig0/0 LAN (192.168.1.1/24), Gig0/1 Transit (172.16.1.1/24)
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    // R1: Gig0/0 Transit 172.16.1.2/24, Gig0/1 LAN
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addConnection(pc.id, r0.id);
+    addConnection(r0.id, r1.id);
+    addConnection(r1.id, server.id);
+
+    // Static routes on R0:
+    // S 10.20.30.0/24 via 172.16.1.2
+    addStaticRoute(r0.id, { id: 'route-slash-24', network: '10.20.30.0', subnetMask: '255.255.255.0', nextHop: '172.16.1.2' });
+    // S 10.20.0.0/16 via 172.16.1.2
+    addStaticRoute(r0.id, { id: 'route-slash-16', network: '10.20.0.0', subnetMask: '255.255.0.0', nextHop: '172.16.1.2' });
+    // S 10.0.0.0/8 via 172.16.1.2
+    addStaticRoute(r0.id, { id: 'route-slash-8', network: '10.0.0.0', subnetMask: '255.0.0.0', nextHop: '172.16.1.2' });
+    // S 0.0.0.0/0 via 172.16.1.2
+    addStaticRoute(r0.id, { id: 'route-default', network: '0.0.0.0', subnetMask: '0.0.0.0', nextHop: '172.16.1.2' });
+
+    // 1. Destination 10.20.30.50 -> /24 must be selected by R0
+    r1.interfaces['Gig0/1'].ip = '10.20.30.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    server.ip = '10.20.30.50';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.20.30.1';
+    clearArpTable(r0.id);
+    clearArpTable(r1.id);
+    const res24 = simulateSendFrame(pc, server);
+    assert.strictEqual(res24.success, true);
+    const r0Hop24 = res24.hopActions.find(h => h.deviceId === r0.id);
+    assert.strictEqual(r0Hop24.route.cidr, '10.20.30.0/24');
+
+    // 2. Destination 10.20.99.50 -> /16 must be selected by R0
+    r1.interfaces['Gig0/1'].ip = '10.20.99.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    server.ip = '10.20.99.50';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.20.99.1';
+    clearArpTable(r0.id);
+    clearArpTable(r1.id);
+    const res16 = simulateSendFrame(pc, server);
+    assert.strictEqual(res16.success, true);
+    const r0Hop16 = res16.hopActions.find(h => h.deviceId === r0.id);
+    assert.strictEqual(r0Hop16.route.cidr, '10.20.0.0/16');
+
+    // 3. Destination 10.50.1.50 -> /8 must be selected by R0
+    r1.interfaces['Gig0/1'].ip = '10.50.1.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    server.ip = '10.50.1.50';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.50.1.1';
+    clearArpTable(r0.id);
+    clearArpTable(r1.id);
+    const res8 = simulateSendFrame(pc, server);
+    assert.strictEqual(res8.success, true);
+    const r0Hop8 = res8.hopActions.find(h => h.deviceId === r0.id);
+    assert.strictEqual(r0Hop8.route.cidr, '10.0.0.0/8');
+
+    // 4. Destination 8.8.8.8 -> /0 Default route must be selected by R0
+    r1.interfaces['Gig0/1'].ip = '8.8.8.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    server.ip = '8.8.8.8';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '8.8.8.1';
+    clearArpTable(r0.id);
+    clearArpTable(r1.id);
+    const res0 = simulateSendFrame(pc, server);
+    assert.strictEqual(res0.success, true);
+    const r0Hop0 = res0.hopActions.find(h => h.deviceId === r0.id);
+    assert.strictEqual(r0Hop0.route.cidr, '0.0.0.0/0');
+});
+
+// 173. Connected route beats less-specific static route during forwarding (Scenario D)
+runTest('173. Connected route beats less-specific static route during forwarding', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('server', 350, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '10.0.0.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '10.0.0.1';
+
+    // Connected: 192.168.1.0/24 on Gig0/1
+    router.interfaces['Gig0/0'].ip = '10.0.0.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '192.168.1.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '192.168.1.50';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '192.168.1.1';
+
+    addConnection(pc.id, router.id);
+    addConnection(router.id, server.id);
+
+    // Static route /16 overlapping connected /24
+    addStaticRoute(router.id, { network: '192.168.0.0', subnetMask: '255.255.0.0', nextHop: '10.0.0.2' });
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    const routerHop = result.hopActions.find(h => h.deviceId === router.id);
+    assert.strictEqual(routerHop.route.code, 'C', 'Connected /24 must beat Static /16');
+    assert.strictEqual(routerHop.route.cidr, '192.168.1.0/24');
+});
+
+// 174. Equal-prefix Connected beats Static during forwarding (Scenario D)
+runTest('174. Equal-prefix Connected beats Static during forwarding', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('server', 350, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '10.0.0.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '10.0.0.1';
+
+    router.interfaces['Gig0/0'].ip = '10.0.0.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '192.168.1.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '192.168.1.50';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '192.168.1.1';
+
+    addConnection(pc.id, router.id);
+    addConnection(router.id, server.id);
+
+    // Static route with identical prefix 192.168.1.0/24
+    addStaticRoute(router.id, { network: '192.168.1.0', subnetMask: '255.255.255.0', nextHop: '10.0.0.2' });
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    const routerHop = result.hopActions.find(h => h.deviceId === router.id);
+    assert.strictEqual(routerHop.route.code, 'C', 'Connected route must beat Static route on equal prefix tie');
+});
+
+// 175. Static nextHop used as ARP target while destination remains unchanged (Scenario E)
+runTest('175. Static nextHop used as ARP target while destination remains unchanged', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r1 = networkState.devices[1];
+    const r2 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.10.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.10.1';
+
+    r1.interfaces['Gig0/0'].ip = '192.168.10.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r2.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r2.interfaces['Gig0/1'].ip = '192.168.30.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '192.168.30.50';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '192.168.30.1';
+
+    addConnection(pc.id, r1.id);
+    addConnection(r1.id, r2.id);
+    addConnection(r2.id, server.id);
+
+    addStaticRoute(r1.id, { network: '192.168.30.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.2' });
+
+    clearArpTable(r1.id);
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(lookupArp(r1.id, '10.0.12.2'), r2.interfaces['Gig0/0'].mac, 'R1 must ARP for nextHop 10.0.12.2');
+    assert.strictEqual(lookupArp(r1.id, '192.168.30.50'), null, 'R1 must NOT ARP for remote server IP');
+    assert.strictEqual(result.packet.destinationIp, '192.168.30.50', 'Packet destination IP must remain untouched');
+});
+
+// 176. Default route used during real forwarding (Scenario F)
+runTest('176. Default route used during real forwarding', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r1 = networkState.devices[1];
+    const r2 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.10.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.10.1';
+
+    r1.interfaces['Gig0/0'].ip = '192.168.10.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r2.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r2.interfaces['Gig0/1'].ip = '172.20.5.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '172.20.5.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '172.20.5.1';
+
+    addConnection(pc.id, r1.id);
+    addConnection(r1.id, r2.id);
+    addConnection(r2.id, server.id);
+
+    // Default route on R1
+    addStaticRoute(r1.id, { network: '0.0.0.0', subnetMask: '0.0.0.0', nextHop: '10.0.12.2' });
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    const r1Hop = result.hopActions.find(h => h.deviceId === r1.id);
+    assert.strictEqual(r1Hop.route.cidr, '0.0.0.0/0');
+});
+
+// 177. More-specific route beats default during real forwarding (Scenario F)
+runTest('177. More-specific route beats default during real forwarding', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r1 = networkState.devices[1];
+    const r2 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.10.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.10.1';
+
+    r1.interfaces['Gig0/0'].ip = '192.168.10.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r2.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r2.interfaces['Gig0/1'].ip = '172.20.5.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '172.20.5.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '172.20.5.1';
+
+    addConnection(pc.id, r1.id);
+    addConnection(r1.id, r2.id);
+    addConnection(r2.id, server.id);
+
+    // Default route to .99 (unreachable neighbor if chosen)
+    addStaticRoute(r1.id, { network: '0.0.0.0', subnetMask: '0.0.0.0', nextHop: '10.0.12.99' });
+    // Specific route to .2
+    addStaticRoute(r1.id, { network: '172.20.0.0', subnetMask: '255.255.0.0', nextHop: '10.0.12.2' });
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    const r1Hop = result.hopActions.find(h => h.deviceId === r1.id);
+    assert.strictEqual(r1Hop.route.cidr, '172.20.0.0/16', 'Specific /16 must override default /0');
+});
+
+// 178. Missing return route causes NO_ROUTE on reverse ICMP reply (Scenario G)
+runTest('178. Missing return route causes NO_ROUTE on reverse ICMP reply', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 150, 100);
+    addDevice('router', 250, 100);
+    addDevice('router', 350, 100);
+    addDevice('pc', 450, 100);
+
+    const pca = networkState.devices[0];
+    const r1 = networkState.devices[1];
+    const r2 = networkState.devices[2];
+    const r3 = networkState.devices[3];
+    const pcb = networkState.devices[4];
+
+    pca.ip = '192.168.10.10';
+    pca.subnetMask = '255.255.255.0';
+    pca.gateway = '192.168.10.1';
+
+    r1.interfaces['Gig0/0'].ip = '192.168.10.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r2.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r2.interfaces['Gig0/1'].ip = '10.0.23.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r3.interfaces['Gig0/0'].ip = '10.0.23.2';
+    r3.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r3.interfaces['Gig0/1'].ip = '192.168.30.1';
+    r3.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pcb.ip = '192.168.30.10';
+    pcb.subnetMask = '255.255.255.0';
+    pcb.gateway = '192.168.30.1';
+
+    addConnection(pca.id, r1.id);
+    addConnection(r1.id, r2.id);
+    addConnection(r2.id, r3.id);
+    addConnection(r3.id, pcb.id);
+
+    // Forward routes present
+    addStaticRoute(r1.id, { network: '192.168.30.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.2' });
+    addStaticRoute(r2.id, { network: '192.168.30.0', subnetMask: '255.255.255.0', nextHop: '10.0.23.2' });
+
+    // Reverse routes: R3 has route, but R2 is DELIBERATELY MISSING return route!
+    addStaticRoute(r3.id, { network: '192.168.10.0', subnetMask: '255.255.255.0', nextHop: '10.0.23.1' });
+
+    const result = simulateSendFrame(pca, pcb, { icmp: true });
+    assert.strictEqual(result.success, false, 'ICMP roundtrip must fail due to missing return route');
+    assert.strictEqual(result.action, 'DROP');
+    assert.ok(result.reason.includes('No route to destination'));
+});
+
+// 179. Down static-route egress interface causes safe DROP (Scenario H)
+runTest('179. Down static-route egress interface causes safe DROP', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r1 = networkState.devices[1];
+    const r2 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.10.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.10.1';
+
+    r1.interfaces['Gig0/0'].ip = '192.168.10.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r2.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r2.interfaces['Gig0/1'].ip = '192.168.30.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '192.168.30.50';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '192.168.30.1';
+
+    addConnection(pc.id, r1.id);
+    addConnection(r1.id, r2.id);
+    addConnection(r2.id, server.id);
+
+    addStaticRoute(r1.id, { network: '192.168.30.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.2' });
+
+    // Administratively bring Gig0/1 down on R1
+    r1.interfaces['Gig0/1'].status = 'down';
+
+    const path = [pc.id, r1.id, r2.id, server.id];
+    const frame = {
+        sourceDeviceId: pc.id,
+        destinationDeviceId: server.id,
+        sourceMac: pc.mac,
+        destinationMac: r1.interfaces['Gig0/0'].mac,
+        etherType: 'IPv4',
+        packet: { sourceIp: pc.ip, destinationIp: server.ip, ttl: 64 },
+        path,
+        events: []
+    };
+
+    const result = simulatePathTransmission(frame, pc, server, path);
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.action, 'DROP');
+    assert.ok(result.reason.includes('down'));
+});
+
+// 180. Multi-router TTL decrements once per router (Scenario I)
+runTest('180. Multi-router TTL decrements once per router', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 150, 100);
+    addDevice('router', 250, 100);
+    addDevice('router', 350, 100);
+    addDevice('pc', 450, 100);
+
+    const pca = networkState.devices[0];
+    const r1 = networkState.devices[1];
+    const r2 = networkState.devices[2];
+    const r3 = networkState.devices[3];
+    const pcb = networkState.devices[4];
+
+    pca.ip = '192.168.10.10';
+    pca.subnetMask = '255.255.255.0';
+    pca.gateway = '192.168.10.1';
+
+    r1.interfaces['Gig0/0'].ip = '192.168.10.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r2.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r2.interfaces['Gig0/1'].ip = '10.0.23.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r3.interfaces['Gig0/0'].ip = '10.0.23.2';
+    r3.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r3.interfaces['Gig0/1'].ip = '192.168.30.1';
+    r3.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pcb.ip = '192.168.30.10';
+    pcb.subnetMask = '255.255.255.0';
+    pcb.gateway = '192.168.30.1';
+
+    addConnection(pca.id, r1.id);
+    addConnection(r1.id, r2.id);
+    addConnection(r2.id, r3.id);
+    addConnection(r3.id, pcb.id);
+
+    addStaticRoute(r1.id, { network: '192.168.30.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.2' });
+    addStaticRoute(r2.id, { network: '192.168.30.0', subnetMask: '255.255.255.0', nextHop: '10.0.23.2' });
+
+    const result = simulateSendFrame(pca, pcb, { initialTtl: 64 });
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.packet.ttl, 61);
+
+    const r1Hop = result.hopActions.find(h => h.deviceId === r1.id);
+    const r2Hop = result.hopActions.find(h => h.deviceId === r2.id);
+    const r3Hop = result.hopActions.find(h => h.deviceId === r3.id);
+
+    assert.strictEqual(r1Hop.ttl, 63);
+    assert.strictEqual(r2Hop.ttl, 62);
+    assert.strictEqual(r3Hop.ttl, 61);
+});
+
+// 181. Static routing loop terminates safely (Scenario J)
+runTest('181. Static routing loop terminates safely', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+
+    const pc = networkState.devices[0];
+    const r1 = networkState.devices[1];
+    const r2 = networkState.devices[2];
+
+    pc.ip = '192.168.10.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.10.1';
+
+    r1.interfaces['Gig0/0'].ip = '192.168.10.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r2.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addConnection(pc.id, r1.id);
+    addConnection(r1.id, r2.id);
+
+    // Mutual routing loop for 10.99.0.0/24: R1 points to R2, R2 points to R1
+    addStaticRoute(r1.id, { network: '10.99.0.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.2' });
+    addStaticRoute(r2.id, { network: '10.99.0.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.1' });
+
+    const loopingPath = [pc.id, r1.id, r2.id, r1.id, r2.id, r1.id];
+    const frame = {
+        sourceDeviceId: pc.id,
+        destinationDeviceId: r2.id,
+        sourceMac: pc.mac,
+        destinationMac: r1.interfaces['Gig0/0'].mac,
+        etherType: 'IPv4',
+        packet: { sourceIp: pc.ip, destinationIp: '10.99.0.50', ttl: 3 },
+        path: loopingPath,
+        events: []
+    };
+
+    const result = simulatePathTransmission(frame, pc, r2, loopingPath);
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.action, 'DROP');
+    assert.ok(result.reason.includes('Time to Live (TTL) expired'));
+});
+
+// 182. Interface-only static route forwards correctly (Scenario K)
+runTest('182. Interface-only static route forwards correctly', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('server', 350, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '10.0.0.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '10.0.0.1';
+
+    router.interfaces['Gig0/0'].ip = '10.0.0.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '172.16.50.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '172.16.50.99';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '172.16.50.1';
+
+    addConnection(pc.id, router.id);
+    addConnection(router.id, server.id);
+
+    // Interface-only route
+    addStaticRoute(router.id, { network: '172.16.50.99', subnetMask: '255.255.255.255', interface: 'Gig0/1' });
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.packet.destinationIp, '172.16.50.99');
+    const routerHop = result.hopActions.find(h => h.deviceId === router.id);
+    assert.strictEqual(routerHop.route.interface, 'Gig0/1');
+    assert.strictEqual(routerHop.route.nextHop, null);
+});
+
+// 183. Same-prefix static routes use lower metric during real forwarding (Scenario L)
+runTest('183. Same-prefix static routes use lower metric during real forwarding', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '10.0.0.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '10.0.0.1';
+
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '192.168.50.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '192.168.50.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '192.168.50.1';
+
+    addConnection(pc.id, r0.id);
+    addConnection(r0.id, r1.id);
+    addConnection(r1.id, server.id);
+
+    // Two static routes with same prefix, different metrics
+    addStaticRoute(r0.id, { id: 'high-metric', network: '192.168.50.0', subnetMask: '255.255.255.0', nextHop: '172.16.1.99', metric: 50 });
+    addStaticRoute(r0.id, { id: 'low-metric', network: '192.168.50.0', subnetMask: '255.255.255.0', nextHop: '172.16.1.2', metric: 5 });
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    const r0Hop = result.hopActions.find(h => h.deviceId === r0.id);
+    assert.strictEqual(r0Hop.route.id, 'low-metric');
+    assert.strictEqual(r0Hop.route.metric, 5);
+});
+
+// 184. Equal metric/static routes use deterministic route ID during real forwarding (Scenario L)
+runTest('184. Equal metric/static routes use deterministic route ID during real forwarding', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '10.0.0.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '10.0.0.1';
+
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '192.168.50.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '192.168.50.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '192.168.50.1';
+
+    addConnection(pc.id, r0.id);
+    addConnection(r0.id, r1.id);
+    addConnection(r1.id, server.id);
+
+    // Two routes with same prefix & same metric
+    addStaticRoute(r0.id, { id: 'route-Z', network: '192.168.50.0', subnetMask: '255.255.255.0', nextHop: '172.16.1.99', metric: 1 });
+    addStaticRoute(r0.id, { id: 'route-A', network: '192.168.50.0', subnetMask: '255.255.255.0', nextHop: '172.16.1.2', metric: 1 });
+
+    const result = simulateSendFrame(pc, server);
+    assert.strictEqual(result.success, true);
+    const r0Hop = result.hopActions.find(h => h.deviceId === r0.id);
+    assert.strictEqual(r0Hop.route.id, 'route-A', 'Deterministic alphabetical sort must pick route-A over route-Z');
+});
+
+// 185. Static route added through the supported route-management path appears in routing table state
+runTest('185. Static route added through the supported route-management path appears in routing table state', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const addRes = addStaticRoute(router.id, {
+        network: '10.20.30.0',
+        subnetMask: '255.255.255.0',
+        interface: 'Gig0/0',
+        metric: 2
+    });
+    assert.strictEqual(addRes.success, true);
+    assert.strictEqual(addRes.route.cidr, '10.20.30.0/24');
+
+    const table = getRouterRoutingTable(router.id);
+    const staticEntry = table.find(r => r.id === addRes.route.id);
+    assert.ok(staticEntry, 'Static route must appear in getRouterRoutingTable');
+    assert.strictEqual(staticEntry.code, 'S');
+    assert.strictEqual(staticEntry.network, '10.20.30.0');
+    assert.strictEqual(staticEntry.prefixLength, 24);
+    assert.strictEqual(staticEntry.interface, 'Gig0/0');
+    assert.strictEqual(staticEntry.metric, 2);
+    assert.strictEqual(staticEntry.status, 'active');
+});
+
+// 186. Static route removal removes only the selected static route
+runTest('186. Static route removal removes only the selected static route', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const res1 = addStaticRoute(router.id, { id: 'route-1', network: '10.1.0.0', subnetMask: '255.255.0.0', interface: 'Gig0/0' });
+    const res2 = addStaticRoute(router.id, { id: 'route-2', network: '10.2.0.0', subnetMask: '255.255.0.0', interface: 'Gig0/0' });
+    assert.strictEqual(res1.success, true);
+    assert.strictEqual(res2.success, true);
+
+    const remRes = removeStaticRoute(router.id, 'route-1');
+    assert.strictEqual(remRes.success, true);
+
+    const table = getRouterRoutingTable(router.id);
+    assert.strictEqual(table.some(r => r.id === 'route-1'), false, 'route-1 must be removed');
+    assert.strictEqual(table.some(r => r.id === 'route-2'), true, 'route-2 must be preserved');
+});
+
+// 187. Connected routes cannot be removed through removeStaticRoute
+runTest('187. Connected routes cannot be removed through removeStaticRoute', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const tableBefore = getRouterRoutingTable(router.id);
+    const connectedRoute = tableBefore.find(r => r.code === 'C');
+    assert.ok(connectedRoute, 'Connected route must exist');
+    assert.strictEqual(connectedRoute.id, undefined, 'Connected route has no static route ID');
+
+    // Attempt removal with undefined/empty ID
+    const remRes1 = removeStaticRoute(router.id, connectedRoute.id);
+    assert.strictEqual(remRes1.success, false);
+    assert.strictEqual(remRes1.reason, 'Route ID is required.');
+
+    // Attempt removal with non-existent static route ID
+    const remRes2 = removeStaticRoute(router.id, 'connected-route-Gig0/0');
+    assert.strictEqual(remRes2.success, false);
+    assert.strictEqual(remRes2.reason, 'Static route not found.');
+
+    const tableAfter = getRouterRoutingTable(router.id);
+    assert.strictEqual(tableAfter.length, 1);
+    assert.strictEqual(tableAfter[0].code, 'C');
+});
+
+// 188. Add/remove operations preserve Undo/Redo behavior
+runTest('188. Add/remove operations preserve Undo/Redo behavior', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    // 1. Add static route with snapshot
+    pushHistory();
+    const addRes = addStaticRoute(router.id, { id: 'undo-route', network: '172.16.0.0', subnetMask: '255.255.0.0', interface: 'Gig0/0' });
+    assert.strictEqual(addRes.success, true);
+    assert.strictEqual(getRouterRoutingTable(router.id).length, 2);
+
+    // 2. Undo -> static route disappears
+    undo();
+    const tableAfterUndo = getRouterRoutingTable(router.id);
+    assert.strictEqual(tableAfterUndo.length, 1);
+    assert.strictEqual(tableAfterUndo.some(r => r.id === 'undo-route'), false);
+
+    // 3. Redo -> static route returns
+    redo();
+    const tableAfterRedo = getRouterRoutingTable(router.id);
+    assert.strictEqual(tableAfterRedo.length, 2);
+    assert.strictEqual(tableAfterRedo.some(r => r.id === 'undo-route'), true);
+
+    // 4. Remove static route with snapshot
+    pushHistory();
+    const remRes = removeStaticRoute(router.id, 'undo-route');
+    assert.strictEqual(remRes.success, true);
+    assert.strictEqual(getRouterRoutingTable(router.id).length, 1);
+
+    // 5. Undo removal -> static route returns
+    undo();
+    const tableAfterUndoRem = getRouterRoutingTable(router.id);
+    assert.strictEqual(tableAfterUndoRem.length, 2);
+    assert.strictEqual(tableAfterUndoRem.some(r => r.id === 'undo-route'), true);
+
+    // 6. Redo removal -> static route removed
+    redo();
+    const tableAfterRedoRem = getRouterRoutingTable(router.id);
+    assert.strictEqual(tableAfterRedoRem.length, 1);
+});
+
+// 189. Routing table contains both C and S routes after adding a static route
+runTest('189. Routing table contains both C and S routes after adding a static route', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(router.id, { network: '172.20.0.0', subnetMask: '255.255.0.0', nextHop: '10.0.0.2' });
+
+    const table = getRouterRoutingTable(router.id);
+    assert.strictEqual(table.length, 3);
+    const cRoutes = table.filter(r => r.code === 'C');
+    const sRoutes = table.filter(r => r.code === 'S');
+    assert.strictEqual(cRoutes.length, 2);
+    assert.strictEqual(sRoutes.length, 1);
+    assert.strictEqual(sRoutes[0].cidr, '172.20.0.0/16');
+    assert.strictEqual(sRoutes[0].nextHop, '10.0.0.2');
+    assert.strictEqual(sRoutes[0].interface, 'Gig0/1');
+});
+
+// 190. Duplicate route rejection remains intact through the UI-facing path
+runTest('190. Duplicate route rejection remains intact through the UI-facing path', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const res1 = addStaticRoute(router.id, { network: '10.50.0.0', subnetMask: '255.255.0.0', interface: 'Gig0/0' });
+    assert.strictEqual(res1.success, true);
+
+    const res2 = addStaticRoute(router.id, { network: '10.50.0.0', subnetMask: '255.255.0.0', interface: 'Gig0/0' });
+    assert.strictEqual(res2.success, false);
+    assert.ok(res2.reason.includes('already exists'));
+
+    const table = getRouterRoutingTable(router.id);
+    const matches = table.filter(r => r.cidr === '10.50.0.0/16');
+    assert.strictEqual(matches.length, 1, 'Only one instance of the route must exist');
+});
+
+// 191. Invalid route input does not partially mutate router state
+runTest('191. Invalid route input does not partially mutate router state', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(router.id, { id: 'base-route', network: '10.0.0.0', subnetMask: '255.0.0.0', interface: 'Gig0/0' });
+    const initialCount = getRouterRuntime(router.id).staticRoutes.length;
+    assert.strictEqual(initialCount, 1);
+
+    // Invalid destination
+    const r1 = addStaticRoute(router.id, { network: 'invalid-ip', subnetMask: '255.255.255.0', interface: 'Gig0/0' });
+    assert.strictEqual(r1.success, false);
+
+    // Invalid mask
+    const r2 = addStaticRoute(router.id, { network: '10.1.0.0', subnetMask: '255.255.0.1', interface: 'Gig0/0' });
+    assert.strictEqual(r2.success, false);
+
+    // Unreachable nextHop
+    const r3 = addStaticRoute(router.id, { network: '10.2.0.0', subnetMask: '255.255.0.0', nextHop: '192.168.99.99' });
+    assert.strictEqual(r3.success, false);
+
+    // Missing nextHop and interface
+    const r4 = addStaticRoute(router.id, { network: '10.3.0.0', subnetMask: '255.255.0.0' });
+    assert.strictEqual(r4.success, false);
+
+    const finalCount = getRouterRuntime(router.id).staticRoutes.length;
+    assert.strictEqual(finalCount, 1, 'Static routes array must not be modified by failed validations');
+    assert.strictEqual(getRouterRuntime(router.id).staticRoutes[0].id, 'base-route');
+});
+
+// 192. Router Inspector HTML renders Routing Table and Static Routes sections
+runTest('192. Router Inspector HTML renders Routing Table and Static Routes sections', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const html = renderRouterInspector(router);
+    assert.ok(html.includes('ROUTING TABLE'), 'Must contain ROUTING TABLE heading');
+    assert.ok(html.includes('STATIC ROUTES'), 'Must contain STATIC ROUTES heading');
+    assert.ok(html.includes('router-routing-table'), 'Must contain routing table class');
+    assert.ok(html.includes('static-route-form'), 'Must contain static-route-form');
+    assert.ok(html.includes('id="addStaticRouteBtn"'), 'Must contain Add Route button');
+    assert.ok(html.includes('badge--connected'), 'Must contain connected route badge');
+    assert.ok(html.includes('192.168.1.0'), 'Must contain normalized network address');
+    assert.ok(html.includes('/24'), 'Must contain prefix length');
+});
+
+// 193. Non-router device inspectors do NOT render routing sections
+runTest('193. Non-router device inspectors do NOT render routing sections', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('laptop', 150, 100);
+    addDevice('server', 250, 100);
+    addDevice('switch', 350, 100);
+
+    const pc = networkState.devices[0];
+    const laptop = networkState.devices[1];
+    const server = networkState.devices[2];
+    const sw = networkState.devices[3];
+
+    [pc, laptop, server, sw].forEach((dev) => {
+        networkState.selectedDeviceId = dev.id;
+        renderPropertiesPanel();
+        const panelHtml = document.getElementById('propertiesPanel').innerHTML;
+        assert.strictEqual(panelHtml.includes('ROUTING TABLE'), false, 'Device ' + dev.type + ' must not render ROUTING TABLE');
+        assert.strictEqual(panelHtml.includes('STATIC ROUTES'), false, 'Device ' + dev.type + ' must not render STATIC ROUTES');
+    });
+});
+
+// 194. Static route table row renders delete button and badge--static
+runTest('194. Static route table row renders delete button and badge--static', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(router.id, { id: 'test-static-1', network: '10.20.30.0', subnetMask: '255.255.255.0', interface: 'Gig0/0' });
+    const html = renderRouterRoutingTableSection(router);
+
+    assert.ok(html.includes('badge--static'), 'Must contain badge--static');
+    assert.ok(html.includes('data-route-id="test-static-1"'), 'Must contain delete button with route ID');
+    assert.ok(html.includes('route-delete-btn'), 'Must contain route-delete-btn class');
+});
+
+// 195. Router switching maintains separate routing table rendering
+runTest('195. Router switching maintains separate routing table rendering', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    addDevice('router', 400, 100);
+    const r0 = networkState.devices[0];
+    const r1 = networkState.devices[1];
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(r0.id, { id: 'r0-route', network: '172.16.0.0', subnetMask: '255.255.0.0', interface: 'Gig0/0' });
+    addStaticRoute(r1.id, { id: 'r1-route', network: '172.30.0.0', subnetMask: '255.255.0.0', interface: 'Gig0/0' });
+
+    const r0Html = renderRouterRoutingTableSection(r0);
+    assert.ok(r0Html.includes('172.16.0.0'), 'r0 HTML must contain r0 route');
+    assert.strictEqual(r0Html.includes('172.30.0.0'), false, 'r0 HTML must not contain r1 route');
+
+    const r1Html = renderRouterRoutingTableSection(r1);
+    assert.ok(r1Html.includes('172.30.0.0'), 'r1 HTML must contain r1 route');
+    assert.strictEqual(r1Html.includes('172.16.0.0'), false, 'r1 HTML must not contain r0 route');
+});
+
+// 196. Interface IP change automatically updates Connected route in rendered HTML
+runTest('196. Interface IP change automatically updates Connected route in rendered HTML', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const beforeHtml = renderRouterRoutingTableSection(router);
+    assert.ok(beforeHtml.includes('192.168.1.0'), 'Initial HTML must show 192.168.1.0');
+
+    // Change IP
+    router.interfaces['Gig0/0'].ip = '192.168.2.1';
+    const afterHtml = renderRouterRoutingTableSection(router);
+    assert.strictEqual(afterHtml.includes('192.168.1.0'), false, 'Old network must not be present');
+    assert.ok(afterHtml.includes('192.168.2.0'), 'New network 192.168.2.0 must be present');
+});
+
+// 197. Static route form section renders all required fields and interface options
+runTest('197. Static route form section renders all required fields and interface options', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+
+    const formHtml = renderRouterStaticRouteFormSection(router);
+    assert.ok(formHtml.includes('id="staticRouteDest"'), 'Must have destination input');
+    assert.ok(formHtml.includes('id="staticRouteMask"'), 'Must have mask input');
+    assert.ok(formHtml.includes('id="staticRouteNextHop"'), 'Must have nextHop input');
+    assert.ok(formHtml.includes('id="staticRouteInterface"'), 'Must have interface select');
+    assert.ok(formHtml.includes('id="staticRouteMetric"'), 'Must have metric input');
+    assert.ok(formHtml.includes('id="staticRouteFeedback"'), 'Must have feedback container');
+    assert.ok(formHtml.includes('Gig0/0 (up)'), 'Must enumerate Gig0/0 interface');
+    assert.ok(formHtml.includes('Gig0/1 (up)'), 'Must enumerate Gig0/1 interface');
 });
 
 console.log('----------------------------------------------------');

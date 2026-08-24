@@ -1942,6 +1942,91 @@ function renderPropertiesPanel() {
         });
     }
 
+    const addRouteBtn = panel.querySelector('#addStaticRouteBtn');
+    if (addRouteBtn && selected.type === 'router') {
+        const handleAddRoute = () => {
+            const destInput = panel.querySelector('#staticRouteDest');
+            const maskInput = panel.querySelector('#staticRouteMask');
+            const nextHopInput = panel.querySelector('#staticRouteNextHop');
+            const ifaceSelect = panel.querySelector('#staticRouteInterface');
+            const metricInput = panel.querySelector('#staticRouteMetric');
+            const feedbackEl = panel.querySelector('#staticRouteFeedback');
+
+            let dest = destInput ? destInput.value.trim() : '';
+            let mask = maskInput ? maskInput.value.trim() : '';
+            const nextHop = nextHopInput ? nextHopInput.value.trim() : '';
+            const egressIface = ifaceSelect ? ifaceSelect.value.trim() : '';
+            const metricVal = metricInput ? parseInt(metricInput.value, 10) : 1;
+
+            // Normalize CIDR in destination if present (e.g. 10.20.30.0/24)
+            if (dest.includes('/')) {
+                const parts = dest.split('/');
+                dest = parts[0].trim();
+                if (!mask && parts[1]) {
+                    mask = parts[1].trim();
+                }
+            }
+
+            // Normalize prefix length in mask input (e.g. /24 or 24)
+            if (mask && (/^\/?[0-9]{1,2}$/.test(mask))) {
+                const pLen = parseInt(mask.replace(/^\//, ''), 10);
+                if (pLen >= 0 && pLen <= 32) {
+                    mask = getMaskFromPrefixLength(pLen) || mask;
+                }
+            }
+
+            const routeData = {
+                network: dest,
+                subnetMask: mask,
+                nextHop: nextHop || undefined,
+                interface: egressIface || undefined,
+                metric: isNaN(metricVal) ? 1 : metricVal
+            };
+
+            pushHistory();
+            const result = addStaticRoute(selected.id, routeData);
+            if (result.success) {
+                updateStatus(`Static route ${result.route.cidr} added to ${selected.name}.`);
+                renderPropertiesPanel();
+            } else {
+                networkState.history.pop();
+                if (feedbackEl) {
+                    feedbackEl.textContent = `✗ ${result.reason}`;
+                    feedbackEl.className = 'property-feedback property-feedback--error';
+                }
+            }
+        };
+
+        addRouteBtn.addEventListener('click', handleAddRoute);
+
+        const formInputs = panel.querySelectorAll('#staticRouteDest, #staticRouteMask, #staticRouteNextHop, #staticRouteMetric');
+        formInputs.forEach((input) => {
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleAddRoute();
+                }
+            });
+        });
+    }
+
+    panel.querySelectorAll('.route-delete-btn[data-route-id]').forEach((btn) => {
+        btn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            const routeId = btn.dataset.routeId;
+            if (!routeId) return;
+            pushHistory();
+            const result = removeStaticRoute(selected.id, routeId);
+            if (result.success) {
+                updateStatus(`Static route removed from ${selected.name}.`);
+                renderPropertiesPanel();
+            } else {
+                networkState.history.pop();
+                updateStatus(`Could not remove static route: ${result.reason}`);
+            }
+        });
+    });
+
     refreshInspectorValidation(selected);
 }
 
@@ -2476,6 +2561,109 @@ function attachSendFramePanelEvents() {
     // No additional action buttons required currently.
 }
 
+function renderRouterRoutingTableSection(router) {
+    const routes = getRouterRoutingTable(router.id);
+    const count = routes.length;
+
+    const rows = routes.map((route) => {
+        const isConnected = route.code === 'C';
+        const codeBadge = isConnected
+            ? '<span class="badge badge--connected" title="Connected Route">C</span>'
+            : '<span class="badge badge--static" title="Static Route">S</span>';
+        const nextHopDisplay = route.nextHop ? `<code>${escapeHtml(route.nextHop)}</code>` : '—';
+        const ifaceDisplay = route.interface ? escapeHtml(route.interface) : '—';
+        const metricDisplay = !isConnected && typeof route.metric === 'number' ? escapeHtml(String(route.metric)) : '—';
+        const statusClass = route.status === 'down' ? 'route-status--down' : 'route-status--active';
+        const statusDisplay = `<span class="route-status ${statusClass}">${escapeHtml(route.status || 'active')}</span>`;
+        const actionDisplay = !isConnected && route.id
+            ? `<button class="route-delete-btn" data-route-id="${escapeHtml(route.id)}" type="button" title="Delete Static Route" aria-label="Delete Static Route ${escapeHtml(route.network)}/${route.prefixLength}">✕</button>`
+            : '—';
+
+        return `
+            <tr>
+                <td>${codeBadge}</td>
+                <td><code>${escapeHtml(route.network)}</code></td>
+                <td><code>/${escapeHtml(String(route.prefixLength))}</code></td>
+                <td>${nextHopDisplay}</td>
+                <td>${ifaceDisplay}</td>
+                <td>${metricDisplay}</td>
+                <td>${statusDisplay}</td>
+                <td class="table-action-cell">${actionDisplay}</td>
+            </tr>
+        `;
+    }).join('');
+
+    return `
+        <div class="property-summary" id="routerRoutingTableSection">
+            <h4>ROUTING TABLE</h4>
+            ${count ? `
+                <table class="property-table router-routing-table">
+                    <thead>
+                        <tr>
+                            <th>Code</th>
+                            <th>Network</th>
+                            <th>Prefix</th>
+                            <th>Next Hop</th>
+                            <th>Interface</th>
+                            <th>Metric</th>
+                            <th>Status</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows}
+                    </tbody>
+                </table>
+            ` : '<p class="empty-state">No routes in routing table.</p>'}
+        </div>
+    `;
+}
+
+function renderRouterStaticRouteFormSection(router) {
+    const ifaces = ['Gig0/0', 'Gig0/1'];
+    const ifaceOptions = ifaces.map((ifName) => {
+        const ifObj = router.interfaces?.[ifName] || { status: 'up' };
+        const status = ifObj.status || 'up';
+        return `<option value="${escapeHtml(ifName)}">${escapeHtml(ifName)} (${status})</option>`;
+    }).join('');
+
+    return `
+        <div class="property-summary" id="routerStaticRouteFormSection">
+            <h4>STATIC ROUTES</h4>
+            <div class="static-route-form">
+                <h5 class="static-route-form__title">Add Static Route</h5>
+                <div class="property-field">
+                    <label for="staticRouteDest">Destination Network / IP</label>
+                    <input id="staticRouteDest" type="text" placeholder="e.g. 192.168.2.0 or 192.168.2.0/24">
+                </div>
+                <div class="property-field">
+                    <label for="staticRouteMask">Subnet Mask or Prefix</label>
+                    <input id="staticRouteMask" type="text" placeholder="e.g. 255.255.255.0 or /24">
+                </div>
+                <div class="property-field">
+                    <label for="staticRouteNextHop">Next Hop IP</label>
+                    <input id="staticRouteNextHop" type="text" placeholder="e.g. 10.0.12.2 (Optional if interface set)">
+                </div>
+                <div class="property-field">
+                    <label for="staticRouteInterface">Egress Interface</label>
+                    <select id="staticRouteInterface">
+                        <option value="">Auto-resolve from Next Hop</option>
+                        ${ifaceOptions}
+                    </select>
+                </div>
+                <div class="property-field">
+                    <label for="staticRouteMetric">Metric</label>
+                    <input id="staticRouteMetric" type="number" min="1" max="255" value="1" placeholder="1">
+                </div>
+                <div class="property-feedback" id="staticRouteFeedback"></div>
+                <div class="property-actions">
+                    <button id="addStaticRouteBtn" class="toolbar-button" type="button">Add Route</button>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
 function renderRouterInspector(selected) {
     const draft = getInspectorDraft(selected);
     const nameValue = escapeHtml(getInspectorValue(selected, 'name'));
@@ -2566,6 +2754,8 @@ function renderRouterInspector(selected) {
                 <h4>INTERFACES</h4>
                 ${ifaceCards}
             </div>
+            ${renderRouterRoutingTableSection(selected)}
+            ${renderRouterStaticRouteFormSection(selected)}
             ${renderArpTableInspector(selected)}
             <div class="property-actions">
                 <button id="applyDeviceConfig" class="toolbar-button" type="button" ${isValid ? '' : 'disabled'}>Apply Changes</button>
@@ -2844,6 +3034,10 @@ function getPrefixLengthFromMask(mask) {
     }
 
     const maskInt = ipv4ToInteger(normalized);
+    if (maskInt === 0) {
+        return 0;
+    }
+
     let prefixLength = 0;
     let bit = 0x80000000;
     while (prefixLength < 32 && (maskInt & bit) !== 0) {
@@ -2851,11 +3045,28 @@ function getPrefixLengthFromMask(mask) {
         bit >>>= 1;
     }
 
-    if (maskInt !== ((0xFFFFFFFF << (32 - prefixLength)) >>> 0) && prefixLength < 32) {
+    if (prefixLength > 0 && prefixLength < 32 && maskInt !== ((0xFFFFFFFF << (32 - prefixLength)) >>> 0)) {
         return null;
     }
 
     return prefixLength;
+}
+
+function getMaskFromPrefixLength(prefixLength) {
+    if (prefixLength === null || prefixLength === undefined) {
+        return null;
+    }
+    const pLen = typeof prefixLength === 'string'
+        ? parseInt(prefixLength.replace(/^\//, '').trim(), 10)
+        : Number(prefixLength);
+    if (isNaN(pLen) || pLen < 0 || pLen > 32) {
+        return null;
+    }
+    if (pLen === 0) {
+        return '0.0.0.0';
+    }
+    const maskInt = (0xFFFFFFFF << (32 - pLen)) >>> 0;
+    return integerToIPv4(maskInt);
 }
 
 function getHostCount(prefixLength) {
@@ -3548,16 +3759,333 @@ function getPortForSwitchAndNeighbor(switchId, neighborId) {
     return getSwitchPortLabel(switchId, connection.id);
 }
 
+let staticRouteCounter = 0;
+
 function getRouterRuntime(routerId) {
     if (!networkState.routerRuntime) {
         networkState.routerRuntime = {};
     }
     if (!networkState.routerRuntime[routerId]) {
         networkState.routerRuntime[routerId] = {
-            ports: {}
+            ports: {},
+            staticRoutes: []
         };
     }
+    if (!Array.isArray(networkState.routerRuntime[routerId].staticRoutes)) {
+        networkState.routerRuntime[routerId].staticRoutes = [];
+    }
     return networkState.routerRuntime[routerId];
+}
+
+function addStaticRoute(routerId, routeData) {
+    if (!routeData || typeof routeData !== 'object') {
+        return { success: false, reason: 'Invalid route data.' };
+    }
+
+    const router = typeof routerId === 'object' && routerId ? routerId : getDeviceById(routerId);
+    if (!router || router.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+
+    const rawDest = String(routeData.network ?? routeData.destination ?? routeData.destinationNetwork ?? '').trim();
+    if (!rawDest || !isValidIPv4(rawDest)) {
+        return { success: false, reason: 'Invalid destination IPv4 address.' };
+    }
+
+    const rawMask = String(routeData.subnetMask ?? routeData.mask ?? '').trim();
+    if (!rawMask || !isValidSubnetMask(rawMask)) {
+        return { success: false, reason: 'Invalid subnet mask.' };
+    }
+
+    const normalizedMask = normalizeSubnetMask(rawMask);
+    if (!normalizedMask) {
+        return { success: false, reason: 'Invalid subnet mask.' };
+    }
+
+    const network = calculateNetworkAddress(rawDest, normalizedMask);
+    const prefixLength = getPrefixLengthFromMask(normalizedMask);
+    if (!network || prefixLength === null) {
+        return { success: false, reason: 'Could not calculate destination network.' };
+    }
+
+    const rawNextHop = typeof routeData.nextHop === 'string' ? routeData.nextHop.trim() : '';
+    const rawInterface = typeof routeData.interface === 'string' ? routeData.interface.trim() : '';
+
+    if (!rawNextHop && !rawInterface) {
+        return { success: false, reason: 'Either next-hop IP or egress interface must be specified.' };
+    }
+
+    if (rawInterface) {
+        const iface = router.interfaces?.[rawInterface];
+        if (!iface) {
+            return { success: false, reason: `Interface ${rawInterface} does not exist on router ${router.name}.` };
+        }
+        if (iface.status === 'down') {
+            return { success: false, reason: `Interface ${rawInterface} is down.` };
+        }
+    }
+
+    let resolvedInterface = rawInterface || null;
+
+    if (rawNextHop) {
+        if (!isValidIPv4(rawNextHop)) {
+            return { success: false, reason: 'Invalid next-hop IPv4 address.' };
+        }
+
+        let reachableInterface = null;
+        Object.entries(router.interfaces || {}).forEach(([ifName, iface]) => {
+            if (!iface || iface.status === 'down' || !iface.ip || !iface.subnetMask) {
+                return;
+            }
+            const ifMask = normalizeSubnetMask(iface.subnetMask);
+            if (ifMask && isSameSubnet(iface.ip, rawNextHop, ifMask)) {
+                reachableInterface = ifName;
+            }
+        });
+
+        if (!reachableInterface) {
+            return { success: false, reason: `Next-hop IP ${rawNextHop} is unreachable (not on any connected subnet).` };
+        }
+
+        if (rawInterface && rawInterface !== reachableInterface) {
+            return { success: false, reason: `Next-hop IP ${rawNextHop} is reachable via ${reachableInterface}, not ${rawInterface}.` };
+        }
+
+        if (!resolvedInterface) {
+            resolvedInterface = reachableInterface;
+        }
+    }
+
+    const runtime = getRouterRuntime(router.id);
+    const nextHopVal = rawNextHop || null;
+
+    const isDuplicate = runtime.staticRoutes.some((r) => {
+        return r.network === network
+            && r.prefixLength === prefixLength
+            && (r.nextHop || null) === nextHopVal
+            && (r.interface || null) === (resolvedInterface || null);
+    });
+
+    if (isDuplicate) {
+        return { success: false, reason: 'An identical static route already exists.' };
+    }
+
+    staticRouteCounter += 1;
+    const routeId = routeData.id || `static-route-${router.id}-${Date.now()}-${staticRouteCounter}`;
+    const metric = typeof routeData.metric === 'number' && !isNaN(routeData.metric) ? routeData.metric : 1;
+
+    const staticRoute = {
+        id: routeId,
+        type: 'static',
+        code: 'S',
+        network,
+        subnetMask: normalizedMask,
+        prefixLength,
+        cidr: `${network}/${prefixLength}`,
+        nextHop: nextHopVal,
+        interface: resolvedInterface,
+        metric,
+        status: 'active'
+    };
+
+    runtime.staticRoutes.push(staticRoute);
+    return { success: true, route: staticRoute };
+}
+
+function removeStaticRoute(routerId, routeId) {
+    const router = typeof routerId === 'object' && routerId ? routerId : getDeviceById(routerId);
+    if (!router || router.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+
+    const idToMatch = typeof routeId === 'object' && routeId?.id ? routeId.id : String(routeId || '');
+    if (!idToMatch) {
+        return { success: false, reason: 'Route ID is required.' };
+    }
+
+    const runtime = getRouterRuntime(router.id);
+    const index = runtime.staticRoutes.findIndex((r) => r.id === idToMatch);
+    if (index === -1) {
+        return { success: false, reason: 'Static route not found.' };
+    }
+
+    const removed = runtime.staticRoutes.splice(index, 1)[0];
+    return { success: true, removedRoute: removed };
+}
+
+function getRouterRoutingTable(routerId) {
+    const router = typeof routerId === 'object' && routerId ? routerId : getDeviceById(routerId);
+    if (!router || router.type !== 'router' || !router.interfaces) {
+        return [];
+    }
+
+    const connectedRoutes = [];
+    Object.entries(router.interfaces).forEach(([ifName, iface]) => {
+        if (!iface || iface.status === 'down') {
+            return;
+        }
+
+        const ip = String(iface.ip || '').trim();
+        const subnetMask = String(iface.subnetMask || '').trim();
+
+        if (!ip || !subnetMask || !isValidIPv4(ip)) {
+            return;
+        }
+
+        const normalizedMask = normalizeSubnetMask(subnetMask);
+        if (!normalizedMask) {
+            return;
+        }
+
+        const network = calculateNetworkAddress(ip, normalizedMask);
+        const prefixLength = getPrefixLengthFromMask(normalizedMask);
+
+        if (!network || prefixLength === null) {
+            return;
+        }
+
+        connectedRoutes.push({
+            type: 'connected',
+            code: 'C',
+            network,
+            subnetMask: normalizedMask,
+            prefixLength,
+            cidr: `${network}/${prefixLength}`,
+            interface: ifName,
+            nextHop: null,
+            metric: 0,
+            status: 'active'
+        });
+    });
+
+    const runtime = getRouterRuntime(router.id);
+    const staticRoutes = Array.isArray(runtime.staticRoutes) ? runtime.staticRoutes : [];
+
+    return [...connectedRoutes, ...staticRoutes];
+}
+
+/**
+ * Route sorting comparison function for Longest Prefix Match (LPM):
+ * 1. Longest Prefix Match: Higher prefixLength takes precedence (/24 beats /16, /16 beats /8, /8 beats /0).
+ * 2. Route Type Precedence on tie: Connected ('C') routes take precedence over Static ('S') routes on equal prefix length.
+ * 3. Metric: Lower metric takes precedence on equal prefix length and type.
+ * 4. Deterministic Tie-breaking: Lexicographical comparison of route ID on identical prefix length, type, and metric.
+ */
+function compareRoutesForLpm(a, b) {
+    // 1. Longest prefix length wins
+    if (b.prefixLength !== a.prefixLength) {
+        return b.prefixLength - a.prefixLength;
+    }
+
+    // 2. Connected ('C') beats Static ('S') on equal prefix length
+    if (a.code !== b.code) {
+        if (a.code === 'C') return -1;
+        if (b.code === 'C') return 1;
+    }
+
+    // 3. Lower metric wins
+    const metricA = typeof a.metric === 'number' ? a.metric : 0;
+    const metricB = typeof b.metric === 'number' ? b.metric : 0;
+    if (metricA !== metricB) {
+        return metricA - metricB;
+    }
+
+    // 4. Deterministic ID ordering
+    const idA = String(a.id || a.cidr || '');
+    const idB = String(b.id || b.cidr || '');
+    return idA.localeCompare(idB);
+}
+
+function lookupRoute(routerId, destinationIp) {
+    const router = typeof routerId === 'object' && routerId ? routerId : getDeviceById(routerId);
+    if (!router || router.type !== 'router') {
+        return { success: false, reason: 'ROUTER_NOT_FOUND' };
+    }
+
+    const rawDest = typeof destinationIp === 'string' ? destinationIp.trim() : '';
+    if (!rawDest || !isValidIPv4(rawDest)) {
+        return { success: false, reason: 'INVALID_DESTINATION' };
+    }
+
+    const routingTable = getRouterRoutingTable(router.id);
+    if (!routingTable || routingTable.length === 0) {
+        return { success: false, reason: 'NO_ROUTE' };
+    }
+
+    const matchingRoutes = routingTable.filter((route) => {
+        if (!route || route.status === 'down') {
+            return false;
+        }
+        if (route.prefixLength === 0) {
+            return true;
+        }
+        const calcNet = calculateNetworkAddress(rawDest, route.subnetMask);
+        return calcNet === route.network;
+    });
+
+    if (matchingRoutes.length === 0) {
+        return { success: false, reason: 'NO_ROUTE' };
+    }
+
+    matchingRoutes.sort(compareRoutesForLpm);
+    const bestRoute = matchingRoutes[0];
+
+    return {
+        success: true,
+        route: bestRoute
+    };
+}
+
+function resolveRouteNextHop(routerId, route, destinationIp) {
+    if (!route || typeof route !== 'object') {
+        return {
+            success: false,
+            reason: 'NO_ROUTE',
+            egressInterface: null,
+            nextHopIp: null,
+            isDirect: false
+        };
+    }
+
+    const destIp = typeof destinationIp === 'string' ? destinationIp.trim() : '';
+
+    if (route.code === 'C' || route.type === 'connected') {
+        return {
+            success: true,
+            egressInterface: route.interface || null,
+            nextHopIp: destIp,
+            isDirect: true,
+            route
+        };
+    }
+
+    if (route.code === 'S' || route.type === 'static') {
+        if (route.nextHop) {
+            return {
+                success: true,
+                egressInterface: route.interface || null,
+                nextHopIp: route.nextHop,
+                isDirect: false,
+                route
+            };
+        }
+
+        return {
+            success: true,
+            egressInterface: route.interface || null,
+            nextHopIp: destIp,
+            isDirect: true,
+            route
+        };
+    }
+
+    return {
+        success: true,
+        egressInterface: route.interface || null,
+        nextHopIp: route.nextHop || destIp,
+        isDirect: !route.nextHop,
+        route
+    };
 }
 
 function getRouterPortLabel(routerId, connectionId) {
@@ -4152,18 +4680,70 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
             }
         } else if (toDevice.type === 'router') {
             const ingressPort = getPortForRouterAndNeighbor(toDevice.id, fromId);
-            const nextHopId = topologyPath[i + 2];
-            const egressPort = nextHopId ? getPortForRouterAndNeighbor(toDevice.id, nextHopId) : null;
-            const ingressIface = toDevice.interfaces?.[ingressPort];
-            const egressIface = egressPort ? toDevice.interfaces?.[egressPort] : null;
+            const ingressIface = ingressPort ? toDevice.interfaces?.[ingressPort] : null;
 
             frame.events.push(`Frame received by ${toDevice.name} on ${ingressPort}`);
 
+            const routeResult = lookupRoute(toDevice.id, frame.packet.destinationIp);
+            if (!routeResult.success) {
+                frame.events.push(`Router ${toDevice.name} dropped packet: No route to destination ${frame.packet.destinationIp}`);
+                hopActions.push({
+                    deviceId: toDevice.id,
+                    deviceName: toDevice.name,
+                    type: 'router',
+                    action: 'DROP',
+                    reason: 'no-route',
+                    ingressInterface: ingressPort,
+                    destinationIp: frame.packet.destinationIp
+                });
+                return {
+                    success: false,
+                    reason: `No route to destination ${frame.packet.destinationIp} at router ${toDevice.name}.`,
+                    path: traversedPath,
+                    action: 'DROP',
+                    hopActions
+                };
+            }
+
+            const selectedRoute = routeResult.route;
+            const nextHopInfo = resolveRouteNextHop(toDevice.id, selectedRoute, frame.packet.destinationIp);
+            const egressPort = nextHopInfo.egressInterface;
+            const egressIface = egressPort ? toDevice.interfaces?.[egressPort] : null;
+
             if (!ingressPort || !egressPort || !ingressIface || !egressIface) {
                 frame.events.push(`Router ${toDevice.name} could not resolve routing interfaces`);
+                hopActions.push({
+                    deviceId: toDevice.id,
+                    deviceName: toDevice.name,
+                    type: 'router',
+                    action: 'DROP',
+                    reason: 'interface-error',
+                    ingressInterface: ingressPort,
+                    egressInterface: egressPort
+                });
                 return {
                     success: false,
                     reason: `Router ${toDevice.name} interface error.`,
+                    path: traversedPath,
+                    action: 'DROP',
+                    hopActions
+                };
+            }
+
+            if (egressIface.status === 'down') {
+                frame.events.push(`Router ${toDevice.name} egress interface ${egressPort} is down`);
+                hopActions.push({
+                    deviceId: toDevice.id,
+                    deviceName: toDevice.name,
+                    type: 'router',
+                    action: 'DROP',
+                    reason: 'interface-down',
+                    ingressInterface: ingressPort,
+                    egressInterface: egressPort
+                });
+                return {
+                    success: false,
+                    reason: `Router ${toDevice.name} egress interface ${egressPort} is down.`,
                     path: traversedPath,
                     action: 'DROP',
                     hopActions
@@ -4199,15 +4779,16 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
             frame.events.push(`Router ${toDevice.name} rewrote source MAC to ${egressIface.mac}`);
 
             // Router egress ARP resolution
-            let nextHopTargetIp = frame.packet.destinationIp;
-            if (nextHopId) {
+            let arpTargetIp = nextHopInfo.nextHopIp;
+            const nextHopId = topologyPath[i + 2];
+            if (nextHopId && nextHopInfo.isDirect) {
                 const nextDevice = getDeviceById(nextHopId);
                 if (nextDevice?.type === 'router' && nextDevice.interfaces) {
                     for (const [nIfName, nIface] of Object.entries(nextDevice.interfaces)) {
                         const nMask = normalizeSubnetMask(nIface.subnetMask);
                         const egMask = normalizeSubnetMask(egressIface.subnetMask);
                         if (nMask && egMask && isSameSubnet(egressIface.ip, nIface.ip, egMask)) {
-                            nextHopTargetIp = nIface.ip;
+                            arpTargetIp = nIface.ip;
                             break;
                         }
                     }
@@ -4215,7 +4796,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
             }
 
             const remainingTopology = topologyPath.slice(i + 1);
-            const routerArpResult = simulateArpResolution(toDevice, nextHopTargetIp, remainingTopology, {
+            const routerArpResult = simulateArpResolution(toDevice, arpTargetIp, remainingTopology, {
                 egressInterface: egressPort
             });
 
@@ -4246,7 +4827,8 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                 egressInterface: egressPort,
                 ttl: frame.packet.ttl,
                 sourceMac: egressIface.mac,
-                destinationMac: frame.destinationMac
+                destinationMac: frame.destinationMac,
+                route: selectedRoute
             });
         }
     }

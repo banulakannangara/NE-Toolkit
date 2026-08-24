@@ -822,10 +822,105 @@ body {
     border: 1px solid rgba(255, 209, 102, 0.35);
 }
 
-.badge--drop {
-    background: rgba(255, 138, 128, 0.16);
+.badge--connected {
+    background: rgba(81, 207, 102, 0.16);
+    color: #51cf66;
+    border: 1px solid rgba(81, 207, 102, 0.35);
+}
+
+.badge--static {
+    background: rgba(0, 212, 255, 0.16);
+    color: #00d4ff;
+    border: 1px solid rgba(0, 212, 255, 0.35);
+}
+
+.router-routing-table th,
+.router-routing-table td {
+    padding: 0.45rem 0.35rem;
+    font-size: 0.72rem;
+    vertical-align: middle;
+}
+
+.router-routing-table td code {
+    font-family: "Courier New", monospace;
+    font-size: 0.72rem;
+}
+
+.table-action-cell {
+    text-align: center;
+}
+
+.route-status {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.route-status--active {
+    color: var(--lab-success);
+}
+
+.route-status--down {
+    color: var(--lab-error);
+}
+
+.route-delete-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 107, 107, 0.35);
+    background: rgba(255, 107, 107, 0.12);
     color: #ff8a80;
-    border: 1px solid rgba(255, 138, 128, 0.35);
+    font-size: 0.75rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 150ms ease;
+}
+
+.route-delete-btn:hover {
+    background: rgba(255, 107, 107, 0.3);
+    border-color: rgba(255, 107, 107, 0.7);
+    color: #ffffff;
+    transform: scale(1.08);
+}
+
+.static-route-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    margin-top: 0.35rem;
+}
+
+.static-route-form__title {
+    margin: 0 0 0.25rem 0;
+    font-size: 0.76rem;
+    font-weight: 700;
+    color: var(--lab-accent-2);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+.static-route-form select {
+    width: 100%;
+    padding: 0.55rem 0.75rem;
+    border-radius: 10px;
+    border: 1px solid var(--lab-border);
+    background: rgba(8, 16, 33, 0.95);
+    color: var(--lab-text);
+    font-size: 0.85rem;
+    outline: none;
+    transition: border-color 0.2s ease;
+}
+
+.static-route-form select:focus {
+    border-color: var(--lab-accent);
 }
 
 .hop-decisions {
