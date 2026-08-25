@@ -6736,6 +6736,626 @@ runTest('197. Static route form section renders all required fields and interfac
     assert.ok(formHtml.includes('Gig0/1 (up)'), 'Must enumerate Gig0/1 interface');
 });
 
+// ==========================================
+// V5.10 TEST SUITE: ADMINISTRATIVE DISTANCE, FLOATING STATIC ROUTES & INTERFACE ADMIN STATE
+// ==========================================
+
+// 198. Equal-prefix static routes select lower Administrative Distance (AD 1 beats AD 10)
+runTest('198. Equal-prefix static routes select lower Administrative Distance (AD 1 beats AD 10)', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '10.0.12.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.13.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    // Primary route: AD 1 via Gig0/0
+    addStaticRoute(router.id, {
+        id: 'primary-route',
+        network: '10.20.0.0',
+        subnetMask: '255.255.0.0',
+        nextHop: '10.0.12.2',
+        adminDistance: 1
+    });
+
+    // Backup route: AD 10 via Gig0/1
+    addStaticRoute(router.id, {
+        id: 'backup-route',
+        network: '10.20.0.0',
+        subnetMask: '255.255.0.0',
+        nextHop: '10.0.13.2',
+        adminDistance: 10
+    });
+
+    const result = lookupRoute(router.id, '10.20.5.1');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.route.id, 'primary-route', 'AD 1 route must be preferred over AD 10 route');
+    assert.strictEqual(result.route.adminDistance, 1);
+});
+
+// 199. Longest Prefix Match (LPM) takes precedence over Administrative Distance (/24 AD 200 beats /16 AD 1)
+runTest('199. Longest Prefix Match (LPM) takes precedence over Administrative Distance (/24 AD 200 beats /16 AD 1)', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '10.0.12.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.13.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    // Less-specific route with low AD: 10.20.0.0/16 AD 1
+    addStaticRoute(router.id, {
+        id: 'broad-route',
+        network: '10.20.0.0',
+        subnetMask: '255.255.0.0',
+        nextHop: '10.0.12.2',
+        adminDistance: 1
+    });
+
+    // More-specific route with very high AD: 10.20.10.0/24 AD 200
+    addStaticRoute(router.id, {
+        id: 'specific-route',
+        network: '10.20.10.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '10.0.13.2',
+        adminDistance: 200
+    });
+
+    const result = lookupRoute(router.id, '10.20.10.5');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.route.id, 'specific-route', 'LPM /24 with AD 200 must beat /16 with AD 1');
+    assert.strictEqual(result.route.cidr, '10.20.10.0/24');
+});
+
+// 200. Equal prefix and equal AD select route with lower metric
+runTest('200. Equal prefix and equal AD select route with lower metric', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '10.0.12.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.13.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    // Route A: AD 10, Metric 5
+    addStaticRoute(router.id, {
+        id: 'low-metric-route',
+        network: '10.30.0.0',
+        subnetMask: '255.255.0.0',
+        nextHop: '10.0.12.2',
+        adminDistance: 10,
+        metric: 5
+    });
+
+    // Route B: AD 10, Metric 20
+    addStaticRoute(router.id, {
+        id: 'high-metric-route',
+        network: '10.30.0.0',
+        subnetMask: '255.255.0.0',
+        nextHop: '10.0.13.2',
+        adminDistance: 10,
+        metric: 20
+    });
+
+    const result = lookupRoute(router.id, '10.30.1.1');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.route.id, 'low-metric-route', 'Route with lower metric must win when AD is equal');
+    assert.strictEqual(result.route.metric, 5);
+});
+
+// 201. Static route created without explicit adminDistance defaults to AD 1
+runTest('201. Static route created without explicit adminDistance defaults to AD 1', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const addRes = addStaticRoute(router.id, {
+        network: '172.16.0.0',
+        subnetMask: '255.255.0.0',
+        interface: 'Gig0/0'
+    });
+
+    assert.strictEqual(addRes.success, true);
+    assert.strictEqual(addRes.route.adminDistance, 1, 'Default adminDistance must be 1');
+
+    const table = getRouterRoutingTable(router.id);
+    const staticEntry = table.find(r => r.id === addRes.route.id);
+    assert.ok(staticEntry);
+    assert.strictEqual(staticEntry.adminDistance, 1);
+});
+
+// 202. Existing static routes without adminDistance in legacy snapshot are treated as AD 1
+runTest('202. Existing static routes without adminDistance in legacy snapshot are treated as AD 1', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    // Simulate legacy snapshot route entry without adminDistance field
+    const runtime = getRouterRuntime(router.id);
+    runtime.staticRoutes.push({
+        id: 'legacy-route',
+        type: 'static',
+        code: 'S',
+        network: '10.50.0.0',
+        subnetMask: '255.255.0.0',
+        prefixLength: 16,
+        cidr: '10.50.0.0/16',
+        nextHop: null,
+        interface: 'Gig0/0',
+        metric: 1,
+        status: 'active'
+        // adminDistance is intentionally undefined (legacy format)
+    });
+
+    const snapshot = createLabSnapshot();
+    resetLab();
+    restoreSnapshot(snapshot);
+
+    const lookupRes = lookupRoute(router.id, '10.50.1.1');
+    assert.strictEqual(lookupRes.success, true);
+    assert.strictEqual(lookupRes.route.id, 'legacy-route');
+    assert.strictEqual(lookupRes.route.adminDistance ?? 1, 1, 'Legacy route must be treated as AD 1');
+});
+
+// 203. Connected routes have effective AD 0 and beat static routes with equal prefix
+runTest('203. Connected routes have effective AD 0 and beat static routes with equal prefix', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    // Add static route with identical prefix 192.168.1.0/24 (AD 1)
+    addStaticRoute(router.id, {
+        network: '192.168.1.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '10.0.0.2',
+        adminDistance: 1
+    });
+
+    const table = getRouterRoutingTable(router.id);
+    const connectedRoute = table.find(r => r.code === 'C' && r.cidr === '192.168.1.0/24');
+    assert.ok(connectedRoute);
+    assert.strictEqual(connectedRoute.adminDistance, 0, 'Connected route must have AD 0');
+
+    const result = lookupRoute(router.id, '192.168.1.50');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.route.code, 'C', 'Connected route (AD 0) must beat Static route (AD 1)');
+});
+
+// 204. Floating static route is not used when primary interface is UP
+runTest('204. Floating static route is not used when primary interface is UP', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 80);   // R1 primary
+    addDevice('router', 320, 160);  // R2 backup
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const r2 = networkState.devices[3];
+    const server = networkState.devices[4];
+
+    pc.ip = '10.0.0.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '10.0.0.1';
+
+    // R0 interfaces: Gig0/0 to R1 (primary), Gig0/1 to R2 (backup)
+    r0.interfaces['Gig0/0'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '192.168.50.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r2.interfaces['Gig0/0'].ip = '172.16.2.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r2.interfaces['Gig0/1'].ip = '192.168.50.2';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '192.168.50.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '192.168.50.1';
+
+    addConnection(pc.id, r0.id);
+    addConnection(r0.id, r1.id);
+    addConnection(r0.id, r2.id);
+    addConnection(r1.id, server.id);
+    addConnection(r2.id, server.id);
+
+    // Primary route: AD 1 via R1 (Gig0/0)
+    addStaticRoute(r0.id, {
+        id: 'primary-r0-to-server',
+        network: '192.168.50.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.2',
+        adminDistance: 1
+    });
+
+    // Floating static route: AD 10 via R2 (Gig0/1)
+    addStaticRoute(r0.id, {
+        id: 'backup-r0-to-server',
+        network: '192.168.50.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.2.2',
+        adminDistance: 10
+    });
+
+    const routeRes = lookupRoute(r0.id, '192.168.50.10');
+    assert.strictEqual(routeRes.success, true);
+    assert.strictEqual(routeRes.route.id, 'primary-r0-to-server', 'Must select primary route when Gig0/0 is UP');
+    assert.strictEqual(routeRes.route.interface, 'Gig0/0');
+});
+
+// 205. Floating static route automatically takes over when primary interface is DOWN
+runTest('205. Floating static route automatically takes over when primary interface is DOWN', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const r0 = networkState.devices[0];
+
+    r0.interfaces['Gig0/0'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(r0.id, {
+        id: 'primary-route',
+        network: '192.168.50.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.2',
+        adminDistance: 1
+    });
+
+    addStaticRoute(r0.id, {
+        id: 'backup-route',
+        network: '192.168.50.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.2.2',
+        adminDistance: 10
+    });
+
+    // Administratively shut down primary interface Gig0/0
+    r0.interfaces['Gig0/0'].status = 'down';
+
+    const table = getRouterRoutingTable(r0.id);
+    const primaryEntry = table.find(r => r.id === 'primary-route');
+    const backupEntry = table.find(r => r.id === 'backup-route');
+
+    assert.ok(primaryEntry, 'Primary route should still be in table schema');
+    assert.strictEqual(primaryEntry.status, 'down', 'Primary route operational status must be down when interface is down');
+    assert.strictEqual(backupEntry.status, 'active', 'Backup route must remain active');
+
+    // Static route configuration inside routerRuntime must NOT be permanently mutated to down
+    const runtimeRoutes = getRouterRuntime(r0.id).staticRoutes;
+    assert.strictEqual(runtimeRoutes.find(r => r.id === 'primary-route').status, 'active', 'Configured route in runtime must remain active');
+
+    const result = lookupRoute(r0.id, '192.168.50.10');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.route.id, 'backup-route', 'lookupRoute must automatically fall back to floating static route');
+    assert.strictEqual(result.route.interface, 'Gig0/1');
+});
+
+// 206. Restoring primary interface UP immediately restores primary static route
+runTest('206. Restoring primary interface UP immediately restores primary static route', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const r0 = networkState.devices[0];
+
+    r0.interfaces['Gig0/0'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(r0.id, {
+        id: 'primary-route',
+        network: '192.168.50.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.2',
+        adminDistance: 1
+    });
+
+    addStaticRoute(r0.id, {
+        id: 'backup-route',
+        network: '192.168.50.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.2.2',
+        adminDistance: 10
+    });
+
+    // Shutdown Gig0/0
+    r0.interfaces['Gig0/0'].status = 'down';
+    assert.strictEqual(lookupRoute(r0.id, '192.168.50.10').route.id, 'backup-route');
+
+    // Restore Gig0/0 UP
+    r0.interfaces['Gig0/0'].status = 'up';
+
+    const result = lookupRoute(r0.id, '192.168.50.10');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.route.id, 'primary-route', 'Primary route must pre-empt and become active again when interface comes UP');
+    assert.strictEqual(result.route.interface, 'Gig0/0');
+});
+
+// 207. Router interface status transitions between UP and DOWN
+runTest('207. Router interface status transitions between UP and DOWN', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    // Initial state
+    assert.strictEqual(router.interfaces['Gig0/0'].status, 'up');
+    assert.strictEqual(getRouterRoutingTable(router.id).filter(r => r.code === 'C').length, 1);
+
+    // Transition to down
+    router.interfaces['Gig0/0'].status = 'down';
+    assert.strictEqual(router.interfaces['Gig0/0'].status, 'down');
+    assert.strictEqual(getRouterRoutingTable(router.id).filter(r => r.code === 'C').length, 0, 'Connected route must disappear when interface is down');
+
+    // Transition back to up
+    router.interfaces['Gig0/0'].status = 'up';
+    assert.strictEqual(router.interfaces['Gig0/0'].status, 'up');
+    assert.strictEqual(getRouterRoutingTable(router.id).filter(r => r.code === 'C').length, 1, 'Connected route must reappear when interface is up');
+});
+
+// 208. Interface status change and floating static route failover integrate with Undo/Redo
+runTest('208. Interface status change and floating static route failover integrate with Undo/Redo', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const r0 = networkState.devices[0];
+
+    r0.interfaces['Gig0/0'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(r0.id, {
+        id: 'primary-route',
+        network: '192.168.50.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.2',
+        adminDistance: 1
+    });
+
+    addStaticRoute(r0.id, {
+        id: 'backup-route',
+        network: '192.168.50.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.2.2',
+        adminDistance: 10
+    });
+
+    // 1. Take snapshot with interface UP
+    pushHistory();
+    assert.strictEqual(lookupRoute(r0.id, '192.168.50.10').route.id, 'primary-route');
+
+    // 2. Shut down Gig0/0
+    r0.interfaces['Gig0/0'].status = 'down';
+    assert.strictEqual(lookupRoute(r0.id, '192.168.50.10').route.id, 'backup-route');
+
+    // 3. Undo -> Gig0/0 returns to UP, primary route active
+    undo();
+    assert.strictEqual(getDeviceById(r0.id).interfaces['Gig0/0'].status, 'up');
+    assert.strictEqual(lookupRoute(r0.id, '192.168.50.10').route.id, 'primary-route');
+
+    // 4. Redo -> Gig0/0 returns to DOWN, backup route active
+    redo();
+    assert.strictEqual(getDeviceById(r0.id).interfaces['Gig0/0'].status, 'down');
+    assert.strictEqual(lookupRoute(r0.id, '192.168.50.10').route.id, 'backup-route');
+});
+
+// 209. Valid Administrative Distance values (1, 10, 100, 255) are accepted
+runTest('209. Valid Administrative Distance values (1, 10, 100, 255) are accepted', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const validDistances = [1, 10, 100, 255];
+    validDistances.forEach((ad, idx) => {
+        const res = addStaticRoute(router.id, {
+            network: '10.' + (idx + 1) + '.0.0',
+            subnetMask: '255.255.0.0',
+            interface: 'Gig0/0',
+            adminDistance: ad
+        });
+        assert.strictEqual(res.success, true, 'AD ' + ad + ' must be accepted');
+        assert.strictEqual(res.route.adminDistance, ad);
+    });
+});
+
+// 210. Invalid Administrative Distance values (0, 256, negative, non-numeric) are rejected
+runTest('210. Invalid Administrative Distance values (0, 256, negative, non-numeric) are rejected', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const invalidDistances = [0, 256, -1, -50, 'abc', null];
+    invalidDistances.forEach((ad) => {
+        const res = addStaticRoute(router.id, {
+            network: '10.99.0.0',
+            subnetMask: '255.255.0.0',
+            interface: 'Gig0/0',
+            adminDistance: ad
+        });
+        assert.strictEqual(res.success, false, 'Invalid AD ' + ad + ' must be rejected');
+    });
+
+    const runtime = getRouterRuntime(router.id);
+    assert.strictEqual(runtime.staticRoutes.length, 0, 'No invalid static routes should be stored');
+});
+
+// 211. Full end-to-end ICMP transmission fails over to floating static route when primary link goes down
+runTest('211. Full end-to-end ICMP transmission fails over to floating static route when primary link goes down', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100); // R0
+    addDevice('router', 320, 80);  // R1 (primary)
+    addDevice('router', 320, 160); // R2 (backup)
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const r2 = networkState.devices[3];
+    const server = networkState.devices[4];
+
+    pc.ip = '10.0.0.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '10.0.0.1';
+
+    // R0 LAN
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    // R0 Transit primary (Gig0/1 to R1)
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    // R1 Transit from R0
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    // R1 to Server
+    r1.interfaces['Gig0/1'].ip = '192.168.50.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '192.168.50.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '192.168.50.1';
+
+    addConnection(pc.id, r0.id);
+    addConnection(r0.id, r1.id);
+    addConnection(r1.id, server.id);
+
+    // Primary route on R0 (AD 1 via R1)
+    addStaticRoute(r0.id, {
+        id: 'r0-primary',
+        network: '192.168.50.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.2',
+        adminDistance: 1
+    });
+
+    // Return route on R1
+    addStaticRoute(r1.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.1'
+    });
+
+    // 1. Primary path active
+    const res1 = simulateSendFrame(pc, server, { icmp: true });
+    assert.strictEqual(res1.success, true, 'Primary ICMP roundtrip must succeed');
+    const r0Hop1 = res1.hopActions.find(h => h.deviceId === r0.id);
+    assert.strictEqual(r0Hop1.route.id, 'r0-primary');
+    assert.strictEqual(r0Hop1.route.adminDistance, 1);
+
+    // 2. Shut down Gig0/1 on R0 -> ICMP drops safely with interface-down reason
+    r0.interfaces['Gig0/1'].status = 'down';
+    const res2 = simulateSendFrame(pc, server, { icmp: true });
+    assert.strictEqual(res2.success, false, 'ICMP must drop when primary interface is down');
+    assert.strictEqual(res2.action, 'DROP');
+    assert.ok(res2.reason.includes('down'));
+
+    // 3. Restore Gig0/1 UP -> ICMP succeeds again
+    r0.interfaces['Gig0/1'].status = 'up';
+    const res3 = simulateSendFrame(pc, server, { icmp: true });
+    assert.strictEqual(res3.success, true, 'ICMP must succeed after interface restoration');
+});
+
+// 212. Router Inspector HTML renders Administrative Distance column in Routing Table
+runTest('212. Router Inspector HTML renders Administrative Distance column in Routing Table', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(router.id, {
+        id: 'test-ad-route',
+        network: '10.50.0.0',
+        subnetMask: '255.255.0.0',
+        interface: 'Gig0/0',
+        adminDistance: 10
+    });
+
+    const html = renderRouterRoutingTableSection(router);
+    assert.ok(html.includes('<th>AD</th>'), 'Must render AD table column header');
+    assert.ok(html.includes('<td>0</td>'), 'Must render AD 0 for Connected route');
+    assert.ok(html.includes('<td>10</td>'), 'Must render AD 10 for configured static route');
+});
+
+// 213. Router Inspector HTML renders Shut Down and No Shutdown toggle buttons
+runTest('213. Router Inspector HTML renders Shut Down and No Shutdown toggle buttons', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+
+    // Initial UP state
+    const upHtml = renderRouterInspector(router);
+    assert.ok(upHtml.includes('router-interface-toggle-btn'), 'Must have toggle button class');
+    assert.ok(upHtml.includes('Shut Down'), 'Must have Shut Down button text when UP');
+
+    // DOWN state
+    router.interfaces['Gig0/0'].status = 'down';
+    const downHtml = renderRouterInspector(router);
+    assert.ok(downHtml.includes('No Shutdown'), 'Must have No Shutdown button text when DOWN');
+});
+
+// 214. toggleRouterInterfaceStatus toggles interface state and records history
+runTest('214. toggleRouterInterfaceStatus toggles interface state and records history', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+
+    assert.strictEqual(router.interfaces['Gig0/0'].status, 'up');
+
+    // 1. Toggle UP -> DOWN
+    const res1 = toggleRouterInterfaceStatus(router.id, 'Gig0/0');
+    assert.strictEqual(res1.success, true);
+    assert.strictEqual(res1.status, 'down');
+    assert.strictEqual(getDeviceById(router.id).interfaces['Gig0/0'].status, 'down');
+
+    // 2. Undo -> restores UP
+    undo();
+    assert.strictEqual(getDeviceById(router.id).interfaces['Gig0/0'].status, 'up');
+
+    // 3. Redo -> restores DOWN
+    redo();
+    assert.strictEqual(getDeviceById(router.id).interfaces['Gig0/0'].status, 'down');
+
+    // 4. Toggle DOWN -> UP
+    const res2 = toggleRouterInterfaceStatus(router.id, 'Gig0/0');
+    assert.strictEqual(res2.success, true);
+    assert.strictEqual(res2.status, 'up');
+    assert.strictEqual(getDeviceById(router.id).interfaces['Gig0/0'].status, 'up');
+});
+
+// 215. Static route form input for Administrative Distance creates floating static route
+runTest('215. Static route form input for Administrative Distance creates floating static route', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+
+    const formHtml = renderRouterStaticRouteFormSection(router);
+    assert.ok(formHtml.includes('id="staticRouteAdminDistance"'), 'Must render Administrative Distance input field');
+    assert.ok(formHtml.includes('placeholder="1 (Default)"'), 'Must have placeholder indicating default 1');
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

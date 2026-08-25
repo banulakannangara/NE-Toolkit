@@ -766,6 +766,13 @@ body {
     align-items: center;
     justify-content: space-between;
     margin-bottom: 0.4rem;
+    gap: 0.5rem;
+}
+
+.router-interface-title-group {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
 }
 
 .router-interface-title {
@@ -797,6 +804,16 @@ body {
     background: rgba(255, 107, 107, 0.15);
     color: var(--lab-error);
     border: 1px solid rgba(255, 107, 107, 0.35);
+}
+
+.router-interface-toggle-btn {
+    padding: 0.18rem 0.55rem;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    border-radius: 6px;
+    cursor: pointer;
+    white-space: nowrap;
 }
 
 .router-interface-connection {

@@ -1950,6 +1950,7 @@ function renderPropertiesPanel() {
             const nextHopInput = panel.querySelector('#staticRouteNextHop');
             const ifaceSelect = panel.querySelector('#staticRouteInterface');
             const metricInput = panel.querySelector('#staticRouteMetric');
+            const adInput = panel.querySelector('#staticRouteAdminDistance');
             const feedbackEl = panel.querySelector('#staticRouteFeedback');
 
             let dest = destInput ? destInput.value.trim() : '';
@@ -1957,6 +1958,8 @@ function renderPropertiesPanel() {
             const nextHop = nextHopInput ? nextHopInput.value.trim() : '';
             const egressIface = ifaceSelect ? ifaceSelect.value.trim() : '';
             const metricVal = metricInput ? parseInt(metricInput.value, 10) : 1;
+            const rawAd = adInput ? adInput.value.trim() : '';
+            const adminDistanceVal = rawAd !== '' ? parseInt(rawAd, 10) : 1;
 
             // Normalize CIDR in destination if present (e.g. 10.20.30.0/24)
             if (dest.includes('/')) {
@@ -1980,6 +1983,7 @@ function renderPropertiesPanel() {
                 subnetMask: mask,
                 nextHop: nextHop || undefined,
                 interface: egressIface || undefined,
+                adminDistance: isNaN(adminDistanceVal) ? rawAd : adminDistanceVal,
                 metric: isNaN(metricVal) ? 1 : metricVal
             };
 
@@ -1999,7 +2003,7 @@ function renderPropertiesPanel() {
 
         addRouteBtn.addEventListener('click', handleAddRoute);
 
-        const formInputs = panel.querySelectorAll('#staticRouteDest, #staticRouteMask, #staticRouteNextHop, #staticRouteMetric');
+        const formInputs = panel.querySelectorAll('#staticRouteDest, #staticRouteMask, #staticRouteNextHop, #staticRouteAdminDistance, #staticRouteMetric');
         formInputs.forEach((input) => {
             input.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter') {
@@ -2009,6 +2013,15 @@ function renderPropertiesPanel() {
             });
         });
     }
+
+    panel.querySelectorAll('.router-interface-toggle-btn[data-interface]').forEach((btn) => {
+        btn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            const ifName = btn.dataset.interface;
+            if (!ifName) return;
+            toggleRouterInterfaceStatus(selected.id, ifName);
+        });
+    });
 
     panel.querySelectorAll('.route-delete-btn[data-route-id]').forEach((btn) => {
         btn.addEventListener('click', (event) => {
@@ -2572,6 +2585,7 @@ function renderRouterRoutingTableSection(router) {
             : '<span class="badge badge--static" title="Static Route">S</span>';
         const nextHopDisplay = route.nextHop ? `<code>${escapeHtml(route.nextHop)}</code>` : '—';
         const ifaceDisplay = route.interface ? escapeHtml(route.interface) : '—';
+        const adDisplay = typeof route.adminDistance === 'number' ? escapeHtml(String(route.adminDistance)) : (isConnected ? '0' : '1');
         const metricDisplay = !isConnected && typeof route.metric === 'number' ? escapeHtml(String(route.metric)) : '—';
         const statusClass = route.status === 'down' ? 'route-status--down' : 'route-status--active';
         const statusDisplay = `<span class="route-status ${statusClass}">${escapeHtml(route.status || 'active')}</span>`;
@@ -2586,6 +2600,7 @@ function renderRouterRoutingTableSection(router) {
                 <td><code>/${escapeHtml(String(route.prefixLength))}</code></td>
                 <td>${nextHopDisplay}</td>
                 <td>${ifaceDisplay}</td>
+                <td>${adDisplay}</td>
                 <td>${metricDisplay}</td>
                 <td>${statusDisplay}</td>
                 <td class="table-action-cell">${actionDisplay}</td>
@@ -2605,6 +2620,7 @@ function renderRouterRoutingTableSection(router) {
                             <th>Prefix</th>
                             <th>Next Hop</th>
                             <th>Interface</th>
+                            <th>AD</th>
                             <th>Metric</th>
                             <th>Status</th>
                             <th>Action</th>
@@ -2650,6 +2666,10 @@ function renderRouterStaticRouteFormSection(router) {
                         <option value="">Auto-resolve from Next Hop</option>
                         ${ifaceOptions}
                     </select>
+                </div>
+                <div class="property-field">
+                    <label for="staticRouteAdminDistance">Administrative Distance (AD)</label>
+                    <input id="staticRouteAdminDistance" type="number" min="1" max="255" value="1" placeholder="1 (Default)">
                 </div>
                 <div class="property-field">
                     <label for="staticRouteMetric">Metric</label>
@@ -2702,8 +2722,13 @@ function renderRouterInspector(selected) {
         return `
             <div class="router-interface-card">
                 <div class="router-interface-header">
-                    <h5 class="router-interface-title">${escapeHtml(ifName)}</h5>
-                    <span class="router-interface-status router-interface-status--${status === 'up' ? 'up' : 'down'}">${escapeHtml(status.toUpperCase())}</span>
+                    <div class="router-interface-title-group">
+                        <h5 class="router-interface-title">${escapeHtml(ifName)}</h5>
+                        <span class="router-interface-status router-interface-status--${status === 'up' ? 'up' : 'down'}">${escapeHtml(status.toUpperCase())}</span>
+                    </div>
+                    <button class="router-interface-toggle-btn toolbar-button" data-interface="${escapeHtml(ifName)}" type="button" title="${status === 'up' ? 'Shut down interface ' + escapeHtml(ifName) : 'Enable interface ' + escapeHtml(ifName)}">
+                        ${status === 'up' ? 'Shut Down' : 'No Shutdown'}
+                    </button>
                 </div>
                 <p class="router-interface-connection">${escapeHtml(connectedInfo)}</p>
                 <div class="property-field">
@@ -3856,6 +3881,16 @@ function addStaticRoute(routerId, routeData) {
         }
     }
 
+    // Administrative Distance validation: default 1, range 1-255 integer
+    let adminDistance = 1;
+    if (routeData.adminDistance !== undefined) {
+        const rawAd = Number(routeData.adminDistance);
+        if (routeData.adminDistance === null || routeData.adminDistance === '' || !Number.isInteger(rawAd) || rawAd < 1 || rawAd > 255) {
+            return { success: false, reason: 'Administrative Distance must be an integer between 1 and 255.' };
+        }
+        adminDistance = rawAd;
+    }
+
     const runtime = getRouterRuntime(router.id);
     const nextHopVal = rawNextHop || null;
 
@@ -3863,7 +3898,8 @@ function addStaticRoute(routerId, routeData) {
         return r.network === network
             && r.prefixLength === prefixLength
             && (r.nextHop || null) === nextHopVal
-            && (r.interface || null) === (resolvedInterface || null);
+            && (r.interface || null) === (resolvedInterface || null)
+            && (r.adminDistance ?? 1) === adminDistance;
     });
 
     if (isDuplicate) {
@@ -3884,6 +3920,7 @@ function addStaticRoute(routerId, routeData) {
         cidr: `${network}/${prefixLength}`,
         nextHop: nextHopVal,
         interface: resolvedInterface,
+        adminDistance,
         metric,
         status: 'active'
     };
@@ -3911,6 +3948,23 @@ function removeStaticRoute(routerId, routeId) {
 
     const removed = runtime.staticRoutes.splice(index, 1)[0];
     return { success: true, removedRoute: removed };
+}
+
+function toggleRouterInterfaceStatus(routerId, ifName) {
+    const router = typeof routerId === 'object' && routerId ? routerId : getDeviceById(routerId);
+    if (!router || router.type !== 'router' || !router.interfaces?.[ifName]) {
+        return { success: false, reason: 'Interface not found.' };
+    }
+
+    const iface = router.interfaces[ifName];
+    const newStatus = iface.status === 'down' ? 'up' : 'down';
+
+    pushHistory();
+    iface.status = newStatus;
+
+    updateStatus(`${router.name} interface ${ifName} is now ${newStatus.toUpperCase()}.`);
+    render();
+    return { success: true, status: newStatus };
 }
 
 function getRouterRoutingTable(routerId) {
@@ -3953,23 +4007,61 @@ function getRouterRoutingTable(routerId) {
             cidr: `${network}/${prefixLength}`,
             interface: ifName,
             nextHop: null,
+            adminDistance: 0,
             metric: 0,
             status: 'active'
         });
     });
 
     const runtime = getRouterRuntime(router.id);
-    const staticRoutes = Array.isArray(runtime.staticRoutes) ? runtime.staticRoutes : [];
+    const configuredStaticRoutes = Array.isArray(runtime.staticRoutes) ? runtime.staticRoutes : [];
 
-    return [...connectedRoutes, ...staticRoutes];
+    const operationalStaticRoutes = configuredStaticRoutes.map((route) => {
+        let operationalStatus = route.status || 'active';
+
+        // Check if egress interface is administratively down
+        if (route.interface) {
+            const iface = router.interfaces?.[route.interface];
+            if (!iface || iface.status === 'down') {
+                operationalStatus = 'down';
+            }
+        }
+
+        // If route specifies a next-hop IP, verify reachable via an active (UP) interface
+        if (route.nextHop && operationalStatus !== 'down') {
+            let nextHopReachable = false;
+            Object.entries(router.interfaces || {}).forEach(([ifName, iface]) => {
+                if (!iface || iface.status === 'down' || !iface.ip || !iface.subnetMask) {
+                    return;
+                }
+                const ifMask = normalizeSubnetMask(iface.subnetMask);
+                if (ifMask && isSameSubnet(iface.ip, route.nextHop, ifMask)) {
+                    if (!route.interface || route.interface === ifName) {
+                        nextHopReachable = true;
+                    }
+                }
+            });
+            if (!nextHopReachable) {
+                operationalStatus = 'down';
+            }
+        }
+
+        return {
+            ...route,
+            adminDistance: typeof route.adminDistance === 'number' ? route.adminDistance : 1,
+            status: operationalStatus
+        };
+    });
+
+    return [...connectedRoutes, ...operationalStaticRoutes];
 }
 
 /**
  * Route sorting comparison function for Longest Prefix Match (LPM):
  * 1. Longest Prefix Match: Higher prefixLength takes precedence (/24 beats /16, /16 beats /8, /8 beats /0).
- * 2. Route Type Precedence on tie: Connected ('C') routes take precedence over Static ('S') routes on equal prefix length.
- * 3. Metric: Lower metric takes precedence on equal prefix length and type.
- * 4. Deterministic Tie-breaking: Lexicographical comparison of route ID on identical prefix length, type, and metric.
+ * 2. Administrative Distance: Lower administrative distance takes precedence on equal prefix length (Connected: 0, Static: 1, Backup: 10, etc.).
+ * 3. Metric: Lower metric takes precedence on equal prefix length and AD.
+ * 4. Deterministic Tie-breaking: Lexicographical comparison of route ID on identical prefix length, AD, and metric.
  */
 function compareRoutesForLpm(a, b) {
     // 1. Longest prefix length wins
@@ -3977,10 +4069,11 @@ function compareRoutesForLpm(a, b) {
         return b.prefixLength - a.prefixLength;
     }
 
-    // 2. Connected ('C') beats Static ('S') on equal prefix length
-    if (a.code !== b.code) {
-        if (a.code === 'C') return -1;
-        if (b.code === 'C') return 1;
+    // 2. Lower Administrative Distance wins
+    const adA = typeof a.adminDistance === 'number' ? a.adminDistance : (a.code === 'C' ? 0 : 1);
+    const adB = typeof b.adminDistance === 'number' ? b.adminDistance : (b.code === 'C' ? 0 : 1);
+    if (adA !== adB) {
+        return adA - adB;
     }
 
     // 3. Lower metric wins
@@ -4024,7 +4117,12 @@ function lookupRoute(routerId, destinationIp) {
     });
 
     if (matchingRoutes.length === 0) {
-        return { success: false, reason: 'NO_ROUTE' };
+        const hasDownMatch = routingTable.some((route) => {
+            if (!route || route.status !== 'down') return false;
+            if (route.prefixLength === 0) return true;
+            return calculateNetworkAddress(rawDest, route.subnetMask) === route.network;
+        });
+        return { success: false, reason: hasDownMatch ? 'INTERFACE_DOWN' : 'NO_ROUTE' };
     }
 
     matchingRoutes.sort(compareRoutesForLpm);
@@ -4686,19 +4784,28 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
 
             const routeResult = lookupRoute(toDevice.id, frame.packet.destinationIp);
             if (!routeResult.success) {
-                frame.events.push(`Router ${toDevice.name} dropped packet: No route to destination ${frame.packet.destinationIp}`);
+                const isInterfaceDown = routeResult.reason === 'INTERFACE_DOWN';
+                const dropReason = isInterfaceDown ? 'interface-down' : 'no-route';
+                const logMsg = isInterfaceDown
+                    ? `Router ${toDevice.name} dropped packet: Egress interface is down for destination ${frame.packet.destinationIp}`
+                    : `Router ${toDevice.name} dropped packet: No route to destination ${frame.packet.destinationIp}`;
+                const returnReason = isInterfaceDown
+                    ? `Router ${toDevice.name} egress interface is down for destination ${frame.packet.destinationIp}.`
+                    : `No route to destination ${frame.packet.destinationIp} at router ${toDevice.name}.`;
+
+                frame.events.push(logMsg);
                 hopActions.push({
                     deviceId: toDevice.id,
                     deviceName: toDevice.name,
                     type: 'router',
                     action: 'DROP',
-                    reason: 'no-route',
+                    reason: dropReason,
                     ingressInterface: ingressPort,
                     destinationIp: frame.packet.destinationIp
                 });
                 return {
                     success: false,
-                    reason: `No route to destination ${frame.packet.destinationIp} at router ${toDevice.name}.`,
+                    reason: returnReason,
                     path: traversedPath,
                     action: 'DROP',
                     hopActions
