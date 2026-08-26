@@ -8508,6 +8508,314 @@ runTest('246. getHopBadgeConfig handles drop reason formatting accurately', () =
     assert.strictEqual(mismatchBadge.subtitle, 'Port Mismatch');
 });
 
+// 247. analyzeCommunication detects administratively down router ingress/egress interface
+runTest('247. analyzeCommunication detects administratively down router ingress/egress interface', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const r = networkState.devices[1];
+    const s = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    s.ip = '10.0.0.10';
+    s.subnetMask = '255.255.255.0';
+    s.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    // Normal should pass
+    const passResult = analyzeCommunication(pc, s);
+    assert.strictEqual(passResult.possible, true);
+
+    // Shutdown ingress interface Gig0/0
+    r.interfaces['Gig0/0'].status = 'down';
+    const downResult1 = analyzeCommunication(pc, s);
+    assert.strictEqual(downResult1.possible, false);
+    assert.ok(downResult1.reason.includes('administratively down') && downResult1.reason.includes('Gig0/0'));
+
+    // Restore Gig0/0 and shutdown egress interface Gig0/1
+    r.interfaces['Gig0/0'].status = 'up';
+    r.interfaces['Gig0/1'].status = 'down';
+    const downResult2 = analyzeCommunication(pc, s);
+    assert.strictEqual(downResult2.possible, false);
+    assert.ok(downResult2.reason.includes('administratively down') && downResult2.reason.includes('Gig0/1'));
+});
+
+// 248. analyzeCommunication validates multi-router static route reachability
+runTest('248. analyzeCommunication validates multi-router static route reachability', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 350, 100);
+    addDevice('pc', 500, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'PC1');
+
+    addStaticRoute(r0.id, { network: '192.168.2.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.2' });
+    addStaticRoute(r1.id, { network: '192.168.1.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.1' });
+
+    const result = analyzeCommunication(pc0, pc1);
+    assert.strictEqual(result.possible, true);
+    assert.ok(result.network.includes('192.168.1.0/24') && result.network.includes('192.168.2.0/24'));
+});
+
+// 249. analyzeCommunication detects missing intermediate forward static route
+runTest('249. analyzeCommunication detects missing intermediate forward static route', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 350, 100);
+    addDevice('pc', 500, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'PC1');
+
+    // No static route on Router0 for 192.168.2.0/24
+    addStaticRoute(r1.id, { network: '192.168.1.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.1' });
+
+    const result = analyzeCommunication(pc0, pc1);
+    assert.strictEqual(result.possible, false);
+    assert.ok(result.reason.includes('Router0') && result.reason.includes('no route'));
+});
+
+// 250. analyzeCommunication detects missing reverse return route in multi-router topologies
+runTest('250. analyzeCommunication detects missing reverse return route in multi-router topologies', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 350, 100);
+    addDevice('pc', 500, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'PC1');
+
+    // Add forward route on Router0, but NO return route on Router1
+    addStaticRoute(r0.id, { network: '192.168.2.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.2' });
+
+    const result = analyzeCommunication(pc0, pc1);
+    assert.strictEqual(result.possible, false);
+    assert.ok(result.reason.includes('Router1') && result.reason.includes('no return route'));
+});
+
+// 251. analyzeCommunication verifies floating static route failover when primary link goes down
+runTest('251. analyzeCommunication verifies floating static route failover when primary link goes down', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    const result = analyzeCommunication(pc0, pc1);
+    assert.strictEqual(result.possible, true);
+
+    // Shut down egress interface
+    r0.interfaces['Gig0/1'].status = 'down';
+    const failResult = analyzeCommunication(pc0, pc1);
+    assert.strictEqual(failResult.possible, false);
+    assert.ok(failResult.reason.includes('administratively down'));
+});
+
+// 252. Send Frame UI panel HTML renders initial TTL input control and preset chips
+runTest('252. Send Frame UI panel HTML renders initial TTL input control and preset chips', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const pc = networkState.devices[0];
+    networkState.sendFrameState = {
+        phase: 'awaitDestination',
+        sourceId: pc.id,
+        initialTtl: 2,
+        message: 'Select destination'
+    };
+    const html = getSendFramePanelHtml();
+    assert.ok(html.includes('send-frame-ttl-control'), 'Must contain TTL control section');
+    assert.ok(html.includes('id="sendFrameInitialTtl"'), 'Must contain TTL number input');
+    assert.ok(html.includes('value="2"'), 'Must render configured TTL value');
+    assert.ok(html.includes('data-ttl="1"') && html.includes('data-ttl="64"'), 'Must contain TTL preset buttons');
+});
+
+// 253. Send Frame simulation accepts custom initial TTL and triggers ICMP Time Exceeded when TTL is depleted
+runTest('253. Send Frame simulation accepts custom initial TTL and triggers ICMP Time Exceeded when TTL is depleted', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 350, 100);
+    addDevice('pc', 500, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'PC1');
+
+    addStaticRoute(r0.id, { network: '192.168.2.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.2' });
+    addStaticRoute(r1.id, { network: '192.168.1.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.1' });
+
+    // TTL 1 expires at Router0
+    const resTtl1 = simulateSendFrame(pc0, pc1, { icmp: true, initialTtl: 1 });
+    assert.strictEqual(resTtl1.success, false);
+    assert.strictEqual(resTtl1.icmpErrorPacket?.icmp?.type, 11);
+    assert.strictEqual(resTtl1.icmpErrorPacket?.icmp?.router?.id, 'Router0');
+
+    // TTL 2 expires at Router1
+    const resTtl2 = simulateSendFrame(pc0, pc1, { icmp: true, initialTtl: 2 });
+    assert.strictEqual(resTtl2.success, false);
+    assert.strictEqual(resTtl2.icmpErrorPacket?.icmp?.type, 11);
+    assert.strictEqual(resTtl2.icmpErrorPacket?.icmp?.router?.id, 'Router1');
+
+    // TTL 64 succeeds end-to-end
+    const resTtl64 = simulateSendFrame(pc0, pc1, { icmp: true, initialTtl: 64 });
+    assert.strictEqual(resTtl64.success, true);
+});
+
+// 254. Same-subnet connection testing continues to work without regression
+runTest('254. Same-subnet connection testing continues to work without regression', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('server', 400, 100);
+
+    const pc = networkState.devices[0];
+    const sw = networkState.devices[1];
+    const s = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    s.ip = '192.168.1.50';
+    s.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Server0');
+
+    const result = analyzeCommunication(pc, s);
+    assert.strictEqual(result.possible, true);
+    assert.strictEqual(result.network, '192.168.1.0/24');
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

@@ -744,11 +744,15 @@ function handleDeviceSelection(deviceId, event) {
 
             networkState.selectedDeviceId = deviceId;
             networkState.selectedConnectionId = null;
-            networkState.lastFrameResult = simulateSendFrame(sourceDevice, destinationDevice, { icmp: true });
+            const currentTtl = (networkState.sendFrameState && typeof networkState.sendFrameState.initialTtl === 'number')
+                ? networkState.sendFrameState.initialTtl
+                : 64;
+            networkState.lastFrameResult = simulateSendFrame(sourceDevice, destinationDevice, { icmp: true, initialTtl: currentTtl });
             networkState.lastFrameResult.animationState = 'in-progress';
             networkState.sendFrameState = {
                 phase: 'animating',
                 sourceId: networkState.sendFrameState.sourceId,
+                initialTtl: currentTtl,
                 message: 'Frame is travelling through the topology.'
             };
             updateStatus(networkState.lastFrameResult.success
@@ -766,6 +770,7 @@ function handleDeviceSelection(deviceId, event) {
                     networkState.sendFrameState = {
                         phase: 'complete',
                         sourceId: sourceDevice.id,
+                        initialTtl: currentTtl,
                         message: null
                     };
                     updateStatus(`Frame delivered: ${sourceDevice.name} -> ${destinationDevice.name}`);
@@ -783,6 +788,7 @@ function handleDeviceSelection(deviceId, event) {
                     networkState.sendFrameState = {
                         phase: 'complete',
                         sourceId: sourceDevice.id,
+                        initialTtl: currentTtl,
                         message: finalReason
                     };
                     updateStatus(`Frame failed: ${finalReason}`);
@@ -2630,6 +2636,9 @@ function getSendFramePanelHtml() {
         : animationState === 'dropped'
             ? 'Frame dropped'
             : 'Frame delivered';
+    const initialTtl = (networkState.sendFrameState && typeof networkState.sendFrameState.initialTtl === 'number')
+        ? networkState.sendFrameState.initialTtl
+        : 64;
     const eventsHtml = networkState.lastFrameResult?.events?.map((event, index) => `
             <li class="frame-log-item"><strong>${index + 1}.</strong><span>${escapeHtml(event)}</span></li>`).join('') || '';
     const packetInspectorHtml = renderPacketInspector(
@@ -2658,6 +2667,18 @@ function getSendFramePanelHtml() {
                     <div class="property-summary-item">
                         <span>Destination</span>
                         <strong>${destinationName}</strong>
+                    </div>
+                </div>
+                <div class="send-frame-ttl-control">
+                    <div class="send-frame-ttl-header">
+                        <label for="sendFrameInitialTtl">Initial TTL</label>
+                        <input type="number" id="sendFrameInitialTtl" min="1" max="255" value="${initialTtl}">
+                    </div>
+                    <div class="send-frame-ttl-presets">
+                        <button type="button" class="ttl-preset-btn ${initialTtl === 1 ? 'is-active' : ''}" data-ttl="1">TTL 1</button>
+                        <button type="button" class="ttl-preset-btn ${initialTtl === 2 ? 'is-active' : ''}" data-ttl="2">TTL 2</button>
+                        <button type="button" class="ttl-preset-btn ${initialTtl === 64 ? 'is-active' : ''}" data-ttl="64">TTL 64</button>
+                        <button type="button" class="ttl-preset-btn ${initialTtl === 128 ? 'is-active' : ''}" data-ttl="128">TTL 128</button>
                     </div>
                 </div>
             </div>
@@ -2695,7 +2716,31 @@ function getSendFramePanelHtml() {
 }
 
 function attachSendFramePanelEvents() {
-    // No additional action buttons required currently.
+    const ttlInput = document.getElementById('sendFrameInitialTtl');
+    if (ttlInput) {
+        ttlInput.addEventListener('change', (e) => {
+            const val = parseInt(e.target.value, 10);
+            const clamped = clamp(isNaN(val) ? 64 : val, 1, 255);
+            if (networkState.sendFrameState) {
+                networkState.sendFrameState.initialTtl = clamped;
+            } else {
+                networkState.sendFrameState = { initialTtl: clamped };
+            }
+            renderPropertiesPanel();
+        });
+    }
+
+    document.querySelectorAll('.ttl-preset-btn[data-ttl]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            const val = parseInt(btn.dataset.ttl, 10);
+            if (networkState.sendFrameState) {
+                networkState.sendFrameState.initialTtl = val;
+            } else {
+                networkState.sendFrameState = { initialTtl: val };
+            }
+            renderPropertiesPanel();
+        });
+    });
 }
 
 function renderRouterRoutingTableSection(router) {
@@ -5756,16 +5801,44 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
         && isSameSubnet(sourceDevice.ip, destinationDevice.ip, normalizedMaskB);
 
     if (!sameSubnet) {
-        const commAnalysis = analyzeCommunication(sourceDevice, destinationDevice);
-        if (!commAnalysis.possible) {
+        if (!sourceDevice.gateway || !isValidIPv4(sourceDevice.gateway)) {
             return {
                 success: false,
-                reason: commAnalysis.reason,
-                path: commAnalysis.path && commAnalysis.path.length ? commAnalysis.path : [topologyPath[0]],
+                reason: `Source device ${sourceDevice.name} has no default gateway configured.`,
+                path: [topologyPath[0]],
                 action: 'DROP',
-                events: [commAnalysis.reason],
+                events: [`Source device ${sourceDevice.name} has no default gateway configured.`],
                 hopActions: []
             };
+        }
+        if (!isSameSubnet(sourceDevice.ip, sourceDevice.gateway, normalizedMaskA)) {
+            return {
+                success: false,
+                reason: `Source default gateway (${sourceDevice.gateway}) is not on the source subnet.`,
+                path: [topologyPath[0]],
+                action: 'DROP',
+                events: [`Source default gateway (${sourceDevice.gateway}) is not on the source subnet.`],
+                hopActions: []
+            };
+        }
+
+        const firstRouterId = topologyPath.find((id) => getDeviceById(id)?.type === 'router');
+        if (firstRouterId) {
+            const firstRouter = getDeviceById(firstRouterId);
+            const firstRouterIdx = topologyPath.indexOf(firstRouterId);
+            const prevHopId = topologyPath[firstRouterIdx - 1];
+            const ingressPort = getPortForRouterAndNeighbor(firstRouter.id, prevHopId);
+            const ingressIface = firstRouter.interfaces?.[ingressPort];
+            if (ingressIface && ingressIface.ip && sourceDevice.gateway !== ingressIface.ip) {
+                return {
+                    success: false,
+                    reason: `Source default gateway (${sourceDevice.gateway}) does not match router interface IP (${ingressIface.ip}).`,
+                    path: [topologyPath[0]],
+                    action: 'DROP',
+                    events: [`Source default gateway (${sourceDevice.gateway}) does not match router interface IP (${ingressIface.ip}).`],
+                    hopActions: []
+                };
+            }
         }
     }
 
@@ -6069,6 +6142,10 @@ function analyzeCommunication(sourceDevice, targetDevice) {
     }
 
     const ingressIface = firstRouter.interfaces[ingressPort];
+    if (ingressIface.status === 'down') {
+        return { possible: false, reason: `Router ${firstRouter.name} interface ${ingressPort} is administratively down.`, path };
+    }
+
     if (!ingressIface.ip || !isValidIPv4(ingressIface.ip)) {
         return { possible: false, reason: `Router ${firstRouter.name} interface ${ingressPort} has no valid IP configured.`, path };
     }
@@ -6096,6 +6173,10 @@ function analyzeCommunication(sourceDevice, targetDevice) {
     }
 
     const egressIface = lastRouter.interfaces[egressPort];
+    if (egressIface.status === 'down') {
+        return { possible: false, reason: `Router ${lastRouter.name} interface ${egressPort} is administratively down.`, path };
+    }
+
     if (!egressIface.ip || !isValidIPv4(egressIface.ip)) {
         return { possible: false, reason: `Router ${lastRouter.name} interface ${egressPort} has no valid IP configured.`, path };
     }
@@ -6111,6 +6192,45 @@ function analyzeCommunication(sourceDevice, targetDevice) {
         }
         if (trimmedDestGateway !== egressIface.ip) {
             return { possible: false, reason: `Destination default gateway (${trimmedDestGateway}) does not match router interface IP (${egressIface.ip}).`, path };
+        }
+    }
+
+    // Multi-router Layer 3 Routing Validation (Forward & Return Paths)
+    for (let rIdx = 0; rIdx < routerIndices.length; rIdx++) {
+        const routerIndex = routerIndices[rIdx];
+        const rDev = getDeviceById(path[routerIndex]);
+        if (!rDev) continue;
+
+        // Forward route lookup for destination IP
+        const forwardRouteResult = lookupRoute(rDev.id, targetDevice.ip);
+        if (!forwardRouteResult || !forwardRouteResult.route) {
+            if (forwardRouteResult?.reason === 'INTERFACE_DOWN') {
+                return { possible: false, reason: `Router ${rDev.name} interface for destination network ${targetDevice.ip} is administratively down.`, path };
+            }
+            return { possible: false, reason: `Router ${rDev.name} has no route to destination network ${targetDevice.ip}.`, path };
+        }
+
+        const nextHopResolution = resolveRouteNextHop(rDev.id, forwardRouteResult.route, targetDevice.ip);
+        const egressIfaceName = nextHopResolution.egressInterface || forwardRouteResult.route.interface;
+        const egressIfaceDev = rDev.interfaces?.[egressIfaceName];
+        if (!egressIfaceDev || egressIfaceDev.status === 'down') {
+            return { possible: false, reason: `Router ${rDev.name} interface ${egressIfaceName || 'unknown'} is administratively down.`, path };
+        }
+
+        // Reverse route lookup for source IP (return path)
+        const reverseRouteResult = lookupRoute(rDev.id, sourceDevice.ip);
+        if (!reverseRouteResult || !reverseRouteResult.route) {
+            if (reverseRouteResult?.reason === 'INTERFACE_DOWN') {
+                return { possible: false, reason: `Router ${rDev.name} interface for source network ${sourceDevice.ip} is administratively down on return path.`, path };
+            }
+            return { possible: false, reason: `Router ${rDev.name} has no return route to source network ${sourceDevice.ip}.`, path };
+        }
+
+        const retNextHopResolution = resolveRouteNextHop(rDev.id, reverseRouteResult.route, sourceDevice.ip);
+        const returnEgressIfaceName = retNextHopResolution.egressInterface || reverseRouteResult.route.interface;
+        const returnEgressIfaceDev = rDev.interfaces?.[returnEgressIfaceName];
+        if (!returnEgressIfaceDev || returnEgressIfaceDev.status === 'down') {
+            return { possible: false, reason: `Router ${rDev.name} interface ${returnEgressIfaceName || 'unknown'} is administratively down on return path.`, path };
         }
     }
 

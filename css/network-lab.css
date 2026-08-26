@@ -1320,3 +1320,73 @@ body {
     padding: 0.65rem 0.75rem;
     margin-top: 0.65rem;
 }
+
+/* Send Frame Initial TTL Control */
+.send-frame-ttl-control {
+    margin-top: 0.75rem;
+    padding-top: 0.65rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.send-frame-ttl-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.45rem;
+}
+
+.send-frame-ttl-header label {
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--lab-muted);
+    text-transform: uppercase;
+}
+
+.send-frame-ttl-header input[type="number"] {
+    width: 70px;
+    padding: 0.25rem 0.45rem;
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 6px;
+    color: var(--lab-text);
+    font-family: "Courier New", monospace;
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-align: center;
+}
+
+.send-frame-ttl-header input[type="number"]:focus {
+    border-color: var(--lab-accent);
+    outline: none;
+}
+
+.send-frame-ttl-presets {
+    display: flex;
+    gap: 0.35rem;
+}
+
+.ttl-preset-btn {
+    flex: 1;
+    padding: 0.22rem 0.35rem;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    color: var(--lab-muted);
+    font-size: 0.68rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 150ms ease;
+}
+
+.ttl-preset-btn:hover {
+    background: rgba(0, 212, 255, 0.12);
+    border-color: rgba(0, 212, 255, 0.4);
+    color: var(--lab-accent);
+}
+
+.ttl-preset-btn.is-active {
+    background: rgba(0, 212, 255, 0.2);
+    border-color: var(--lab-accent);
+    color: #ffffff;
+}
