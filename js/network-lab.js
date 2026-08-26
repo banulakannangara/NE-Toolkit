@@ -39,6 +39,7 @@ const networkState = {
     },
     sendFrameState: null,
     lastFrameResult: null,
+    lastTracerouteResult: null,
     switchRuntime: {},
     routerRuntime: {},
     arpRuntime: {},
@@ -2651,6 +2652,57 @@ function getSendFramePanelHtml() {
         networkState.lastFrameResult?.icmpErrorPacket
     );
 
+    let tracerouteHtml = '';
+    if (networkState.lastTracerouteResult) {
+        const tr = networkState.lastTracerouteResult;
+        const rows = tr.hops.map((h) => {
+            const statusClass = h.status === 'reached'
+                ? 'traceroute-badge--reached'
+                : h.status === 'ttl_expired'
+                    ? 'traceroute-badge--ttl'
+                    : 'traceroute-badge--drop';
+            const statusLabel = h.status === 'reached'
+                ? 'REACHED'
+                : h.status === 'ttl_expired'
+                    ? 'TTL EXPIRED'
+                    : 'UNREACHABLE';
+            return `
+                <tr class="traceroute-hop-row">
+                    <td><strong>${escapeHtml(String(h.hop))}</strong></td>
+                    <td>${escapeHtml(h.deviceName || '—')}</td>
+                    <td><code>${escapeHtml(h.ip)}</code></td>
+                    <td>${escapeHtml(h.icmpTypeName || '—')}</td>
+                    <td><span class="traceroute-badge ${statusClass}">${escapeHtml(statusLabel)}</span></td>
+                </tr>
+            `;
+        }).join('');
+
+        tracerouteHtml = `
+            <div class="property-summary traceroute-panel">
+                <h4>PATH TRACE (TRACEROUTE)</h4>
+                <div class="property-status-message ${tr.success ? 'property-status-message--success' : 'property-status-message--warning'}">
+                    ${escapeHtml(tr.reason)}
+                </div>
+                <div class="traceroute-table-container">
+                    <table class="traceroute-table">
+                        <thead>
+                            <tr>
+                                <th>Hop</th>
+                                <th>Device</th>
+                                <th>IP Address</th>
+                                <th>ICMP Response</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${rows}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        `;
+    }
+
     return cleanDisplayText(`
         <div class="property-card">
             <h3>Send Frame</h3>
@@ -2681,7 +2733,13 @@ function getSendFramePanelHtml() {
                         <button type="button" class="ttl-preset-btn ${initialTtl === 128 ? 'is-active' : ''}" data-ttl="128">TTL 128</button>
                     </div>
                 </div>
+                <div class="send-frame-actions-row">
+                    <button type="button" id="traceRouteBtn" class="toolbar-button trace-route-btn" ${(!sourceDevice || !networkState.lastFrameResult) ? 'disabled' : ''}>
+                        <span>🔍</span> Trace Path (Traceroute)
+                    </button>
+                </div>
             </div>
+            ${tracerouteHtml}
             ${networkState.lastFrameResult ? `
                 <div class="property-summary frame-transmission">
                     <h4>FRAME TRANSMISSION</h4>
@@ -2741,6 +2799,19 @@ function attachSendFramePanelEvents() {
             renderPropertiesPanel();
         });
     });
+
+    const traceRouteBtn = document.getElementById('traceRouteBtn');
+    if (traceRouteBtn) {
+        traceRouteBtn.addEventListener('click', () => {
+            const srcDev = getDeviceById(networkState.sendFrameState?.sourceId);
+            const destId = networkState.lastFrameResult?.path?.slice(-1)[0];
+            const destDev = getDeviceById(destId);
+            if (srcDev && destDev) {
+                networkState.lastTracerouteResult = simulateTraceroute(srcDev, destDev);
+                renderPropertiesPanel();
+            }
+        });
+    }
 }
 
 function renderRouterRoutingTableSection(router) {
@@ -6046,6 +6117,159 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
         packet: replyFrame.packet,
         arpResult,
         icmpErrorPacket: null
+    };
+}
+
+function simulateTraceroute(sourceDevice, destinationDevice, options = {}) {
+    const maxHops = typeof options?.maxHops === 'number' ? Math.max(1, Math.min(64, options.maxHops)) : 30;
+
+    const validation = validateSendFrameEndpoints(sourceDevice, destinationDevice);
+    if (!validation.valid) {
+        return {
+            success: false,
+            reason: validation.reason,
+            sourceName: sourceDevice?.name || 'Unknown',
+            sourceIp: sourceDevice?.ip || '0.0.0.0',
+            destinationName: destinationDevice?.name || 'Unknown',
+            destinationIp: destinationDevice?.ip || '0.0.0.0',
+            hops: [],
+            totalHops: 0
+        };
+    }
+
+    const hops = [];
+    let completed = false;
+    let finalReason = '';
+    const seenRouterIps = new Set();
+
+    for (let ttl = 1; ttl <= maxHops && !completed; ttl++) {
+        const probeResult = simulateSendFrame(sourceDevice, destinationDevice, {
+            icmp: true,
+            initialTtl: ttl,
+            agingTimeSeconds: options?.agingTimeSeconds,
+            now: options?.now
+        });
+
+        if (probeResult.success) {
+            hops.push({
+                hop: ttl,
+                ttl,
+                deviceId: destinationDevice.id,
+                deviceName: destinationDevice.name,
+                ip: destinationDevice.ip,
+                type: 'destination',
+                icmpType: 0,
+                icmpTypeName: 'ECHO_REPLY',
+                status: 'reached',
+                description: 'Destination Reached (Echo Reply received)',
+                path: probeResult.path,
+                result: probeResult
+            });
+            completed = true;
+            finalReason = `Trace complete: reached destination ${destinationDevice.name} (${destinationDevice.ip}) in ${ttl} hop${ttl > 1 ? 's' : ''}.`;
+            break;
+        }
+
+        if (probeResult.icmpErrorPacket && probeResult.icmpErrorPacket.icmp) {
+            const errPkt = probeResult.icmpErrorPacket;
+            const errIcmp = errPkt.icmp;
+            const routerDev = errIcmp.router;
+            const routerName = routerDev?.name || errPkt.sourceName || 'Router';
+            const routerIp = errPkt.sourceIp || 'Unknown';
+
+            if (errIcmp.type === 11) {
+                hops.push({
+                    hop: ttl,
+                    ttl,
+                    deviceId: routerDev?.id || null,
+                    deviceName: routerName,
+                    ip: routerIp,
+                    type: 'router',
+                    icmpType: 11,
+                    icmpTypeName: 'TIME_EXCEEDED',
+                    status: 'ttl_expired',
+                    description: errIcmp.description || 'Time to Live (TTL) expired in transit',
+                    path: probeResult.path,
+                    result: probeResult
+                });
+
+                if (seenRouterIps.has(routerIp) && hops.filter((h) => h.ip === routerIp).length >= 3) {
+                    completed = true;
+                    finalReason = `Routing loop detected at ${routerName} (${routerIp}). Trace terminated.`;
+                    break;
+                }
+                seenRouterIps.add(routerIp);
+            } else if (errIcmp.type === 3) {
+                hops.push({
+                    hop: ttl,
+                    ttl,
+                    deviceId: routerDev?.id || null,
+                    deviceName: routerName,
+                    ip: routerIp,
+                    type: 'unreachable',
+                    icmpType: 3,
+                    icmpTypeName: 'DESTINATION_UNREACHABLE',
+                    status: 'unreachable',
+                    description: errIcmp.description || errIcmp.reason || 'Destination Unreachable',
+                    path: probeResult.path,
+                    result: probeResult
+                });
+                completed = true;
+                finalReason = `Destination unreachable: reported by ${routerName} (${routerIp}) — ${errIcmp.description || errIcmp.reason || 'Destination Unreachable'}.`;
+                break;
+            } else {
+                hops.push({
+                    hop: ttl,
+                    ttl,
+                    deviceId: routerDev?.id || null,
+                    deviceName: routerName,
+                    ip: routerIp,
+                    type: 'error',
+                    icmpType: errIcmp.type,
+                    icmpTypeName: errIcmp.typeName || `Type ${errIcmp.type}`,
+                    status: 'error',
+                    description: errIcmp.description || 'ICMP Error',
+                    path: probeResult.path,
+                    result: probeResult
+                });
+                completed = true;
+                finalReason = `ICMP error received: ${errIcmp.description || 'Error'}`;
+                break;
+            }
+        } else {
+            hops.push({
+                hop: ttl,
+                ttl,
+                deviceId: null,
+                deviceName: 'Request timed out / Drop',
+                ip: '*',
+                type: 'timeout',
+                icmpType: null,
+                icmpTypeName: 'DROP',
+                status: 'drop',
+                description: probeResult.reason || 'Frame dropped without ICMP response',
+                path: probeResult.path,
+                result: probeResult
+            });
+            completed = true;
+            finalReason = `Trace halted: ${probeResult.reason || 'Frame dropped along path'}.`;
+            break;
+        }
+    }
+
+    if (!completed && hops.length >= maxHops) {
+        finalReason = `Maximum hop limit (${maxHops}) exceeded without reaching destination.`;
+    }
+
+    return {
+        success: completed && hops.length > 0 && hops[hops.length - 1].status === 'reached',
+        reason: finalReason,
+        sourceName: sourceDevice.name,
+        sourceIp: sourceDevice.ip,
+        destinationName: destinationDevice.name,
+        destinationIp: destinationDevice.ip,
+        hops,
+        totalHops: hops.length
     };
 }
 

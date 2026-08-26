@@ -1390,3 +1390,103 @@ body {
     border-color: var(--lab-accent);
     color: #ffffff;
 }
+
+/* Traceroute UI */
+.send-frame-actions-row {
+    margin-top: 0.65rem;
+    display: flex;
+    gap: 0.5rem;
+}
+
+.trace-route-btn {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.78rem;
+    font-weight: 700;
+    background: rgba(0, 212, 255, 0.08);
+    border: 1px solid rgba(0, 212, 255, 0.35);
+    color: var(--lab-accent);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 150ms ease;
+}
+
+.trace-route-btn:hover:not(:disabled) {
+    background: rgba(0, 212, 255, 0.18);
+    border-color: var(--lab-accent);
+    box-shadow: 0 0 10px rgba(0, 212, 255, 0.25);
+}
+
+.trace-route-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.traceroute-panel {
+    margin-top: 0.75rem;
+}
+
+.traceroute-table-container {
+    overflow-x: auto;
+    margin-top: 0.5rem;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.traceroute-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.75rem;
+    text-align: left;
+}
+
+.traceroute-table th,
+.traceroute-table td {
+    padding: 0.35rem 0.5rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.traceroute-table th {
+    background: rgba(0, 0, 0, 0.35);
+    color: var(--lab-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    font-size: 0.68rem;
+    letter-spacing: 0.05em;
+}
+
+.traceroute-table tbody tr:hover {
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.traceroute-badge {
+    display: inline-block;
+    padding: 0.15rem 0.35rem;
+    border-radius: 4px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.traceroute-badge--reached {
+    background: rgba(16, 185, 129, 0.18);
+    color: #6ee7b7;
+    border: 1px solid rgba(16, 185, 129, 0.4);
+}
+
+.traceroute-badge--ttl {
+    background: rgba(255, 183, 77, 0.15);
+    color: #ffb74d;
+    border: 1px solid rgba(255, 183, 77, 0.35);
+}
+
+.traceroute-badge--drop {
+    background: rgba(239, 68, 68, 0.18);
+    color: #fca5a5;
+    border: 1px solid rgba(239, 68, 68, 0.4);
+}

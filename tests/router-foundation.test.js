@@ -8816,6 +8816,355 @@ runTest('254. Same-subnet connection testing continues to work without regressio
     assert.strictEqual(result.network, '192.168.1.0/24');
 });
 
+// 255. simulateTraceroute discovers single-router path in 2 hops (Router0 -> PC1)
+runTest('255. simulateTraceroute discovers single-router path in 2 hops (Router0 -> PC1)', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    const tr = simulateTraceroute(pc0, pc1);
+    assert.strictEqual(tr.success, true);
+    assert.strictEqual(tr.totalHops, 2);
+    assert.strictEqual(tr.hops[0].deviceName, 'Router0');
+    assert.strictEqual(tr.hops[0].status, 'ttl_expired');
+    assert.strictEqual(tr.hops[0].icmpType, 11);
+    assert.strictEqual(tr.hops[1].deviceName, 'PC1');
+    assert.strictEqual(tr.hops[1].status, 'reached');
+    assert.strictEqual(tr.hops[1].icmpType, 0);
+});
+
+// 256. simulateTraceroute discovers multi-router path in 3 hops (Router0 -> Router1 -> PC1)
+runTest('256. simulateTraceroute discovers multi-router path in 3 hops (Router0 -> Router1 -> PC1)', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 350, 100);
+    addDevice('pc', 500, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'PC1');
+
+    addStaticRoute(r0.id, { network: '192.168.2.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.2' });
+    addStaticRoute(r1.id, { network: '192.168.1.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.1' });
+
+    const tr = simulateTraceroute(pc0, pc1);
+    assert.strictEqual(tr.success, true);
+    assert.strictEqual(tr.totalHops, 3);
+    assert.strictEqual(tr.hops[0].deviceName, 'Router0');
+    assert.strictEqual(tr.hops[0].status, 'ttl_expired');
+    assert.strictEqual(tr.hops[1].deviceName, 'Router1');
+    assert.strictEqual(tr.hops[1].status, 'ttl_expired');
+    assert.strictEqual(tr.hops[2].deviceName, 'PC1');
+    assert.strictEqual(tr.hops[2].status, 'reached');
+});
+
+// 257. simulateTraceroute terminates early with Destination Unreachable when intermediate router has no route
+runTest('257. simulateTraceroute terminates early with Destination Unreachable when intermediate router has no route', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 350, 100);
+    addDevice('pc', 500, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'PC1');
+
+    // Route on Router0 only, Router1 has NO route to 192.168.2.0/24 (simulating route gap)
+    addStaticRoute(r0.id, { network: '192.168.2.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.2' });
+    addStaticRoute(r1.id, { network: '192.168.1.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.1' });
+    // Change Router1 Gig0/1 IP so it doesn't match 192.168.2.0/24 directly
+    r1.interfaces['Gig0/1'].ip = '172.16.1.1';
+
+    const tr = simulateTraceroute(pc0, pc1);
+    assert.strictEqual(tr.success, false);
+    assert.strictEqual(tr.totalHops, 2);
+    assert.strictEqual(tr.hops[0].deviceName, 'Router0');
+    assert.strictEqual(tr.hops[0].status, 'ttl_expired');
+    assert.strictEqual(tr.hops[1].deviceName, 'Router1');
+    assert.strictEqual(tr.hops[1].status, 'unreachable');
+    assert.strictEqual(tr.hops[1].icmpType, 3);
+});
+
+// 258. simulateTraceroute terminates early when intermediate router interface is administratively down
+runTest('258. simulateTraceroute terminates early when intermediate router interface is administratively down', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].status = 'down';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    const tr = simulateTraceroute(pc0, pc1);
+    assert.strictEqual(tr.success, false);
+    assert.strictEqual(tr.totalHops, 1);
+    assert.strictEqual(tr.hops[0].status, 'unreachable');
+});
+
+// 259. simulateTraceroute discovers three-router path in 4 hops (Router0 -> Router1 -> Router2 -> PC1)
+runTest('259. simulateTraceroute discovers three-router path in 4 hops (Router0 -> Router1 -> Router2 -> PC1)', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('router', 460, 100);
+    addDevice('pc', 600, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const r2 = networkState.devices[3];
+    const pc1 = networkState.devices[4];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '10.0.23.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r2.interfaces['Gig0/0'].ip = '10.0.23.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r2.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Router2');
+    addConnection('Router2', 'PC1');
+
+    addStaticRoute(r0.id, { network: '192.168.2.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.2' });
+    addStaticRoute(r1.id, { network: '192.168.2.0', subnetMask: '255.255.255.0', nextHop: '10.0.23.2' });
+
+    addStaticRoute(r2.id, { network: '192.168.1.0', subnetMask: '255.255.255.0', nextHop: '10.0.23.1' });
+    addStaticRoute(r1.id, { network: '192.168.1.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.1' });
+
+    const tr = simulateTraceroute(pc0, pc1);
+    assert.strictEqual(tr.success, true);
+    assert.strictEqual(tr.totalHops, 4);
+    assert.strictEqual(tr.hops[0].deviceName, 'Router0');
+    assert.strictEqual(tr.hops[0].status, 'ttl_expired');
+    assert.strictEqual(tr.hops[1].deviceName, 'Router1');
+    assert.strictEqual(tr.hops[1].status, 'ttl_expired');
+    assert.strictEqual(tr.hops[2].deviceName, 'Router2');
+    assert.strictEqual(tr.hops[2].status, 'ttl_expired');
+    assert.strictEqual(tr.hops[3].deviceName, 'PC1');
+    assert.strictEqual(tr.hops[3].status, 'reached');
+});
+
+// 260. simulateTraceroute respects custom maxHops limit
+runTest('260. simulateTraceroute respects custom maxHops limit', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 350, 100);
+    addDevice('pc', 500, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'PC1');
+
+    addStaticRoute(r0.id, { network: '192.168.2.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.2' });
+    addStaticRoute(r1.id, { network: '192.168.1.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.1' });
+
+    // With maxHops=2, cannot reach PC1 (needs 3 hops)
+    const tr = simulateTraceroute(pc0, pc1, { maxHops: 2 });
+    assert.strictEqual(tr.success, false);
+    assert.strictEqual(tr.totalHops, 2);
+    assert.ok(tr.reason.includes('limit') || tr.reason.includes('exceeded'));
+});
+
+// 261. Same-subnet traceroute resolves direct target at TTL=1
+runTest('261. Same-subnet traceroute resolves direct target at TTL=1', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const sw = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    const tr = simulateTraceroute(pc0, pc1);
+    assert.strictEqual(tr.success, true);
+    assert.strictEqual(tr.totalHops, 1);
+    assert.strictEqual(tr.hops[0].deviceName, 'PC1');
+    assert.strictEqual(tr.hops[0].status, 'reached');
+});
+
+// 262. Send Frame UI HTML renders Trace Route button and Traceroute Hop Table with appropriate badges
+runTest('262. Send Frame UI HTML renders Trace Route button and Traceroute Hop Table with appropriate badges', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    networkState.sendFrameState = {
+        phase: 'complete',
+        sourceId: pc0.id,
+        initialTtl: 64,
+        message: null
+    };
+    networkState.lastFrameResult = simulateSendFrame(pc0, pc1, { icmp: true });
+    networkState.lastTracerouteResult = simulateTraceroute(pc0, pc1);
+
+    const html = getSendFramePanelHtml();
+    assert.ok(html.includes('trace-route-btn'), 'Must contain Trace Route button');
+    assert.ok(html.includes('traceroute-panel'), 'Must render traceroute panel');
+    assert.ok(html.includes('traceroute-table'), 'Must render traceroute table');
+    assert.ok(html.includes('traceroute-badge--ttl'), 'Must render TTL expired badge');
+    assert.ok(html.includes('traceroute-badge--reached'), 'Must render Reached badge');
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
