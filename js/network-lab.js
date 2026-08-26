@@ -1287,11 +1287,25 @@ function getHopBadgeConfig(hopAction, isDrop = false, isDelivered = false, optio
         };
     }
 
+    if (action === 'ACL_EVALUATE') {
+        const iface = hopAction.ingressInterface || hopAction.egressInterface || '';
+        const dir = hopAction.acl?.direction || 'inbound';
+        const seq = hopAction.acl?.sequence ? `Rule ${hopAction.acl.sequence}` : '';
+        const subtitle = [iface, dir, seq].filter(Boolean).join(' • ');
+        return {
+            title: 'ACL PERMIT',
+            subtitle,
+            modifier: 'forward'
+        };
+    }
+
     if (action === 'DROP') {
         const reasonLabels = {
             'ttl-expired': 'TTL Expired',
             'filtered-same-port': 'Same Port Filter',
-            'port-mismatch': 'Port Mismatch'
+            'port-mismatch': 'Port Mismatch',
+            'acl-deny': 'ACL Denied',
+            'administratively-prohibited': 'Admin Prohibited'
         };
         const reason = reasonLabels[hopAction.reason] || hopAction.reason || 'Dropped';
         return {
@@ -2118,6 +2132,170 @@ function renderPropertiesPanel() {
         });
     });
 
+    // Router ACL Event Handlers
+    if (selected.type === 'router') {
+        const createAclBtn = panel.querySelector('#createAclBtn');
+        if (createAclBtn) {
+            createAclBtn.addEventListener('click', () => {
+                const aclIdInput = panel.querySelector('#newAclId');
+                const aclTypeSelect = panel.querySelector('#newAclType');
+                const feedbackEl = panel.querySelector('#newAclFeedback');
+
+                const rawId = aclIdInput ? aclIdInput.value.trim() : '';
+                const type = aclTypeSelect ? aclTypeSelect.value.trim() : 'standard';
+
+                pushHistory();
+                const result = createRouterAcl(selected.id, { id: rawId, type });
+                if (result.success) {
+                    updateStatus(`ACL ${result.acl.name} (${result.acl.type}) created on ${selected.name}.`);
+                    renderPropertiesPanel();
+                } else {
+                    networkState.history.pop();
+                    if (feedbackEl) {
+                        feedbackEl.textContent = `✗ ${result.reason}`;
+                        feedbackEl.className = 'property-feedback property-feedback--error';
+                    }
+                }
+            });
+        }
+
+        panel.querySelectorAll('.acl-delete-btn[data-acl-id]').forEach((btn) => {
+            btn.addEventListener('click', (event) => {
+                event.stopPropagation();
+                const aclId = btn.dataset.aclId;
+                if (!aclId) return;
+                pushHistory();
+                const result = deleteRouterAcl(selected.id, aclId);
+                if (result.success) {
+                    updateStatus(`ACL ${aclId} deleted from ${selected.name}.`);
+                    renderPropertiesPanel();
+                } else {
+                    networkState.history.pop();
+                    updateStatus(`Could not delete ACL: ${result.reason}`);
+                }
+            });
+        });
+
+        panel.querySelectorAll('.acl-rule-delete-btn[data-acl-id][data-sequence]').forEach((btn) => {
+            btn.addEventListener('click', (event) => {
+                event.stopPropagation();
+                const aclId = btn.dataset.aclId;
+                const seq = parseInt(btn.dataset.sequence, 10);
+                if (!aclId || isNaN(seq)) return;
+                pushHistory();
+                const result = deleteRouterAclRule(selected.id, aclId, seq);
+                if (result.success) {
+                    updateStatus(`Rule ${seq} deleted from ACL ${aclId} on ${selected.name}.`);
+                    renderPropertiesPanel();
+                } else {
+                    networkState.history.pop();
+                    updateStatus(`Could not delete rule: ${result.reason}`);
+                }
+            });
+        });
+
+        const addAclRuleBtn = panel.querySelector('#addAclRuleBtn');
+        if (addAclRuleBtn) {
+            addAclRuleBtn.addEventListener('click', () => {
+                const targetAclSelect = panel.querySelector('#aclRuleTargetSelect');
+                const seqInput = panel.querySelector('#aclRuleSequence');
+                const actionSelect = panel.querySelector('#aclRuleAction');
+                const protoSelect = panel.querySelector('#aclRuleProtocol');
+                const srcInput = panel.querySelector('#aclRuleSource');
+                const srcMaskInput = panel.querySelector('#aclRuleSourceMask');
+                const dstInput = panel.querySelector('#aclRuleDest');
+                const dstMaskInput = panel.querySelector('#aclRuleDestMask');
+                const feedbackEl = panel.querySelector('#aclRuleFeedback');
+
+                const targetAclId = targetAclSelect ? targetAclSelect.value.trim() : '';
+                const rawSeq = seqInput ? seqInput.value.trim() : '';
+                const action = actionSelect ? actionSelect.value.trim() : 'permit';
+                const protocol = protoSelect ? protoSelect.value.trim() : 'ip';
+                const source = srcInput ? srcInput.value.trim() : 'any';
+                const sourceMask = srcMaskInput ? srcMaskInput.value.trim() : '';
+                const dest = dstInput ? dstInput.value.trim() : 'any';
+                const destMask = dstMaskInput ? dstMaskInput.value.trim() : '';
+
+                const ruleData = {
+                    action,
+                    protocol,
+                    sourceIp: source,
+                    sourceWildcard: sourceMask || undefined,
+                    destinationIp: dest,
+                    destinationWildcard: destMask || undefined
+                };
+                if (rawSeq !== '') {
+                    ruleData.sequence = parseInt(rawSeq, 10);
+                }
+
+                pushHistory();
+                const result = addRouterAclRule(selected.id, targetAclId, ruleData);
+                if (result.success) {
+                    updateStatus(`Rule ${result.rule.sequence} added to ACL ${targetAclId} on ${selected.name}.`);
+                    renderPropertiesPanel();
+                } else {
+                    networkState.history.pop();
+                    if (feedbackEl) {
+                        feedbackEl.textContent = `✗ ${result.reason}`;
+                        feedbackEl.className = 'property-feedback property-feedback--error';
+                    }
+                }
+            });
+        }
+
+        const bindAclBtn = panel.querySelector('#bindAclBtn');
+        if (bindAclBtn) {
+            bindAclBtn.addEventListener('click', () => {
+                const ifSelect = panel.querySelector('#aclBindInterface');
+                const dirSelect = panel.querySelector('#aclBindDirection');
+                const aclSelect = panel.querySelector('#aclBindAclSelect');
+                const feedbackEl = panel.querySelector('#aclBindFeedback');
+
+                const ifName = ifSelect ? ifSelect.value.trim() : '';
+                const dir = dirSelect ? dirSelect.value.trim() : 'in';
+                const aclId = aclSelect ? aclSelect.value.trim() : '';
+
+                pushHistory();
+                const result = bindRouterInterfaceAcl(selected.id, ifName, dir, aclId);
+                if (result.success) {
+                    updateStatus(`ACL ${aclId} bound ${dir.toUpperCase()} on ${selected.name} ${ifName}.`);
+                    renderPropertiesPanel();
+                } else {
+                    networkState.history.pop();
+                    if (feedbackEl) {
+                        feedbackEl.textContent = `✗ ${result.reason}`;
+                        feedbackEl.className = 'property-feedback property-feedback--error';
+                    }
+                }
+            });
+        }
+
+        const unbindAclBtn = panel.querySelector('#unbindAclBtn');
+        if (unbindAclBtn) {
+            unbindAclBtn.addEventListener('click', () => {
+                const ifSelect = panel.querySelector('#aclBindInterface');
+                const dirSelect = panel.querySelector('#aclBindDirection');
+                const feedbackEl = panel.querySelector('#aclBindFeedback');
+
+                const ifName = ifSelect ? ifSelect.value.trim() : '';
+                const dir = dirSelect ? dirSelect.value.trim() : 'in';
+
+                pushHistory();
+                const result = unbindRouterInterfaceAcl(selected.id, ifName, dir);
+                if (result.success) {
+                    updateStatus(`Unbound ${dir.toUpperCase()} ACL on ${selected.name} ${ifName}.`);
+                    renderPropertiesPanel();
+                } else {
+                    networkState.history.pop();
+                    if (feedbackEl) {
+                        feedbackEl.textContent = `✗ ${result.reason}`;
+                        feedbackEl.className = 'property-feedback property-feedback--error';
+                    }
+                }
+            });
+        }
+    }
+
     refreshInspectorValidation(selected);
 }
 
@@ -2610,6 +2788,36 @@ function renderPacketInspector(packet, result) {
         `;
     }
 
+    let aclHtml = '';
+    const aclInfo = result?.acl || errPkt?.icmp?.acl;
+    if (aclInfo) {
+        const actionClass = aclInfo.action === 'deny' ? 'packet-inspector__value--error' : 'packet-inspector__value--success';
+        const ruleText = aclInfo.isImplicitDeny ? 'Implicit Deny (End of ACL)' : `Sequence ${aclInfo.sequence}`;
+        aclHtml = `
+            <div class="packet-inspector__section packet-inspector__section--acl">
+                <h5 class="packet-inspector__section-title">ACCESS CONTROL LIST (ACL)</h5>
+                <div class="packet-inspector__grid">
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">ACL ID / Name</span>
+                        <strong class="packet-inspector__value">${escapeHtml(String(aclInfo.aclName || aclInfo.aclId))}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Action</span>
+                        <strong class="packet-inspector__value ${actionClass}">${escapeHtml(String(aclInfo.action).toUpperCase())} (${escapeHtml(String(aclInfo.direction || 'inbound'))})</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Interface</span>
+                        <strong class="packet-inspector__value">${escapeHtml(String(aclInfo.interface || 'N/A'))}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Matched Rule</span>
+                        <strong class="packet-inspector__value">${escapeHtml(ruleText)}</strong>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
     return `
         <div class="packet-inspector">
             <h4>PACKET INSPECTOR</h4>
@@ -2622,6 +2830,7 @@ function renderPacketInspector(packet, result) {
             ${ipv4Html}
             ${icmpHtml}
             ${icmpErrorHtml}
+            ${aclHtml}
         </div>
     `;
 }
@@ -2924,6 +3133,244 @@ function renderRouterStaticRouteFormSection(router) {
     `;
 }
 
+function renderRouterAclSection(router) {
+    const acls = getRouterAcls(router.id);
+    const aclList = Object.values(acls);
+    const runtime = getRouterRuntime(router.id);
+    const interfaceAcls = runtime.interfaceAcls || {};
+
+    const ifaces = ['Gig0/0', 'Gig0/1'];
+
+    // 1. Interface Bindings Summary
+    const bindingRows = ifaces.map((ifName) => {
+        const inAcl = interfaceAcls[ifName]?.in || 'None';
+        const outAcl = interfaceAcls[ifName]?.out || 'None';
+        return `
+            <tr>
+                <td><strong>${escapeHtml(ifName)}</strong></td>
+                <td><span class="acl-binding-badge acl-binding-badge--${inAcl !== 'None' ? 'active' : 'none'}">${escapeHtml(inAcl)}</span></td>
+                <td><span class="acl-binding-badge acl-binding-badge--${outAcl !== 'None' ? 'active' : 'none'}">${escapeHtml(outAcl)}</span></td>
+            </tr>
+        `;
+    }).join('');
+
+    // 2. ACL Cards & Rule Tables
+    let aclCardsHtml = '';
+    if (aclList.length === 0) {
+        aclCardsHtml = '<p class="empty-state">No Access Control Lists configured on this router.</p>';
+    } else {
+        aclCardsHtml = aclList.map((acl) => {
+            const ruleRows = acl.rules.map((rule) => {
+                const actionBadge = rule.action === 'permit'
+                    ? '<span class="acl-badge acl-badge--permit">PERMIT</span>'
+                    : '<span class="acl-badge acl-badge--deny">DENY</span>';
+
+                const srcText = rule.source.isAny
+                    ? 'any'
+                    : rule.source.isHost
+                        ? `host ${rule.source.ip}`
+                        : `${rule.source.ip} ${rule.source.wildcard}`;
+
+                let dstText = '-';
+                if (acl.type === 'extended') {
+                    dstText = rule.destination?.isAny
+                        ? 'any'
+                        : rule.destination?.isHost
+                            ? `host ${rule.destination.ip}`
+                            : rule.destination
+                                ? `${rule.destination.ip} ${rule.destination.wildcard}`
+                                : 'any';
+                }
+
+                const protoText = acl.type === 'extended' ? String(rule.protocol || 'ip').toUpperCase() : 'IP';
+
+                return `
+                    <tr>
+                        <td><strong>${escapeHtml(String(rule.sequence))}</strong></td>
+                        <td>${actionBadge}</td>
+                        ${acl.type === 'extended' ? `<td><code>${escapeHtml(protoText)}</code></td>` : ''}
+                        <td><code>${escapeHtml(srcText)}</code></td>
+                        ${acl.type === 'extended' ? `<td><code>${escapeHtml(dstText)}</code></td>` : ''}
+                        <td><span class="acl-hits-badge">${escapeHtml(String(rule.hits || 0))}</span></td>
+                        <td class="table-action-cell">
+                            <button class="acl-rule-delete-btn table-action-btn" data-acl-id="${escapeHtml(acl.id)}" data-sequence="${escapeHtml(String(rule.sequence))}" title="Delete Rule">✕</button>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+
+            const rulesTable = acl.rules.length > 0 ? `
+                <table class="property-table router-acl-table">
+                    <thead>
+                        <tr>
+                            <th>Seq</th>
+                            <th>Action</th>
+                            ${acl.type === 'extended' ? '<th>Proto</th>' : ''}
+                            <th>Source</th>
+                            ${acl.type === 'extended' ? '<th>Destination</th>' : ''}
+                            <th>Hits</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${ruleRows}
+                    </tbody>
+                </table>
+            ` : '<p class="empty-state">No rules in this ACL. Add rules below.</p>';
+
+            return `
+                <div class="router-acl-card">
+                    <div class="router-acl-header">
+                        <div class="router-acl-title-group">
+                            <span class="acl-type-badge acl-type-badge--${escapeHtml(acl.type)}">${escapeHtml(acl.type.toUpperCase())}</span>
+                            <strong class="router-acl-title">ACL ${escapeHtml(acl.name)}</strong>
+                            <span class="router-acl-count">(${acl.rules.length} rule${acl.rules.length === 1 ? '' : 's'})</span>
+                        </div>
+                        <button class="acl-delete-btn table-action-btn" data-acl-id="${escapeHtml(acl.id)}" title="Delete ACL ${escapeHtml(acl.name)}">Delete ACL</button>
+                    </div>
+                    ${rulesTable}
+                </div>
+            `;
+        }).join('');
+    }
+
+    // 3. Form select options for ACL dropdowns
+    const aclOptions = aclList.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)} (${escapeHtml(a.type)})</option>`).join('');
+
+    return `
+        <div class="property-summary" id="routerAclSection">
+            <h4>ACCESS CONTROL LISTS (ACL)</h4>
+
+            <!-- Interface Bindings Overview -->
+            <div class="acl-section-block">
+                <h5 class="acl-section-subtitle">Interface ACL Bindings</h5>
+                <table class="property-table acl-bindings-table">
+                    <thead>
+                        <tr>
+                            <th>Interface</th>
+                            <th>Inbound ACL</th>
+                            <th>Outbound ACL</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${bindingRows}
+                    </tbody>
+                </table>
+
+                <div class="acl-binding-form">
+                    <div class="property-field">
+                        <label for="aclBindInterface">Interface</label>
+                        <select id="aclBindInterface">
+                            <option value="Gig0/0">Gig0/0</option>
+                            <option value="Gig0/1">Gig0/1</option>
+                        </select>
+                    </div>
+                    <div class="property-field">
+                        <label for="aclBindDirection">Direction</label>
+                        <select id="aclBindDirection">
+                            <option value="in">Inbound (in)</option>
+                            <option value="out">Outbound (out)</option>
+                        </select>
+                    </div>
+                    <div class="property-field">
+                        <label for="aclBindAclSelect">ACL</label>
+                        <select id="aclBindAclSelect">
+                            <option value="">-- Select ACL --</option>
+                            ${aclOptions}
+                        </select>
+                    </div>
+                    <div class="property-actions acl-binding-actions">
+                        <button id="bindAclBtn" class="toolbar-button" type="button">Bind ACL</button>
+                        <button id="unbindAclBtn" class="toolbar-button" type="button">Unbind</button>
+                    </div>
+                    <div class="property-feedback" id="aclBindFeedback"></div>
+                </div>
+            </div>
+
+            <!-- Active ACLs & Rules -->
+            <div class="acl-section-block">
+                <h5 class="acl-section-subtitle">Configured ACLs</h5>
+                ${aclCardsHtml}
+            </div>
+
+            <!-- Create New ACL Form -->
+            <div class="acl-section-block">
+                <div class="acl-creation-form">
+                    <h5 class="acl-section-subtitle">Create New ACL</h5>
+                    <div class="property-field">
+                        <label for="newAclId">ACL Name / Number</label>
+                        <input id="newAclId" type="text" placeholder="e.g. 10 (Std), 100 (Ext), or CORP_IN">
+                    </div>
+                    <div class="property-field">
+                        <label for="newAclType">ACL Type</label>
+                        <select id="newAclType">
+                            <option value="standard">Standard (Source only)</option>
+                            <option value="extended">Extended (Source, Dest, Protocol)</option>
+                        </select>
+                    </div>
+                    <div class="property-feedback" id="newAclFeedback"></div>
+                    <div class="property-actions">
+                        <button id="createAclBtn" class="toolbar-button" type="button">Create ACL</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Add Rule to ACL Form -->
+            ${aclList.length > 0 ? `
+                <div class="acl-section-block">
+                    <div class="acl-rule-form">
+                        <h5 class="acl-section-subtitle">Add Rule to ACL</h5>
+                        <div class="property-field">
+                            <label for="aclRuleTargetSelect">Target ACL</label>
+                            <select id="aclRuleTargetSelect">
+                                ${aclOptions}
+                            </select>
+                        </div>
+                        <div class="property-field">
+                            <label for="aclRuleSequence">Sequence Number (Optional)</label>
+                            <input id="aclRuleSequence" type="number" min="1" max="9999" placeholder="Auto (+10)">
+                        </div>
+                        <div class="property-field">
+                            <label for="aclRuleAction">Action</label>
+                            <select id="aclRuleAction">
+                                <option value="permit">PERMIT</option>
+                                <option value="deny">DENY</option>
+                            </select>
+                        </div>
+                        <div class="property-field" id="aclRuleProtocolGroup">
+                            <label for="aclRuleProtocol">Protocol</label>
+                            <select id="aclRuleProtocol">
+                                <option value="ip">IP (All IP Traffic)</option>
+                                <option value="icmp">ICMP (Ping / Echo)</option>
+                            </select>
+                        </div>
+                        <div class="property-field">
+                            <label for="aclRuleSource">Source IP / Host / Network</label>
+                            <input id="aclRuleSource" type="text" placeholder="e.g. 192.168.1.10, 192.168.1.0, or any">
+                        </div>
+                        <div class="property-field">
+                            <label for="aclRuleSourceMask">Source Wildcard / Subnet Mask</label>
+                            <input id="aclRuleSourceMask" type="text" placeholder="e.g. 0.0.0.255 or 255.255.255.0 (leave blank for host/any)">
+                        </div>
+                        <div class="property-field" id="aclRuleDestGroup">
+                            <label for="aclRuleDest">Destination IP / Network (Extended)</label>
+                            <input id="aclRuleDest" type="text" placeholder="e.g. 10.0.0.0 or any">
+                        </div>
+                        <div class="property-field" id="aclRuleDestMaskGroup">
+                            <label for="aclRuleDestMask">Destination Wildcard / Subnet Mask (Extended)</label>
+                            <input id="aclRuleDestMask" type="text" placeholder="e.g. 0.0.0.255 or 255.255.255.0">
+                        </div>
+                        <div class="property-feedback" id="aclRuleFeedback"></div>
+                        <div class="property-actions">
+                            <button id="addAclRuleBtn" class="toolbar-button" type="button">Add Rule</button>
+                        </div>
+                    </div>
+                </div>
+            ` : ''}
+        </div>
+    `;
+}
+
 function renderRouterInspector(selected) {
     const draft = getInspectorDraft(selected);
     const nameValue = escapeHtml(getInspectorValue(selected, 'name'));
@@ -3021,6 +3468,7 @@ function renderRouterInspector(selected) {
             </div>
             ${renderRouterRoutingTableSection(selected)}
             ${renderRouterStaticRouteFormSection(selected)}
+            ${renderRouterAclSection(selected)}
             ${renderArpTableInspector(selected)}
             <div class="property-actions">
                 <button id="applyDeviceConfig" class="toolbar-button" type="button" ${isValid ? '' : 'disabled'}>Apply Changes</button>
@@ -4033,13 +4481,434 @@ function getRouterRuntime(routerId) {
     if (!networkState.routerRuntime[routerId]) {
         networkState.routerRuntime[routerId] = {
             ports: {},
-            staticRoutes: []
+            staticRoutes: [],
+            acls: {},
+            interfaceAcls: {}
         };
     }
     if (!Array.isArray(networkState.routerRuntime[routerId].staticRoutes)) {
         networkState.routerRuntime[routerId].staticRoutes = [];
     }
+    if (!networkState.routerRuntime[routerId].acls || typeof networkState.routerRuntime[routerId].acls !== 'object') {
+        networkState.routerRuntime[routerId].acls = {};
+    }
+    if (!networkState.routerRuntime[routerId].interfaceAcls || typeof networkState.routerRuntime[routerId].interfaceAcls !== 'object') {
+        networkState.routerRuntime[routerId].interfaceAcls = {};
+    }
     return networkState.routerRuntime[routerId];
+}
+
+function parseAclAddressSpec(rawIp, rawMaskOrWildcard) {
+    const ipStr = String(rawIp || '').trim();
+    if (!ipStr || ipStr.toLowerCase() === 'any') {
+        return {
+            ip: '0.0.0.0',
+            wildcard: '255.255.255.255',
+            mask: '0.0.0.0',
+            isAny: true,
+            isHost: false
+        };
+    }
+
+    if (ipStr.toLowerCase() === 'host' && rawMaskOrWildcard) {
+        const hostIp = String(rawMaskOrWildcard).trim();
+        if (isValidIPv4(hostIp)) {
+            return {
+                ip: hostIp,
+                wildcard: '0.0.0.0',
+                mask: '255.255.255.255',
+                isAny: false,
+                isHost: true
+            };
+        }
+    }
+
+    if (ipStr.toLowerCase().startsWith('host ')) {
+        const hostIp = ipStr.slice(5).trim();
+        if (isValidIPv4(hostIp)) {
+            return {
+                ip: hostIp,
+                wildcard: '0.0.0.0',
+                mask: '255.255.255.255',
+                isAny: false,
+                isHost: true
+            };
+        }
+    }
+
+    if (!isValidIPv4(ipStr)) {
+        return null;
+    }
+
+    const maskOrWildcardStr = String(rawMaskOrWildcard || '').trim();
+    if (!maskOrWildcardStr || maskOrWildcardStr === 'host' || maskOrWildcardStr === '0.0.0.0') {
+        return {
+            ip: ipStr,
+            wildcard: '0.0.0.0',
+            mask: '255.255.255.255',
+            isAny: false,
+            isHost: true
+        };
+    }
+
+    if (maskOrWildcardStr.toLowerCase() === 'any') {
+        return {
+            ip: '0.0.0.0',
+            wildcard: '255.255.255.255',
+            mask: '0.0.0.0',
+            isAny: true,
+            isHost: false
+        };
+    }
+
+    if (!isValidIPv4(maskOrWildcardStr)) {
+        return null;
+    }
+
+    const num = ipv4ToInteger(maskOrWildcardStr);
+    const isStandardSubnetMask = isValidSubnetMask(maskOrWildcardStr);
+
+    let wildcard = '';
+    let mask = '';
+
+    if (isStandardSubnetMask && maskOrWildcardStr !== '0.0.0.0') {
+        const wildcardNum = (~num >>> 0) & 0xFFFFFFFF;
+        wildcard = integerToIPv4(wildcardNum);
+        mask = maskOrWildcardStr;
+    } else {
+        wildcard = maskOrWildcardStr;
+        const maskNum = (~num >>> 0) & 0xFFFFFFFF;
+        mask = integerToIPv4(maskNum);
+    }
+
+    return {
+        ip: ipStr,
+        wildcard,
+        mask,
+        isAny: false,
+        isHost: wildcard === '0.0.0.0'
+    };
+}
+
+function isIpMatchWithWildcard(testIp, targetIp, wildcard) {
+    if (!testIp || !targetIp || !wildcard) {
+        return false;
+    }
+    if (!isValidIPv4(testIp) || !isValidIPv4(targetIp) || !isValidIPv4(wildcard)) {
+        return false;
+    }
+    const testNum = ipv4ToInteger(testIp);
+    const targetNum = ipv4ToInteger(targetIp);
+    const wildcardNum = ipv4ToInteger(wildcard);
+    const matchMask = (~wildcardNum >>> 0) & 0xFFFFFFFF;
+    return (testNum & matchMask) === (targetNum & matchMask);
+}
+
+function getRouterAcls(routerId) {
+    const runtime = getRouterRuntime(routerId);
+    return runtime.acls || {};
+}
+
+function getRouterAcl(routerId, aclId) {
+    const acls = getRouterAcls(routerId);
+    const key = String(aclId).trim();
+    return acls[key] || null;
+}
+
+function createRouterAcl(routerId, aclConfig) {
+    if (!aclConfig || (typeof aclConfig !== 'object' && typeof aclConfig !== 'string' && typeof aclConfig !== 'number')) {
+        return { success: false, reason: 'Invalid ACL configuration.' };
+    }
+
+    const router = typeof routerId === 'object' && routerId ? routerId : getDeviceById(routerId);
+    if (!router || router.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+
+    const rawId = typeof aclConfig === 'object' ? (aclConfig.id ?? aclConfig.name ?? aclConfig.number) : aclConfig;
+    const aclId = String(rawId ?? '').trim();
+    if (!aclId) {
+        return { success: false, reason: 'ACL ID/name cannot be empty.' };
+    }
+
+    const acls = getRouterAcls(router.id);
+    if (acls[aclId]) {
+        return { success: false, reason: `ACL ${aclId} already exists on router ${router.name}.` };
+    }
+
+    let aclType = 'standard';
+    if (typeof aclConfig === 'object' && aclConfig.type) {
+        const t = String(aclConfig.type).toLowerCase().trim();
+        if (t === 'extended' || t === 'ext') {
+            aclType = 'extended';
+        } else {
+            aclType = 'standard';
+        }
+    } else {
+        const numId = parseInt(aclId, 10);
+        if (!isNaN(numId)) {
+            if ((numId >= 100 && numId <= 199) || (numId >= 2000 && numId <= 2699)) {
+                aclType = 'extended';
+            } else {
+                aclType = 'standard';
+            }
+        }
+    }
+
+    const newAcl = {
+        id: aclId,
+        name: typeof aclConfig === 'object' && aclConfig.name ? String(aclConfig.name).trim() : aclId,
+        type: aclType,
+        rules: []
+    };
+
+    acls[aclId] = newAcl;
+    return { success: true, acl: newAcl };
+}
+
+function deleteRouterAcl(routerId, aclId) {
+    const router = typeof routerId === 'object' && routerId ? routerId : getDeviceById(routerId);
+    if (!router || router.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+
+    const runtime = getRouterRuntime(router.id);
+    const key = String(aclId).trim();
+    if (!runtime.acls || !runtime.acls[key]) {
+        return { success: false, reason: `ACL ${key} does not exist on router ${router.name}.` };
+    }
+
+    delete runtime.acls[key];
+
+    if (runtime.interfaceAcls) {
+        Object.keys(runtime.interfaceAcls).forEach((ifName) => {
+            const ifAcl = runtime.interfaceAcls[ifName];
+            if (ifAcl.in === key) delete ifAcl.in;
+            if (ifAcl.out === key) delete ifAcl.out;
+        });
+    }
+
+    return { success: true };
+}
+
+function addRouterAclRule(routerId, aclId, ruleData) {
+    if (!ruleData || typeof ruleData !== 'object') {
+        return { success: false, reason: 'Invalid ACL rule data.' };
+    }
+
+    const acl = getRouterAcl(routerId, aclId);
+    if (!acl) {
+        return { success: false, reason: `ACL ${aclId} not found.` };
+    }
+
+    const action = String(ruleData.action || '').toLowerCase().trim();
+    if (action !== 'permit' && action !== 'deny') {
+        return { success: false, reason: 'Action must be "permit" or "deny".' };
+    }
+
+    const rawSrcIp = ruleData.sourceIp ?? ruleData.source?.ip ?? ruleData.source ?? 'any';
+    const rawSrcMask = ruleData.sourceWildcard ?? ruleData.sourceMask ?? ruleData.sourceSubnetMask ?? ruleData.source?.wildcard ?? ruleData.source?.mask ?? ruleData.source?.subnetMask ?? ruleData.wildcard ?? ruleData.subnetMask ?? ruleData.mask;
+    const parsedSource = parseAclAddressSpec(rawSrcIp, rawSrcMask);
+    if (!parsedSource) {
+        return { success: false, reason: 'Invalid source address/wildcard specification.' };
+    }
+
+    let parsedDestination = null;
+    let protocol = 'ip';
+
+    if (acl.type === 'extended') {
+        protocol = String(ruleData.protocol || 'ip').toLowerCase().trim();
+        const rawDstIp = ruleData.destinationIp ?? ruleData.destination?.ip ?? ruleData.destination ?? ruleData.dest ?? 'any';
+        const rawDstMask = ruleData.destinationWildcard ?? ruleData.destinationMask ?? ruleData.destinationSubnetMask ?? ruleData.destSubnetMask ?? ruleData.destWildcard ?? ruleData.destination?.wildcard ?? ruleData.destination?.mask ?? ruleData.destination?.subnetMask ?? ruleData.destMask;
+        parsedDestination = parseAclAddressSpec(rawDstIp, rawDstMask);
+        if (!parsedDestination) {
+            return { success: false, reason: 'Invalid destination address/wildcard specification for extended ACL.' };
+        }
+    }
+
+    let sequence = typeof ruleData.sequence === 'number' ? ruleData.sequence : parseInt(ruleData.sequence, 10);
+    if (isNaN(sequence) || sequence <= 0) {
+        const existingSeqs = acl.rules.map((r) => r.sequence);
+        const maxSeq = existingSeqs.length > 0 ? Math.max(...existingSeqs) : 0;
+        sequence = maxSeq + 10;
+    }
+
+    if (acl.rules.some((r) => r.sequence === sequence)) {
+        return { success: false, reason: `Rule with sequence number ${sequence} already exists in ACL ${aclId}.` };
+    }
+
+    const newRule = {
+        sequence,
+        action,
+        protocol,
+        source: parsedSource,
+        destination: parsedDestination,
+        hits: 0
+    };
+
+    acl.rules.push(newRule);
+    acl.rules.sort((a, b) => a.sequence - b.sequence);
+
+    return { success: true, rule: newRule };
+}
+
+function deleteRouterAclRule(routerId, aclId, sequence) {
+    const acl = getRouterAcl(routerId, aclId);
+    if (!acl) {
+        return { success: false, reason: `ACL ${aclId} not found.` };
+    }
+
+    const seqNum = typeof sequence === 'number' ? sequence : parseInt(sequence, 10);
+    const initialLen = acl.rules.length;
+    acl.rules = acl.rules.filter((r) => r.sequence !== seqNum);
+
+    if (acl.rules.length === initialLen) {
+        return { success: false, reason: `Rule sequence ${sequence} not found in ACL ${aclId}.` };
+    }
+
+    return { success: true };
+}
+
+function bindRouterInterfaceAcl(routerId, interfaceName, direction, aclId) {
+    const router = typeof routerId === 'object' && routerId ? routerId : getDeviceById(routerId);
+    if (!router || router.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+
+    const ifName = String(interfaceName || '').trim();
+    if (!router.interfaces || !router.interfaces[ifName]) {
+        return { success: false, reason: `Interface ${ifName} does not exist on router ${router.name}.` };
+    }
+
+    const dir = String(direction || '').toLowerCase().trim();
+    if (dir !== 'in' && dir !== 'out' && dir !== 'inbound' && dir !== 'outbound') {
+        return { success: false, reason: 'Direction must be "in" or "out".' };
+    }
+    const normalizedDir = (dir === 'in' || dir === 'inbound') ? 'in' : 'out';
+
+    const aclKey = String(aclId || '').trim();
+    const acl = getRouterAcl(router.id, aclKey);
+    if (!acl) {
+        return { success: false, reason: `ACL ${aclKey} does not exist on router ${router.name}.` };
+    }
+
+    const runtime = getRouterRuntime(router.id);
+    if (!runtime.interfaceAcls[ifName]) {
+        runtime.interfaceAcls[ifName] = {};
+    }
+    runtime.interfaceAcls[ifName][normalizedDir] = aclKey;
+
+    return { success: true };
+}
+
+function unbindRouterInterfaceAcl(routerId, interfaceName, direction) {
+    const router = typeof routerId === 'object' && routerId ? routerId : getDeviceById(routerId);
+    if (!router || router.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+
+    const ifName = String(interfaceName || '').trim();
+    const dir = String(direction || '').toLowerCase().trim();
+    const normalizedDir = (dir === 'in' || dir === 'inbound') ? 'in' : 'out';
+
+    const runtime = getRouterRuntime(router.id);
+    if (runtime.interfaceAcls && runtime.interfaceAcls[ifName] && runtime.interfaceAcls[ifName][normalizedDir]) {
+        delete runtime.interfaceAcls[ifName][normalizedDir];
+        return { success: true };
+    }
+
+    return { success: false, reason: `No ${normalizedDir} ACL bound to interface ${ifName}.` };
+}
+
+function getRouterInterfaceAcl(routerId, interfaceName, direction) {
+    const runtime = getRouterRuntime(routerId);
+    const ifName = String(interfaceName || '').trim();
+    const dir = String(direction || '').toLowerCase().trim();
+    const normalizedDir = (dir === 'in' || dir === 'inbound') ? 'in' : 'out';
+    return runtime.interfaceAcls?.[ifName]?.[normalizedDir] || null;
+}
+
+function evaluatePacketAcl(acl, packet) {
+    if (!acl || !Array.isArray(acl.rules)) {
+        return {
+            matched: false,
+            action: 'permit',
+            rule: null,
+            isImplicitDeny: false,
+            reason: 'No ACL rules to evaluate'
+        };
+    }
+
+    const pktSrcIp = packet?.sourceIp || packet?.packet?.sourceIp;
+    const pktDstIp = packet?.destinationIp || packet?.packet?.destinationIp;
+    const pktProto = String(packet?.protocol || packet?.packet?.protocol || (packet?.icmp ? 'ICMP' : 'IP')).toLowerCase();
+
+    for (const rule of acl.rules) {
+        if (acl.type === 'extended' && rule.protocol && rule.protocol !== 'ip') {
+            if (rule.protocol !== pktProto) {
+                continue;
+            }
+        }
+
+        if (!rule.source.isAny) {
+            if (!isIpMatchWithWildcard(pktSrcIp, rule.source.ip, rule.source.wildcard)) {
+                continue;
+            }
+        }
+
+        if (acl.type === 'extended' && rule.destination && !rule.destination.isAny) {
+            if (!isIpMatchWithWildcard(pktDstIp, rule.destination.ip, rule.destination.wildcard)) {
+                continue;
+            }
+        }
+
+        rule.hits = (rule.hits || 0) + 1;
+        return {
+            matched: true,
+            action: rule.action,
+            rule,
+            isImplicitDeny: false,
+            aclId: acl.id,
+            reason: `Matched rule ${rule.sequence}: ${rule.action.toUpperCase()}`
+        };
+    }
+
+    return {
+        matched: true,
+        action: 'deny',
+        rule: null,
+        isImplicitDeny: true,
+        aclId: acl.id,
+        reason: 'Implicit deny (no matching ACL rule)'
+    };
+}
+
+function evaluateRouterInterfaceAcl(routerId, interfaceName, direction, packet) {
+    const aclId = getRouterInterfaceAcl(routerId, interfaceName, direction);
+    if (!aclId) {
+        return {
+            matched: false,
+            action: 'permit',
+            rule: null,
+            isImplicitDeny: false,
+            aclId: null,
+            reason: `No ACL bound to ${interfaceName} (${direction})`
+        };
+    }
+
+    const acl = getRouterAcl(routerId, aclId);
+    if (!acl) {
+        return {
+            matched: false,
+            action: 'permit',
+            rule: null,
+            isImplicitDeny: false,
+            aclId,
+            reason: `Bound ACL ${aclId} not found`
+        };
+    }
+
+    return evaluatePacketAcl(acl, packet);
 }
 
 function addStaticRoute(routerId, routeData) {
@@ -4904,6 +5773,11 @@ const ICMP_ERROR_DEFINITIONS = {
                 code: 1,
                 codeName: 'HOST_UNREACHABLE',
                 description: 'Destination host unreachable'
+            },
+            13: {
+                code: 13,
+                codeName: 'ADMINISTRATIVELY_PROHIBITED',
+                description: 'Communication administratively prohibited'
             }
         }
     }
@@ -5019,6 +5893,7 @@ function createIcmpErrorPacket(errorType, errorCode, originalPacket, generatingD
             isError: true,
             reason: options.reason || codeDef.codeName.toLowerCase().replace(/_/g, '-'),
             router: routerInfo,
+            acl: options.acl || null,
             originalPacket: origSnapshot
         }
     };
@@ -5167,6 +6042,85 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
 
             frame.events.push(`Frame received by ${toDevice.name} on ${ingressPort}`);
 
+            // 1. Inbound ACL Evaluation
+            if (ingressPort) {
+                const inAclResult = evaluateRouterInterfaceAcl(toDevice.id, ingressPort, 'in', frame.packet);
+                if (inAclResult.matched && inAclResult.action === 'deny') {
+                    const ruleSeq = inAclResult.rule?.sequence ?? (inAclResult.isImplicitDeny ? 'implicit' : 'unknown');
+                    const logMsg = inAclResult.isImplicitDeny
+                        ? `Router ${toDevice.name} dropped packet on ${ingressPort} (inbound ACL ${inAclResult.aclId}): Implicit deny`
+                        : `Router ${toDevice.name} dropped packet on ${ingressPort} (inbound ACL ${inAclResult.aclId} rule ${ruleSeq}): Denied`;
+                    const returnReason = inAclResult.isImplicitDeny
+                        ? `Packet denied by inbound ACL ${inAclResult.aclId} (implicit deny) at router ${toDevice.name}.`
+                        : `Packet denied by inbound ACL ${inAclResult.aclId} rule ${ruleSeq} at router ${toDevice.name}.`;
+
+                    const aclDecision = {
+                        aclId: inAclResult.aclId,
+                        aclName: inAclResult.aclId,
+                        direction: 'inbound',
+                        interface: ingressPort,
+                        action: 'deny',
+                        sequence: inAclResult.rule?.sequence ?? null,
+                        isImplicitDeny: inAclResult.isImplicitDeny,
+                        sourceIp: frame.packet?.sourceIp || null,
+                        destinationIp: frame.packet?.destinationIp || null,
+                        protocol: frame.packet?.protocol || (frame.packet?.icmp ? 'ICMP' : 'IP'),
+                        reason: inAclResult.reason
+                    };
+
+                    const icmpError = createIcmpErrorPacket(3, 13, frame.packet, toDevice, {
+                        ingressInterface: ingressPort,
+                        reason: 'administratively-prohibited',
+                        acl: aclDecision
+                    });
+
+                    frame.events.push(logMsg);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'router',
+                        action: 'DROP',
+                        reason: 'acl-deny',
+                        ingressInterface: ingressPort,
+                        destinationIp: frame.packet.destinationIp,
+                        acl: aclDecision,
+                        icmpErrorPacket: icmpError || null
+                    });
+                    return {
+                        success: false,
+                        reason: returnReason,
+                        path: traversedPath,
+                        action: 'DROP',
+                        hopActions,
+                        acl: aclDecision,
+                        icmpErrorPacket: icmpError || null
+                    };
+                } else if (inAclResult.matched && inAclResult.action === 'permit') {
+                    frame.events.push(`Router ${toDevice.name} permitted packet on ${ingressPort} (inbound ACL ${inAclResult.aclId} rule ${inAclResult.rule?.sequence})`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'router',
+                        action: 'ACL_EVALUATE',
+                        reason: 'acl-permit',
+                        ingressInterface: ingressPort,
+                        acl: {
+                            aclId: inAclResult.aclId,
+                            aclName: inAclResult.aclId,
+                            direction: 'inbound',
+                            interface: ingressPort,
+                            action: 'permit',
+                            sequence: inAclResult.rule?.sequence ?? null,
+                            isImplicitDeny: false,
+                            sourceIp: frame.packet?.sourceIp || null,
+                            destinationIp: frame.packet?.destinationIp || null,
+                            protocol: frame.packet?.protocol || (frame.packet?.icmp ? 'ICMP' : 'IP'),
+                            reason: inAclResult.reason
+                        }
+                    });
+                }
+            }
+
             const routeResult = lookupRoute(toDevice.id, frame.packet.destinationIp);
             if (!routeResult.success) {
                 const isInterfaceDown = routeResult.reason === 'INTERFACE_DOWN';
@@ -5255,6 +6209,87 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     hopActions,
                     icmpErrorPacket: icmpError || null
                 };
+            }
+
+            // 2. Outbound ACL Evaluation
+            if (egressPort) {
+                const outAclResult = evaluateRouterInterfaceAcl(toDevice.id, egressPort, 'out', frame.packet);
+                if (outAclResult.matched && outAclResult.action === 'deny') {
+                    const ruleSeq = outAclResult.rule?.sequence ?? (outAclResult.isImplicitDeny ? 'implicit' : 'unknown');
+                    const logMsg = outAclResult.isImplicitDeny
+                        ? `Router ${toDevice.name} dropped packet on ${egressPort} (outbound ACL ${outAclResult.aclId}): Implicit deny`
+                        : `Router ${toDevice.name} dropped packet on ${egressPort} (outbound ACL ${outAclResult.aclId} rule ${ruleSeq}): Denied`;
+                    const returnReason = outAclResult.isImplicitDeny
+                        ? `Packet denied by outbound ACL ${outAclResult.aclId} (implicit deny) at router ${toDevice.name}.`
+                        : `Packet denied by outbound ACL ${outAclResult.aclId} rule ${ruleSeq} at router ${toDevice.name}.`;
+
+                    const aclDecision = {
+                        aclId: outAclResult.aclId,
+                        aclName: outAclResult.aclId,
+                        direction: 'outbound',
+                        interface: egressPort,
+                        action: 'deny',
+                        sequence: outAclResult.rule?.sequence ?? null,
+                        isImplicitDeny: outAclResult.isImplicitDeny,
+                        sourceIp: frame.packet?.sourceIp || null,
+                        destinationIp: frame.packet?.destinationIp || null,
+                        protocol: frame.packet?.protocol || (frame.packet?.icmp ? 'ICMP' : 'IP'),
+                        reason: outAclResult.reason
+                    };
+
+                    const icmpError = createIcmpErrorPacket(3, 13, frame.packet, toDevice, {
+                        ingressInterface: ingressPort,
+                        egressInterface: egressPort,
+                        reason: 'administratively-prohibited',
+                        acl: aclDecision
+                    });
+
+                    frame.events.push(logMsg);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'router',
+                        action: 'DROP',
+                        reason: 'acl-deny',
+                        ingressInterface: ingressPort,
+                        egressInterface: egressPort,
+                        destinationIp: frame.packet.destinationIp,
+                        acl: aclDecision,
+                        icmpErrorPacket: icmpError || null
+                    });
+                    return {
+                        success: false,
+                        reason: returnReason,
+                        path: traversedPath,
+                        action: 'DROP',
+                        hopActions,
+                        acl: aclDecision,
+                        icmpErrorPacket: icmpError || null
+                    };
+                } else if (outAclResult.matched && outAclResult.action === 'permit') {
+                    frame.events.push(`Router ${toDevice.name} permitted packet on ${egressPort} (outbound ACL ${outAclResult.aclId} rule ${outAclResult.rule?.sequence})`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'router',
+                        action: 'ACL_EVALUATE',
+                        reason: 'acl-permit',
+                        egressInterface: egressPort,
+                        acl: {
+                            aclId: outAclResult.aclId,
+                            aclName: outAclResult.aclId,
+                            direction: 'outbound',
+                            interface: egressPort,
+                            action: 'permit',
+                            sequence: outAclResult.rule?.sequence ?? null,
+                            isImplicitDeny: false,
+                            sourceIp: frame.packet?.sourceIp || null,
+                            destinationIp: frame.packet?.destinationIp || null,
+                            protocol: frame.packet?.protocol || (frame.packet?.icmp ? 'ICMP' : 'IP'),
+                            reason: outAclResult.reason
+                        }
+                    });
+                }
             }
 
             frame.packet.ttl = Math.max(0, frame.packet.ttl - 1);
@@ -6021,6 +7056,7 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             events: allEvents,
             packet: frame.packet,
             arpResult,
+            acl: forwardResult.acl || null,
             icmpErrorPacket: forwardResult.icmpErrorPacket || null,
             icmpErrorResult
         };
@@ -6037,6 +7073,7 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             events: frame.events,
             packet: frame.packet,
             arpResult,
+            acl: forwardResult.acl || null,
             icmpErrorPacket: null
         };
     }
@@ -6083,7 +7120,7 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
         etherType: 'IPv4',
         packet: replyPacket,
         path: reverseTopologyPath,
-        events: frame.events,
+        events: [...frame.events],
         agingTimeSeconds: options?.agingTimeSeconds,
         now: options?.now
     };
@@ -6100,7 +7137,9 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             reverseHopActions: reverseResult.hopActions,
             events: replyFrame.events,
             packet: replyFrame.packet,
-            arpResult
+            arpResult,
+            acl: reverseResult.acl || forwardResult.acl || null,
+            icmpErrorPacket: reverseResult.icmpErrorPacket || null
         };
     }
 
@@ -6116,6 +7155,7 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
         events: replyFrame.events,
         packet: replyFrame.packet,
         arpResult,
+        acl: forwardResult.acl || reverseResult.acl || null,
         icmpErrorPacket: null
     };
 }
@@ -6425,6 +7465,20 @@ function analyzeCommunication(sourceDevice, targetDevice) {
         const rDev = getDeviceById(path[routerIndex]);
         if (!rDev) continue;
 
+        // Inbound ACL check
+        const prevHopId = path[routerIndex - 1];
+        const ingPort = getPortForRouterAndNeighbor(rDev.id, prevHopId);
+        if (ingPort) {
+            const inAclRes = evaluateRouterInterfaceAcl(rDev.id, ingPort, 'in', {
+                sourceIp: sourceDevice.ip,
+                destinationIp: targetDevice.ip,
+                protocol: 'IP'
+            });
+            if (inAclRes.matched && inAclRes.action === 'deny') {
+                return { possible: false, reason: `Router ${rDev.name} inbound ACL ${inAclRes.aclId} denies traffic from ${sourceDevice.ip}.`, path };
+            }
+        }
+
         // Forward route lookup for destination IP
         const forwardRouteResult = lookupRoute(rDev.id, targetDevice.ip);
         if (!forwardRouteResult || !forwardRouteResult.route) {
@@ -6439,6 +7493,18 @@ function analyzeCommunication(sourceDevice, targetDevice) {
         const egressIfaceDev = rDev.interfaces?.[egressIfaceName];
         if (!egressIfaceDev || egressIfaceDev.status === 'down') {
             return { possible: false, reason: `Router ${rDev.name} interface ${egressIfaceName || 'unknown'} is administratively down.`, path };
+        }
+
+        // Outbound ACL check
+        if (egressIfaceName) {
+            const outAclRes = evaluateRouterInterfaceAcl(rDev.id, egressIfaceName, 'out', {
+                sourceIp: sourceDevice.ip,
+                destinationIp: targetDevice.ip,
+                protocol: 'IP'
+            });
+            if (outAclRes.matched && outAclRes.action === 'deny') {
+                return { possible: false, reason: `Router ${rDev.name} outbound ACL ${outAclRes.aclId} denies traffic to ${targetDevice.ip}.`, path };
+            }
         }
 
         // Reverse route lookup for source IP (return path)

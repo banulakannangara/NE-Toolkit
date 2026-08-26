@@ -9165,6 +9165,1234 @@ runTest('262. Send Frame UI HTML renders Trace Route button and Traceroute Hop T
     assert.ok(html.includes('traceroute-badge--reached'), 'Must render Reached badge');
 });
 
+// 263. Create Standard and Extended ACLs on router
+runTest('263. Create Standard and Extended ACLs on router', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r = networkState.devices[0];
+
+    // Standard ACL 10 (by number)
+    const res1 = createRouterAcl(r.id, 10);
+    assert.strictEqual(res1.success, true);
+    assert.strictEqual(res1.acl.id, '10');
+    assert.strictEqual(res1.acl.type, 'standard');
+
+    // Extended ACL 101 (by number)
+    const res2 = createRouterAcl(r.id, 101);
+    assert.strictEqual(res2.success, true);
+    assert.strictEqual(res2.acl.id, '101');
+    assert.strictEqual(res2.acl.type, 'extended');
+
+    // Named Standard ACL
+    const res3 = createRouterAcl(r.id, { name: 'CORP_STD', type: 'standard' });
+    assert.strictEqual(res3.success, true);
+    assert.strictEqual(res3.acl.name, 'CORP_STD');
+    assert.strictEqual(res3.acl.type, 'standard');
+
+    // Named Extended ACL
+    const res4 = createRouterAcl(r.id, { name: 'CORP_EXT', type: 'extended' });
+    assert.strictEqual(res4.success, true);
+    assert.strictEqual(res4.acl.name, 'CORP_EXT');
+    assert.strictEqual(res4.acl.type, 'extended');
+});
+
+// 264. Duplicate ACL creation and invalid configuration rejection
+runTest('264. Duplicate ACL creation and invalid configuration rejection', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r = networkState.devices[0];
+
+    createRouterAcl(r.id, '10');
+    const dup = createRouterAcl(r.id, '10');
+    assert.strictEqual(dup.success, false);
+    assert.ok(dup.reason.includes('already exists'));
+
+    const empty = createRouterAcl(r.id, '');
+    assert.strictEqual(empty.success, false);
+
+    const nonRouter = createRouterAcl('NonExistentRouter', '10');
+    assert.strictEqual(nonRouter.success, false);
+});
+
+// 265. Delete ACL and verify automatic interface unbinding
+runTest('265. Delete ACL and verify automatic interface unbinding', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r = networkState.devices[0];
+
+    createRouterAcl(r.id, '10');
+    bindRouterInterfaceAcl(r.id, 'Gig0/0', 'in', '10');
+    assert.strictEqual(getRouterInterfaceAcl(r.id, 'Gig0/0', 'in'), '10');
+
+    const delRes = deleteRouterAcl(r.id, '10');
+    assert.strictEqual(delRes.success, true);
+    assert.strictEqual(getRouterAcl(r.id, '10'), null);
+    assert.strictEqual(getRouterInterfaceAcl(r.id, 'Gig0/0', 'in'), null);
+});
+
+// 266. Standard ACL source IP exact match (host) permit and deny
+runTest('266. Standard ACL source IP exact match (host) permit and deny', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r = networkState.devices[0];
+
+    createRouterAcl(r.id, '10');
+    addRouterAclRule(r.id, '10', { action: 'permit', sourceIp: '192.168.1.50', sequence: 10 });
+    addRouterAclRule(r.id, '10', { action: 'deny', sourceIp: '192.168.1.100', sequence: 20 });
+
+    const acl = getRouterAcl(r.id, '10');
+
+    // Matching host 192.168.1.50
+    const eval1 = evaluatePacketAcl(acl, { sourceIp: '192.168.1.50', destinationIp: '10.0.0.1' });
+    assert.strictEqual(eval1.action, 'permit');
+    assert.strictEqual(eval1.rule.sequence, 10);
+    assert.strictEqual(eval1.isImplicitDeny, false);
+
+    // Matching host 192.168.1.100
+    const eval2 = evaluatePacketAcl(acl, { sourceIp: '192.168.1.100', destinationIp: '10.0.0.1' });
+    assert.strictEqual(eval2.action, 'deny');
+    assert.strictEqual(eval2.rule.sequence, 20);
+    assert.strictEqual(eval2.isImplicitDeny, false);
+});
+
+// 267. Standard ACL subnet and wildcard mask matching (/24 subnet, wildcard 0.0.0.255)
+runTest('267. Standard ACL subnet and wildcard mask matching (/24 subnet, wildcard 0.0.0.255)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r = networkState.devices[0];
+
+    createRouterAcl(r.id, '15');
+    // Using subnetMask notation
+    addRouterAclRule(r.id, '15', { action: 'permit', sourceIp: '192.168.10.0', subnetMask: '255.255.255.0', sequence: 10 });
+    // Using wildcard notation
+    addRouterAclRule(r.id, '15', { action: 'deny', sourceIp: '172.16.0.0', wildcard: '0.0.255.255', sequence: 20 });
+
+    const acl = getRouterAcl(r.id, '15');
+
+    // 192.168.10.25 matches rule 10
+    const eval1 = evaluatePacketAcl(acl, { sourceIp: '192.168.10.25', destinationIp: '10.0.0.1' });
+    assert.strictEqual(eval1.action, 'permit');
+    assert.strictEqual(eval1.rule.sequence, 10);
+
+    // 172.16.55.99 matches rule 20
+    const eval2 = evaluatePacketAcl(acl, { sourceIp: '172.16.55.99', destinationIp: '10.0.0.1' });
+    assert.strictEqual(eval2.action, 'deny');
+    assert.strictEqual(eval2.rule.sequence, 20);
+});
+
+// 268. Extended ACL source and destination matching
+runTest('268. Extended ACL source and destination matching', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r = networkState.devices[0];
+
+    createRouterAcl(r.id, 100);
+    // Permit only traffic from 192.168.1.0/24 to 10.0.0.0/8
+    addRouterAclRule(r.id, 100, {
+        action: 'permit',
+        protocol: 'ip',
+        sourceIp: '192.168.1.0',
+        sourceMask: '255.255.255.0',
+        destinationIp: '10.0.0.0',
+        destinationMask: '255.0.0.0',
+        sequence: 10
+    });
+
+    const acl = getRouterAcl(r.id, 100);
+
+    // Matching source and destination
+    const eval1 = evaluatePacketAcl(acl, { sourceIp: '192.168.1.15', destinationIp: '10.5.6.7', protocol: 'IP' });
+    assert.strictEqual(eval1.action, 'permit');
+    assert.strictEqual(eval1.rule.sequence, 10);
+
+    // Matching source but non-matching destination -> drops to implicit deny
+    const eval2 = evaluatePacketAcl(acl, { sourceIp: '192.168.1.15', destinationIp: '172.16.1.1', protocol: 'IP' });
+    assert.strictEqual(eval2.action, 'deny');
+    assert.strictEqual(eval2.isImplicitDeny, true);
+});
+
+// 269. Extended ACL protocol matching (ICMP vs IP)
+runTest('269. Extended ACL protocol matching (ICMP vs IP)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r = networkState.devices[0];
+
+    createRouterAcl(r.id, 102);
+    // Rule 10 permits only ICMP from any to any
+    addRouterAclRule(r.id, 102, { action: 'permit', protocol: 'icmp', sourceIp: 'any', destinationIp: 'any', sequence: 10 });
+
+    const acl = getRouterAcl(r.id, 102);
+
+    // ICMP packet
+    const evalIcmp = evaluatePacketAcl(acl, { sourceIp: '192.168.1.1', destinationIp: '10.0.0.1', protocol: 'ICMP', icmp: { type: 8 } });
+    assert.strictEqual(evalIcmp.action, 'permit');
+    assert.strictEqual(evalIcmp.rule.sequence, 10);
+
+    // UDP/TCP packet -> doesn't match ICMP rule, hits implicit deny
+    const evalUdp = evaluatePacketAcl(acl, { sourceIp: '192.168.1.1', destinationIp: '10.0.0.1', protocol: 'UDP' });
+    assert.strictEqual(evalUdp.action, 'deny');
+    assert.strictEqual(evalUdp.isImplicitDeny, true);
+});
+
+// 270. Sequence number ordering and first-match behavior
+runTest('270. Sequence number ordering and first-match behavior', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r = networkState.devices[0];
+
+    createRouterAcl(r.id, '20');
+    // Add rule 30 first, then rule 10
+    addRouterAclRule(r.id, '20', { action: 'permit', sourceIp: 'any', sequence: 30 });
+    addRouterAclRule(r.id, '20', { action: 'deny', sourceIp: '192.168.1.10', sequence: 10 });
+
+    const acl = getRouterAcl(r.id, '20');
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[1].sequence, 30);
+
+    // 192.168.1.10 matches rule 10 first and is denied
+    const eval1 = evaluatePacketAcl(acl, { sourceIp: '192.168.1.10' });
+    assert.strictEqual(eval1.action, 'deny');
+    assert.strictEqual(eval1.rule.sequence, 10);
+
+    // 192.168.1.99 doesn't match rule 10, matches rule 30 and is permitted
+    const eval2 = evaluatePacketAcl(acl, { sourceIp: '192.168.1.99' });
+    assert.strictEqual(eval2.action, 'permit');
+    assert.strictEqual(eval2.rule.sequence, 30);
+});
+
+// 271. Implicit Deny when no rules match
+runTest('271. Implicit Deny when no rules match', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r = networkState.devices[0];
+
+    createRouterAcl(r.id, '30');
+    addRouterAclRule(r.id, '30', { action: 'permit', sourceIp: '10.0.0.1', sequence: 10 });
+
+    const acl = getRouterAcl(r.id, '30');
+
+    // 192.168.1.1 does not match any rule
+    const evalRes = evaluatePacketAcl(acl, { sourceIp: '192.168.1.1' });
+    assert.strictEqual(evalRes.matched, true);
+    assert.strictEqual(evalRes.action, 'deny');
+    assert.strictEqual(evalRes.isImplicitDeny, true);
+    assert.strictEqual(evalRes.rule, null);
+});
+
+// 272. Per-rule hit counter increment and isolation
+runTest('272. Per-rule hit counter increment and isolation', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r = networkState.devices[0];
+
+    createRouterAcl(r.id, '40');
+    addRouterAclRule(r.id, '40', { action: 'permit', sourceIp: '192.168.1.10', sequence: 10 });
+    addRouterAclRule(r.id, '40', { action: 'permit', sourceIp: '192.168.1.20', sequence: 20 });
+
+    const acl = getRouterAcl(r.id, '40');
+    assert.strictEqual(acl.rules[0].hits, 0);
+    assert.strictEqual(acl.rules[1].hits, 0);
+
+    // Send 3 packets matching rule 10
+    evaluatePacketAcl(acl, { sourceIp: '192.168.1.10' });
+    evaluatePacketAcl(acl, { sourceIp: '192.168.1.10' });
+    evaluatePacketAcl(acl, { sourceIp: '192.168.1.10' });
+
+    assert.strictEqual(acl.rules[0].hits, 3);
+    assert.strictEqual(acl.rules[1].hits, 0);
+
+    // Send 1 packet matching rule 20
+    evaluatePacketAcl(acl, { sourceIp: '192.168.1.20' });
+    assert.strictEqual(acl.rules[0].hits, 3);
+    assert.strictEqual(acl.rules[1].hits, 1);
+});
+
+// 273. Interface inbound ACL binding and evaluation
+runTest('273. Interface inbound ACL binding and evaluation', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r = networkState.devices[0];
+
+    createRouterAcl(r.id, '50');
+    addRouterAclRule(r.id, '50', { action: 'deny', sourceIp: '192.168.1.100', sequence: 10 });
+    addRouterAclRule(r.id, '50', { action: 'permit', sourceIp: 'any', sequence: 20 });
+
+    bindRouterInterfaceAcl(r.id, 'Gig0/0', 'in', '50');
+
+    // Test through interface helper
+    const resDenied = evaluateRouterInterfaceAcl(r.id, 'Gig0/0', 'in', { sourceIp: '192.168.1.100' });
+    assert.strictEqual(resDenied.action, 'deny');
+    assert.strictEqual(resDenied.rule.sequence, 10);
+
+    const resPermitted = evaluateRouterInterfaceAcl(r.id, 'Gig0/0', 'in', { sourceIp: '192.168.1.5' });
+    assert.strictEqual(resPermitted.action, 'permit');
+    assert.strictEqual(resPermitted.rule.sequence, 20);
+
+    // Other interface without ACL permits by default
+    const resNoAcl = evaluateRouterInterfaceAcl(r.id, 'Gig0/1', 'in', { sourceIp: '192.168.1.100' });
+    assert.strictEqual(resNoAcl.matched, false);
+    assert.strictEqual(resNoAcl.action, 'permit');
+});
+
+// 274. Interface outbound ACL binding and evaluation
+runTest('274. Interface outbound ACL binding and evaluation', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r = networkState.devices[0];
+
+    createRouterAcl(r.id, '150');
+    addRouterAclRule(r.id, '150', { action: 'deny', destinationIp: '10.0.12.2', sequence: 10 });
+    addRouterAclRule(r.id, '150', { action: 'permit', destinationIp: 'any', sequence: 20 });
+
+    bindRouterInterfaceAcl(r.id, 'Gig0/1', 'out', '150');
+
+    const resDenied = evaluateRouterInterfaceAcl(r.id, 'Gig0/1', 'out', { destinationIp: '10.0.12.2' });
+    assert.strictEqual(resDenied.action, 'deny');
+    assert.strictEqual(resDenied.rule.sequence, 10);
+
+    const resPermitted = evaluateRouterInterfaceAcl(r.id, 'Gig0/1', 'out', { destinationIp: '192.168.2.10' });
+    assert.strictEqual(resPermitted.action, 'permit');
+    assert.strictEqual(resPermitted.rule.sequence, 20);
+});
+
+// 275. Interface ACL unbinding and fallback to permit
+runTest('275. Interface ACL unbinding and fallback to permit', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r = networkState.devices[0];
+
+    createRouterAcl(r.id, '60');
+    addRouterAclRule(r.id, '60', { action: 'deny', sourceIp: 'any', sequence: 10 });
+    bindRouterInterfaceAcl(r.id, 'Gig0/0', 'in', '60');
+
+    const blocked = evaluateRouterInterfaceAcl(r.id, 'Gig0/0', 'in', { sourceIp: '192.168.1.1' });
+    assert.strictEqual(blocked.action, 'deny');
+
+    unbindRouterInterfaceAcl(r.id, 'Gig0/0', 'in');
+
+    const unblocked = evaluateRouterInterfaceAcl(r.id, 'Gig0/0', 'in', { sourceIp: '192.168.1.1' });
+    assert.strictEqual(unblocked.matched, false);
+    assert.strictEqual(unblocked.action, 'permit');
+});
+
+// 276. Rule deletion by sequence number and re-evaluation
+runTest('276. Rule deletion by sequence number and re-evaluation', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r = networkState.devices[0];
+
+    createRouterAcl(r.id, '70');
+    addRouterAclRule(r.id, '70', { action: 'deny', sourceIp: '192.168.1.10', sequence: 10 });
+    addRouterAclRule(r.id, '70', { action: 'permit', sourceIp: 'any', sequence: 20 });
+
+    const acl = getRouterAcl(r.id, '70');
+    assert.strictEqual(evaluatePacketAcl(acl, { sourceIp: '192.168.1.10' }).action, 'deny');
+
+    // Delete sequence 10
+    const delRes = deleteRouterAclRule(r.id, '70', 10);
+    assert.strictEqual(delRes.success, true);
+    assert.strictEqual(acl.rules.length, 1);
+
+    // Now matches rule 20 and is permitted
+    assert.strictEqual(evaluatePacketAcl(acl, { sourceIp: '192.168.1.10' }).action, 'permit');
+});
+
+// 277. Standard inbound ACL permit allows forwarding
+runTest('277. Standard inbound ACL permit allows forwarding', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.10', sequence: 10 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '10');
+
+    const result = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(result.success, true, 'Transmission must succeed when permitted by inbound ACL');
+    assert.strictEqual(result.icmpErrorPacket, null);
+});
+
+// 278. Standard inbound ACL explicit deny blocks forwarding
+runTest('278. Standard inbound ACL explicit deny blocks forwarding', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'deny', sourceIp: '192.168.1.10', sequence: 10 });
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: 'any', sequence: 20 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '10');
+
+    const result = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(result.success, false, 'Transmission must fail when denied by inbound ACL');
+    assert.strictEqual(result.action, 'DROP');
+});
+
+// 279. Standard inbound ACL deny generates ICMP Type 3 Code 13
+runTest('279. Standard inbound ACL deny generates ICMP Type 3 Code 13', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'deny', sourceIp: '192.168.1.10', sequence: 10 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '10');
+
+    const result = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.ok(result.icmpErrorPacket, 'Must generate ICMP error packet');
+    assert.strictEqual(result.icmpErrorPacket.icmp.type, 3, 'Must be ICMP Type 3');
+    assert.strictEqual(result.icmpErrorPacket.icmp.code, 13, 'Must be ICMP Code 13 (Admin Prohibited)');
+    assert.strictEqual(result.icmpErrorPacket.icmp.codeName, 'ADMINISTRATIVELY_PROHIBITED');
+    assert.strictEqual(result.icmpErrorPacket.sourceIp, '192.168.1.1');
+    assert.strictEqual(result.icmpErrorPacket.destinationIp, '192.168.1.10');
+});
+
+// 280. ACL denial records correct rule sequence and hit counter
+runTest('280. ACL denial records correct rule sequence and hit counter', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.99', sequence: 10 });
+    addRouterAclRule(r0.id, '10', { action: 'deny', sourceIp: '192.168.1.10', sequence: 20 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '10');
+
+    simulateSendFrame(pc0, pc1, { icmp: true });
+
+    const acl = getRouterAcl(r0.id, '10');
+    assert.strictEqual(acl.rules[0].hits, 0, 'Rule 10 should have 0 hits');
+    assert.strictEqual(acl.rules[1].hits, 1, 'Rule 20 should have 1 hit');
+});
+
+// 281. Implicit deny generates administrative prohibition
+runTest('281. Implicit deny generates administrative prohibition', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.55', sequence: 10 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '10');
+
+    // PC0 (192.168.1.10) does not match rule 10 -> hits implicit deny
+    const result = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(result.success, false);
+    assert.ok(result.icmpErrorPacket);
+    assert.strictEqual(result.icmpErrorPacket.icmp.code, 13);
+    assert.strictEqual(result.acl?.isImplicitDeny, true);
+});
+
+// 282. Outbound ACL permit allows forwarding
+runTest('282. Outbound ACL permit allows forwarding', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    createRouterAcl(r0.id, '100');
+    addRouterAclRule(r0.id, '100', { action: 'permit', destinationIp: '192.168.2.10', sequence: 10 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/1', 'out', '100');
+
+    const result = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.icmpErrorPacket, null);
+});
+
+// 283. Outbound ACL deny blocks forwarding
+runTest('283. Outbound ACL deny blocks forwarding', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    createRouterAcl(r0.id, '100');
+    addRouterAclRule(r0.id, '100', { action: 'deny', destinationIp: '192.168.2.10', sequence: 10 });
+    addRouterAclRule(r0.id, '100', { action: 'permit', destinationIp: 'any', sequence: 20 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/1', 'out', '100');
+
+    const result = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.action, 'DROP');
+});
+
+// 284. Outbound ACL deny generates Type 3 Code 13
+runTest('284. Outbound ACL deny generates Type 3 Code 13', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    createRouterAcl(r0.id, '100');
+    addRouterAclRule(r0.id, '100', { action: 'deny', destinationIp: '192.168.2.10', sequence: 10 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/1', 'out', '100');
+
+    const result = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.ok(result.icmpErrorPacket);
+    assert.strictEqual(result.icmpErrorPacket.icmp.type, 3);
+    assert.strictEqual(result.icmpErrorPacket.icmp.code, 13);
+    assert.strictEqual(result.acl?.direction, 'outbound');
+    assert.strictEqual(result.acl?.interface, 'Gig0/1');
+});
+
+// 285. Extended ACL matches source + destination + protocol
+runTest('285. Extended ACL matches source + destination + protocol', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    createRouterAcl(r0.id, '105');
+    // Deny only ICMP from 192.168.1.10 to 192.168.2.10
+    addRouterAclRule(r0.id, '105', {
+        action: 'deny',
+        protocol: 'icmp',
+        sourceIp: '192.168.1.10',
+        destinationIp: '192.168.2.10',
+        sequence: 10
+    });
+    addRouterAclRule(r0.id, '105', { action: 'permit', protocol: 'ip', sourceIp: 'any', destinationIp: 'any', sequence: 20 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '105');
+
+    const result = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.icmpErrorPacket?.icmp?.code, 13);
+    assert.strictEqual(result.acl?.sequence, 10);
+});
+
+// 286. ACL deny across a multi-router topology returns the ICMP error to the source
+runTest('286. ACL deny across a multi-router topology returns the ICMP error to the source', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 350, 100);
+    addDevice('pc', 500, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'PC1');
+
+    addStaticRoute(r0.id, { network: '192.168.2.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.2' });
+    addStaticRoute(r1.id, { network: '192.168.1.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.1' });
+
+    // Block on Router1 egress interface Gig0/1
+    createRouterAcl(r1.id, '110');
+    addRouterAclRule(r1.id, '110', { action: 'deny', destinationIp: '192.168.2.0', subnetMask: '255.255.255.0', sequence: 10 });
+    bindRouterInterfaceAcl(r1.id, 'Gig0/1', 'out', '110');
+
+    const result = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(result.success, false);
+    assert.ok(result.icmpErrorPacket);
+    assert.strictEqual(result.icmpErrorPacket.icmp.code, 13);
+    assert.strictEqual(result.icmpErrorPacket.icmp.router.name, 'Router1');
+    assert.strictEqual(result.icmpErrorResult?.success, true, 'Error return path back to PC0 must succeed');
+});
+
+// 287. ACL deny does not recursively generate another ICMP error
+runTest('287. ACL deny does not recursively generate another ICMP error', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r = networkState.devices[0];
+
+    // Build an ICMP error packet (Type 11)
+    const originalIcmpError = {
+        sourceIp: '10.0.0.1',
+        destinationIp: '192.168.1.10',
+        protocol: 'ICMP',
+        icmp: {
+            type: 11,
+            code: 0,
+            isError: true
+        }
+    };
+
+    // Attempt to create an ICMP error packet in response to an existing error packet
+    const nestedError = createIcmpErrorPacket(3, 13, originalIcmpError, r);
+    assert.strictEqual(nestedError, null, 'Must return null (RFC 792 anti-recursion rule)');
+});
+
+// 288. Router without ACL behaves identically to baseline
+runTest('288. Router without ACL behaves identically to baseline', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    const result = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.acl, null);
+});
+
+// 289. Inbound ACL is evaluated before route forwarding
+runTest('289. Inbound ACL is evaluated before route forwarding', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    // Interface Gig0/1 is DOWN
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].status = 'down';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    // Inbound ACL denies on Gig0/0
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'deny', sourceIp: '192.168.1.10', sequence: 10 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '10');
+
+    const result = simulateSendFrame(pc0, pc1, { icmp: true });
+    // Inbound ACL must drop BEFORE route lookup / egress interface check
+    assert.strictEqual(result.reason.includes('inbound ACL'), true);
+    assert.strictEqual(result.icmpErrorPacket?.icmp?.code, 13, 'Must drop due to ACL Code 13, not interface down Code 1');
+});
+
+// 290. Outbound ACL is evaluated after route selection
+runTest('290. Outbound ACL is evaluated after route selection', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    // Inbound ACL permits on Gig0/0
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: 'any', sequence: 10 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '10');
+
+    // Outbound ACL denies on Gig0/1
+    createRouterAcl(r0.id, '100');
+    addRouterAclRule(r0.id, '100', { action: 'deny', destinationIp: '192.168.2.10', sequence: 10 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/1', 'out', '100');
+
+    const result = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.acl?.direction, 'outbound');
+    assert.strictEqual(result.acl?.interface, 'Gig0/1');
+});
+
+// 291. ACL decisions appear in structured hop decisions
+runTest('291. ACL decisions appear in structured hop decisions', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'deny', sourceIp: '192.168.1.10', sequence: 15 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '10');
+
+    const result = simulateSendFrame(pc0, pc1, { icmp: true });
+    const dropHop = result.hopActions.find(h => h.action === 'DROP');
+    assert.ok(dropHop, 'Must have a DROP hopAction');
+    assert.strictEqual(dropHop.reason, 'acl-deny');
+    assert.strictEqual(dropHop.acl?.aclId, '10');
+    assert.strictEqual(dropHop.acl?.sequence, 15);
+    assert.strictEqual(dropHop.acl?.direction, 'inbound');
+});
+
+// 292. Simulation result exposes structured ACL denial information
+runTest('292. Simulation result exposes structured ACL denial information', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    createRouterAcl(r0.id, '20');
+    addRouterAclRule(r0.id, '20', { action: 'deny', sourceIp: '192.168.1.10', sequence: 25 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '20');
+
+    const result = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.ok(result.acl);
+    assert.strictEqual(result.acl.aclId, '20');
+    assert.strictEqual(result.acl.sequence, 25);
+    assert.strictEqual(result.acl.action, 'deny');
+    assert.strictEqual(result.acl.direction, 'inbound');
+    assert.strictEqual(result.acl.interface, 'Gig0/0');
+    assert.strictEqual(result.acl.sourceIp, '192.168.1.10');
+    assert.strictEqual(result.acl.destinationIp, '192.168.2.10');
+});
+
+// 293. Route-aware connection testing (analyzeCommunication) detects inbound/outbound ACL blocks
+runTest('293. Route-aware connection testing (analyzeCommunication) detects inbound/outbound ACL blocks', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    // Initially possible
+    assert.strictEqual(analyzeCommunication(pc0, pc1).possible, true);
+
+    // Apply inbound ACL denying PC0
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'deny', sourceIp: '192.168.1.10', sequence: 10 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '10');
+
+    const analysisBlockedIn = analyzeCommunication(pc0, pc1);
+    assert.strictEqual(analysisBlockedIn.possible, false);
+    assert.ok(analysisBlockedIn.reason.includes('inbound ACL 10 denies traffic'));
+
+    // Unbind inbound and bind outbound ACL denying to PC1
+    unbindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in');
+    createRouterAcl(r0.id, '100');
+    addRouterAclRule(r0.id, '100', { action: 'deny', destinationIp: '192.168.2.10', sequence: 10 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/1', 'out', '100');
+
+    const analysisBlockedOut = analyzeCommunication(pc0, pc1);
+    assert.strictEqual(analysisBlockedOut.possible, false);
+    assert.ok(analysisBlockedOut.reason.includes('outbound ACL 100 denies traffic'));
+});
+
+// 294. Router Inspector HTML renders ACCESS CONTROL LISTS (ACL) section for routers
+runTest('294. Router Inspector HTML renders ACCESS CONTROL LISTS (ACL) section for routers', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+
+    const html = renderRouterInspector(r0);
+    assert.ok(html.includes('ACCESS CONTROL LISTS (ACL)'), 'Must render ACL section header');
+    assert.ok(html.includes('Interface ACL Bindings'), 'Must render interface bindings table');
+    assert.ok(html.includes('Create New ACL'), 'Must render Create New ACL form');
+    assert.ok(html.includes('No Access Control Lists configured on this router'), 'Must render empty state initially');
+});
+
+// 295. Non-router device inspector does NOT render ACL section
+runTest('295. Non-router device inspector does NOT render ACL section', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 200, 100);
+    const pc0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+
+    networkState.selectedDeviceId = pc0.id;
+    renderPropertiesPanel();
+    const panel = document.getElementById('propertiesPanel');
+    assert.strictEqual(panel.innerHTML.includes('ACCESS CONTROL LISTS (ACL)'), false, 'PC inspector must not render ACL section');
+
+    const switchHtml = renderSwitchInspector(sw0);
+    assert.strictEqual(switchHtml.includes('ACCESS CONTROL LISTS (ACL)'), false, 'Switch inspector must not render ACL section');
+});
+
+// 296. Router Inspector HTML renders Standard and Extended ACL cards with rules and badges
+runTest('296. Router Inspector HTML renders Standard and Extended ACL cards with rules and badges', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.50', sequence: 10 });
+    addRouterAclRule(r0.id, '10', { action: 'deny', sourceIp: 'any', sequence: 20 });
+
+    createRouterAcl(r0.id, '100');
+    addRouterAclRule(r0.id, '100', {
+        action: 'permit',
+        protocol: 'icmp',
+        sourceIp: '192.168.1.0',
+        sourceMask: '255.255.255.0',
+        destinationIp: '10.0.0.0',
+        destinationMask: '255.0.0.0',
+        sequence: 15
+    });
+
+    const html = renderRouterInspector(r0);
+    assert.ok(html.includes('ACL 10'), 'Must render ACL 10');
+    assert.ok(html.includes('ACL 100'), 'Must render ACL 100');
+    assert.ok(html.includes('acl-type-badge--standard'), 'Must render Standard badge');
+    assert.ok(html.includes('acl-type-badge--extended'), 'Must render Extended badge');
+    assert.ok(html.includes('acl-badge--permit'), 'Must render PERMIT badge');
+    assert.ok(html.includes('acl-badge--deny'), 'Must render DENY badge');
+    assert.ok(html.includes('host 192.168.1.50'), 'Must render host source text');
+    assert.ok(html.includes('192.168.1.0 0.0.0.255'), 'Must render network source with wildcard');
+    assert.ok(html.includes('10.0.0.0 0.255.255.255'), 'Must render network destination with wildcard');
+});
+
+// 297. Router Inspector HTML renders active interface ACL bindings
+runTest('297. Router Inspector HTML renders active interface ACL bindings', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+
+    createRouterAcl(r0.id, '10');
+    createRouterAcl(r0.id, '100');
+
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '10');
+    bindRouterInterfaceAcl(r0.id, 'Gig0/1', 'out', '100');
+
+    const html = renderRouterInspector(r0);
+    assert.ok(html.includes('acl-binding-badge--active'), 'Must render active binding badges');
+    assert.ok(html.includes('>10<'), 'Must display bound ACL 10');
+    assert.ok(html.includes('>100<'), 'Must display bound ACL 100');
+});
+
+// 298. Router Inspector HTML updates hit counters after packet transmission
+runTest('298. Router Inspector HTML updates hit counters after packet transmission', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.10', sequence: 10 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '10');
+
+    // Transmit 2 frames
+    simulateSendFrame(pc0, pc1, { icmp: true });
+    simulateSendFrame(pc0, pc1, { icmp: true });
+
+    const html = renderRouterInspector(r0);
+    assert.ok(html.includes('<span class="acl-hits-badge">2</span>'), 'Must display 2 hits in inspector HTML');
+});
+
+// 299. Add Rule to ACL form renders when at least one ACL exists
+runTest('299. Add Rule to ACL form renders when at least one ACL exists', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+
+    // When 0 ACLs exist -> rule form is not shown
+    let html = renderRouterInspector(r0);
+    assert.strictEqual(html.includes('acl-rule-form'), false);
+
+    // When an ACL is created -> rule form appears
+    createRouterAcl(r0.id, '10');
+    html = renderRouterInspector(r0);
+    assert.ok(html.includes('acl-rule-form'));
+    assert.ok(html.includes('aclRuleTargetSelect'));
+    assert.ok(html.includes('aclRuleAction'));
+    assert.ok(html.includes('aclRuleSource'));
+});
+
+// 300. Delete ACL button removes ACL and updates rendered HTML
+runTest('300. Delete ACL button removes ACL and updates rendered HTML', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+
+    createRouterAcl(r0.id, '10');
+    let html = renderRouterInspector(r0);
+    assert.ok(html.includes('ACL 10'));
+
+    deleteRouterAcl(r0.id, '10');
+    html = renderRouterInspector(r0);
+    assert.strictEqual(html.includes('ACL 10'), false);
+    assert.ok(html.includes('No Access Control Lists configured'));
+});
+
+// 301. Delete Rule button removes rule and updates rendered HTML
+runTest('301. Delete Rule button removes rule and updates rendered HTML', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.10', sequence: 10 });
+    addRouterAclRule(r0.id, '10', { action: 'deny', sourceIp: 'any', sequence: 20 });
+
+    let html = renderRouterInspector(r0);
+    assert.ok(html.includes('Rule 10') || html.includes('>10<'));
+    assert.ok(html.includes('Rule 20') || html.includes('>20<'));
+
+    deleteRouterAclRule(r0.id, '10', 10);
+    html = renderRouterInspector(r0);
+    assert.strictEqual(getRouterAcl(r0.id, '10').rules.length, 1);
+});
+
+// 302. Router Inspector safely escapes dynamic ACL and rule names
+runTest('302. Router Inspector safely escapes dynamic ACL and rule names', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+
+    createRouterAcl(r0.id, '<script>alert(1)</script>');
+    const html = renderRouterInspector(r0);
+    assert.strictEqual(html.includes('<script>alert(1)</script>'), false);
+    assert.ok(html.includes('&lt;script&gt;alert(1)&lt;/script&gt;'));
+});
+
+// 303. Packet Inspector renders ACCESS CONTROL LIST (ACL) section when ACL drops packet
+runTest('303. Packet Inspector renders ACCESS CONTROL LIST (ACL) section when ACL drops packet', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'deny', sourceIp: '192.168.1.10', sequence: 10 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '10');
+
+    const result = simulateSendFrame(pc0, pc1, { icmp: true });
+    const inspectorHtml = renderPacketInspector(result.packet, result);
+
+    assert.ok(inspectorHtml.includes('packet-inspector__section--acl'), 'Must render ACL section');
+    assert.ok(inspectorHtml.includes('ACCESS CONTROL LIST (ACL)'), 'Must render ACL section header');
+    assert.ok(inspectorHtml.includes('ACL ID / Name'), 'Must render ACL ID label');
+    assert.ok(inspectorHtml.includes('DENY (inbound)'), 'Must render DENY (inbound)');
+    assert.ok(inspectorHtml.includes('Sequence 10'), 'Must render matched rule sequence');
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
