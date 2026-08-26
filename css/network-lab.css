@@ -298,6 +298,13 @@ body {
     animation: frameDrop 720ms ease-out forwards;
 }
 
+.frame-packet.is-icmp-error {
+    border-color: rgba(255, 183, 77, 0.95);
+    background: linear-gradient(135deg, #ffb74d, #ff7043);
+    box-shadow: 0 0 0 5px rgba(255, 112, 67, 0.18), 0 8px 18px rgba(255, 112, 67, 0.35);
+    color: #1a0800;
+}
+
 .frame-packet__icon {
     white-space: nowrap;
 }
@@ -1292,4 +1299,24 @@ body {
     color: #86efac;
     border: 1px solid rgba(134, 239, 172, 0.8);
     box-shadow: 0 0 16px rgba(134, 239, 172, 0.45), 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.frame-hop-badge--icmp-error {
+    background: rgba(48, 24, 10, 0.96);
+    color: #ffb74d;
+    border: 1px solid rgba(255, 183, 77, 0.7);
+    box-shadow: 0 0 14px rgba(255, 183, 77, 0.35), 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.packet-inspector__value--warning {
+    color: #ffb74d;
+    font-weight: 700;
+}
+
+.packet-inspector__section--icmp-error {
+    background: rgba(255, 183, 77, 0.06);
+    border: 1px solid rgba(255, 183, 77, 0.25);
+    border-radius: 8px;
+    padding: 0.65rem 0.75rem;
+    margin-top: 0.65rem;
 }

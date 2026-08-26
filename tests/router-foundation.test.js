@@ -8344,6 +8344,170 @@ runTest('238. Return-path across switches and routers preserves complete event t
     assert.ok(result.events.some(e => e.includes('PC0 received ICMP Time to Live Exceeded')));
 });
 
+// 239. Dynamic subheading generation for ICMP Type 3 (Destination Unreachable)
+runTest('239. Dynamic subheading generation for ICMP Type 3 (Destination Unreachable)', () => {
+    const hopActions = [{ deviceId: 'Router0', action: 'ROUTE' }];
+    const reverseHopActions = [{ deviceId: 'Router0', action: 'ROUTE' }];
+    const icmpErrorPacket = {
+        icmp: {
+            type: 3,
+            code: 0,
+            typeName: 'DESTINATION_UNREACHABLE'
+        }
+    };
+    const html = renderHopDecisionsSection(hopActions, reverseHopActions, icmpErrorPacket);
+    assert.ok(html.includes('Return Path') && html.includes('ICMP Destination Unreachable'), 'Must contain ICMP Destination Unreachable subheading');
+    assert.ok(!html.includes('ICMP Echo Reply'), 'Must NOT contain ICMP Echo Reply subheading');
+});
+
+// 240. Dynamic subheading generation for ICMP Type 11 (Time Exceeded)
+runTest('240. Dynamic subheading generation for ICMP Type 11 (Time Exceeded)', () => {
+    const hopActions = [{ deviceId: 'Router0', action: 'ROUTE' }];
+    const reverseHopActions = [{ deviceId: 'Router0', action: 'ROUTE' }];
+    const icmpErrorPacket = {
+        icmp: {
+            type: 11,
+            code: 0,
+            typeName: 'TIME_EXCEEDED'
+        }
+    };
+    const html = renderHopDecisionsSection(hopActions, reverseHopActions, icmpErrorPacket);
+    assert.ok(html.includes('Return Path') && html.includes('ICMP Time to Live Exceeded'), 'Must contain ICMP Time to Live Exceeded subheading');
+});
+
+// 241. Dynamic subheading generation for ICMP Type 0 (Echo Reply)
+runTest('241. Dynamic subheading generation for ICMP Type 0 (Echo Reply)', () => {
+    const hopActions = [{ deviceId: 'Router0', action: 'ROUTE' }];
+    const reverseHopActions = [{ deviceId: 'Router0', action: 'ROUTE' }];
+    const html = renderHopDecisionsSection(hopActions, reverseHopActions, null);
+    assert.ok(html.includes('Return Path') && html.includes('ICMP Echo Reply'), 'Must contain ICMP Echo Reply subheading when no error packet is present');
+});
+
+// 242. ICMP error badge configuration in getHopBadgeConfig
+runTest('242. ICMP error badge configuration in getHopBadgeConfig', () => {
+    const badgeConfig = getHopBadgeConfig(null, false, false, {
+        isIcmpError: true,
+        title: 'ICMP DESTINATION UNREACHABLE',
+        subtitle: 'Router1 -> PC0'
+    });
+    assert.strictEqual(badgeConfig.title, 'ICMP DESTINATION UNREACHABLE');
+    assert.strictEqual(badgeConfig.subtitle, 'Router1 -> PC0');
+    assert.strictEqual(badgeConfig.modifier, 'icmp-error');
+
+    const routeHopBadge = getHopBadgeConfig({
+        action: 'ROUTE',
+        ingressInterface: 'Gig0/1',
+        egressInterface: 'Gig0/0',
+        ttl: 63
+    }, false, false, { isIcmpError: true });
+    assert.strictEqual(routeHopBadge.title, 'ROUTE');
+    assert.strictEqual(routeHopBadge.modifier, 'icmp-error');
+});
+
+// 243. Packet Inspector renders ICMP Diagnostic Error section when icmpErrorPacket is attached
+runTest('243. Packet Inspector renders ICMP Diagnostic Error section when icmpErrorPacket is attached', () => {
+    const packet = {
+        sourceIp: '192.168.1.10',
+        destinationIp: '10.0.0.10',
+        ttl: 64,
+        protocol: 'ICMP',
+        icmp: { type: 'ECHO_REQUEST', code: 0, identifier: 1, sequence: 1 }
+    };
+    const result = {
+        packet,
+        path: ['PC0', 'Router0'],
+        icmpErrorPacket: {
+            sourceIp: '192.168.1.1',
+            destinationIp: '192.168.1.10',
+            icmp: {
+                type: 3,
+                code: 0,
+                typeName: 'DESTINATION_UNREACHABLE',
+                codeName: 'NET_UNREACHABLE',
+                description: 'Destination network is unreachable',
+                router: { id: 'Router0', name: 'Router0', ip: '192.168.1.1' },
+                originalPacket: { sourceIp: '192.168.1.10', destinationIp: '10.0.0.10', ttl: 64 }
+            }
+        }
+    };
+    const html = renderPacketInspector(packet, result);
+    assert.ok(html.includes('ICMP DIAGNOSTIC ERROR'), 'Must include ICMP DIAGNOSTIC ERROR section');
+    assert.ok(html.includes('Destination Unreachable (Type 3)'), 'Must include Destination Unreachable (Type 3)');
+    assert.ok(html.includes('NET UNREACHABLE'), 'Must include NET UNREACHABLE code');
+    assert.ok(html.includes('Router0 (192.168.1.1)'), 'Must include generating device info');
+});
+
+// 244. Packet Inspector does NOT render ICMP Diagnostic Error section on normal successful delivery
+runTest('244. Packet Inspector does NOT render ICMP Diagnostic Error section on normal successful delivery', () => {
+    const packet = {
+        sourceIp: '192.168.1.10',
+        destinationIp: '192.168.2.10',
+        ttl: 64,
+        protocol: 'ICMP',
+        icmp: { type: 'ECHO_REQUEST', code: 0, identifier: 1, sequence: 1 }
+    };
+    const result = {
+        packet,
+        path: ['PC0', 'Router0', 'Router1', 'PC1'],
+        icmpErrorPacket: null
+    };
+    const html = renderPacketInspector(packet, result);
+    assert.ok(!html.includes('ICMP DIAGNOSTIC ERROR'), 'Must NOT include ICMP DIAGNOSTIC ERROR section');
+    assert.ok(html.includes('ICMP Echo Request'), 'Must include normal ICMP Echo Request title');
+});
+
+// 245. getSendFramePanelHtml integrates dynamic subheading and ICMP Diagnostic Error section
+runTest('245. getSendFramePanelHtml integrates dynamic subheading and ICMP Diagnostic Error section', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    const pc = networkState.devices[0];
+    const r = networkState.devices[1];
+
+    networkState.lastFrameResult = {
+        success: false,
+        action: 'DROP',
+        path: ['PC0', 'Router0'],
+        hopActions: [{ deviceId: 'Router0', action: 'DROP', reason: 'no-route' }],
+        reverseHopActions: [{ deviceId: 'Router0', action: 'ROUTE', egressInterface: 'Gig0/0', ttl: 63 }],
+        events: ['Frame dropped'],
+        packet: { sourceIp: '192.168.1.10', destinationIp: '10.0.0.10', ttl: 64, icmp: { type: 'ECHO_REQUEST' } },
+        icmpErrorPacket: {
+            sourceIp: '192.168.1.1',
+            destinationIp: '192.168.1.10',
+            icmp: {
+                type: 3,
+                code: 0,
+                typeName: 'DESTINATION_UNREACHABLE',
+                codeName: 'NET_UNREACHABLE',
+                description: 'Destination network is unreachable',
+                router: { name: 'Router0', ip: '192.168.1.1' }
+            }
+        }
+    };
+    networkState.sendFrameState = {
+        phase: 'complete',
+        sourceId: pc.id,
+        targetId: r.id,
+        message: 'Frame failed'
+    };
+
+    const panelHtml = getSendFramePanelHtml();
+    assert.ok(panelHtml.includes('Return Path') && panelHtml.includes('ICMP Destination Unreachable'), 'Panel must render dynamic ICMP Destination Unreachable subheading');
+    assert.ok(panelHtml.includes('ICMP DIAGNOSTIC ERROR'), 'Panel must render ICMP DIAGNOSTIC ERROR section in packet inspector');
+});
+
+// 246. getHopBadgeConfig handles drop reason formatting accurately
+runTest('246. getHopBadgeConfig handles drop reason formatting accurately', () => {
+    const ttlBadge = getHopBadgeConfig({ action: 'DROP', reason: 'ttl-expired' });
+    assert.strictEqual(ttlBadge.title, 'DROP');
+    assert.strictEqual(ttlBadge.subtitle, 'TTL Expired');
+    assert.strictEqual(ttlBadge.modifier, 'drop');
+
+    const mismatchBadge = getHopBadgeConfig({ action: 'DROP', reason: 'port-mismatch' });
+    assert.strictEqual(mismatchBadge.subtitle, 'Port Mismatch');
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

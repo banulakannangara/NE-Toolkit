@@ -1226,6 +1226,13 @@ function getHopBadgeConfig(hopAction, isDrop = false, isDelivered = false, optio
     }
 
     if (!hopAction) {
+        if (options.isIcmpError) {
+            return {
+                title: options.title || 'ICMP ERROR',
+                subtitle: options.subtitle || '',
+                modifier: 'icmp-error'
+            };
+        }
         return null;
     }
 
@@ -1269,7 +1276,7 @@ function getHopBadgeConfig(hopAction, isDrop = false, isDelivered = false, optio
         return {
             title: 'ROUTE',
             subtitle,
-            modifier: 'route'
+            modifier: options.isIcmpError ? 'icmp-error' : 'route'
         };
     }
 
@@ -1290,7 +1297,7 @@ function getHopBadgeConfig(hopAction, isDrop = false, isDelivered = false, optio
     return {
         title: action || 'FRAME',
         subtitle: '',
-        modifier: 'forward'
+        modifier: options.isIcmpError ? 'icmp-error' : 'forward'
     };
 }
 
@@ -1323,6 +1330,8 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
     const reverseHopActions = options.reverseHopActions || networkState.lastFrameResult?.reverseHopActions || [];
     const arpResult = options.arpResult || networkState.lastFrameResult?.arpResult;
     const packetInfo = options.packet || networkState.lastFrameResult?.packet;
+    const icmpErrorPacket = options.icmpErrorPacket || networkState.lastFrameResult?.icmpErrorPacket;
+    const icmpErrorResult = options.icmpErrorResult || networkState.lastFrameResult?.icmpErrorResult;
     const isIcmp = Boolean(packetInfo?.icmp && reverseHopActions.length > 0);
 
     const animation = {
@@ -1334,6 +1343,8 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
         reverseHopActions,
         arpResult,
         isIcmp,
+        icmpErrorPacket,
+        icmpErrorResult,
         animationFrame: null,
         cleanupTimer: null,
         turnaroundTimer: null,
@@ -1354,7 +1365,7 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
         `;
     };
 
-    const finish = (delivered, reason = '', finalNodeId = null) => {
+    const finish = (delivered, reason = '', finalNodeId = null, finishOptions = {}) => {
         if (frameAnimation !== animation || animation.cancelled) {
             return;
         }
@@ -1371,12 +1382,24 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
             : path[path.length - 1]);
 
         packet.classList.remove('is-moving');
-        packet.classList.add(delivered ? 'is-delivered' : 'is-dropped');
+        if (delivered && !finishOptions.isIcmpError) {
+            packet.classList.add('is-delivered');
+        } else {
+            packet.classList.add('is-dropped');
+        }
         clearFrameDeviceHighlights();
 
-        if (delivered) {
+        if (delivered && !finishOptions.isIcmpError) {
             setFrameDeviceHighlight(endNodeId, 'is-frame-destination');
             setBadgeConfig(getHopBadgeConfig(null, false, true, { isIcmp }));
+        } else if (finishOptions.isErrorDelivered) {
+            setFrameDeviceHighlight(endNodeId, 'is-frame-destination');
+            const errType = formatIcmpType(animation.icmpErrorPacket?.icmp?.type || animation.icmpErrorPacket?.icmp?.typeName);
+            setBadgeConfig({
+                title: 'ICMP ERROR RECEIVED',
+                subtitle: `${endNodeId} received ${errType}`,
+                modifier: 'drop'
+            });
         } else {
             setFrameDeviceHighlight(endNodeId, 'is-frame-dropped');
             const dropHop = (animation.isReverse ? reverseHopActions : hopActions).find((h) => h.deviceId === endNodeId && h.action === 'DROP')
@@ -1392,12 +1415,12 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
             packet.remove();
             badge.remove();
             frameAnimation = null;
-            if (delivered) {
+            if (delivered && !finishOptions.isIcmpError) {
                 callbacks.onDelivered?.();
             } else {
                 callbacks.onDropped?.(reason || dropReason || 'Topology changed before the frame reached its destination.');
             }
-        }, delivered ? 500 : 720);
+        }, (delivered || finishOptions.isErrorDelivered) ? 600 : 720);
     };
 
     const animateReverseHop = (hopIndex) => {
@@ -1416,20 +1439,31 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
         }
 
         clearFrameDeviceHighlights();
-        setFrameDeviceHighlight(curPath[0], 'is-frame-source');
+        setFrameDeviceHighlight(curPath[0], animation.isIcmpError ? 'is-frame-dropped' : 'is-frame-source');
         if (hopIndex > 0) {
             setFrameDeviceHighlight(sourceId, 'is-frame-hop');
         }
-        setFrameDeviceHighlight(targetId, hopIndex === curPath.length - 2 ? (isDelivered ? 'is-frame-destination' : 'is-frame-dropped') : 'is-frame-hop');
+        setFrameDeviceHighlight(targetId, hopIndex === curPath.length - 2 ? (isDelivered || animation.isIcmpError ? 'is-frame-destination' : 'is-frame-dropped') : 'is-frame-hop');
 
         if (hopIndex > 0) {
             const hopAction = reverseHopActions.find((h) => h.deviceId === sourceId);
-            setBadgeConfig(getHopBadgeConfig(hopAction, false, false));
-        } else {
-            setBadgeConfig(getHopBadgeConfig(null, false, false, {
-                isIcmpReply: true,
-                subtitle: `${sourceId} → ${curPath[curPath.length - 1]}`
+            setBadgeConfig(getHopBadgeConfig(hopAction, false, false, {
+                isIcmpError: animation.isIcmpError
             }));
+        } else {
+            if (animation.isIcmpError) {
+                const errType = formatIcmpType(animation.icmpErrorPacket?.icmp?.type || animation.icmpErrorPacket?.icmp?.typeName);
+                setBadgeConfig({
+                    title: `ICMP ${errType.toUpperCase()}`,
+                    subtitle: `${sourceId} → ${curPath[curPath.length - 1]}`,
+                    modifier: 'icmp-error'
+                });
+            } else {
+                setBadgeConfig(getHopBadgeConfig(null, false, false, {
+                    isIcmpReply: true,
+                    subtitle: `${sourceId} → ${curPath[curPath.length - 1]}`
+                }));
+            }
         }
 
         const distance = Math.hypot(initialTarget.x - initialSource.x, initialTarget.y - initialSource.y);
@@ -1465,7 +1499,13 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
             if (hopIndex < curPath.length - 2) {
                 animateReverseHop(hopIndex + 1);
             } else {
-                finish(isDelivered, dropReason, curPath[curPath.length - 1]);
+                const returnSucceeded = animation.isIcmpError
+                    ? Boolean(networkState.lastFrameResult?.icmpErrorResult?.success)
+                    : isDelivered;
+                finish(returnSucceeded, dropReason, curPath[curPath.length - 1], {
+                    isIcmpError: animation.isIcmpError,
+                    isErrorDelivered: Boolean(animation.isIcmpError && returnSucceeded)
+                });
             }
         };
 
@@ -1559,6 +1599,37 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
                     || (isDelivered && !isIcmp);
 
                 if (!forwardSucceeded) {
+                    const icmpErrorResult = networkState.lastFrameResult?.icmpErrorResult;
+                    const icmpErrorPacket = networkState.lastFrameResult?.icmpErrorPacket;
+                    const hasErrorReturnPath = Boolean(icmpErrorResult && Array.isArray(icmpErrorResult.path) && icmpErrorResult.path.length >= 2);
+
+                    if (hasErrorReturnPath) {
+                        // ICMP Error Turnaround at the dropping router
+                        const dropNodeId = curPath[curPath.length - 1];
+                        setFrameDeviceHighlight(dropNodeId, 'is-frame-dropped');
+                        packet.classList.remove('is-moving');
+                        packet.classList.add('is-icmp-error');
+
+                        const errType = formatIcmpType(icmpErrorPacket?.icmp?.type || icmpErrorPacket?.icmp?.typeName);
+                        setBadgeConfig({
+                            title: 'ICMP ERROR',
+                            subtitle: `${dropReason || 'Dropped'} • Sending ${errType}`,
+                            modifier: 'drop'
+                        });
+
+                        animation.turnaroundTimer = window.setTimeout(() => {
+                            if (frameAnimation !== animation || animation.cancelled) {
+                                return;
+                            }
+                            animation.isReverse = true;
+                            animation.isIcmpError = true;
+                            animation.reversePath = [...icmpErrorResult.path];
+                            packet.innerHTML = '<span class="frame-packet__icon">ICMP ERR</span>';
+                            animateReverseHop(0);
+                        }, 500);
+                        return;
+                    }
+
                     finish(false, dropReason, curPath[curPath.length - 1]);
                     return;
                 }
@@ -2164,7 +2235,7 @@ function renderHopDecisionCard(hop) {
     `;
 }
 
-function renderHopDecisionsSection(hopActions, reverseHopActions) {
+function renderHopDecisionsSection(hopActions, reverseHopActions, icmpErrorPacket) {
     if (!Array.isArray(hopActions) || hopActions.length === 0) {
         return '';
     }
@@ -2173,9 +2244,14 @@ function renderHopDecisionsSection(hopActions, reverseHopActions) {
     let reverseHtml = '';
 
     if (Array.isArray(reverseHopActions) && reverseHopActions.length > 0) {
+        let returnTitle = 'Return Path — ICMP Echo Reply';
+        if (icmpErrorPacket && icmpErrorPacket.icmp) {
+            const typeStr = formatIcmpType(icmpErrorPacket.icmp.type || icmpErrorPacket.icmp.typeName);
+            returnTitle = `Return Path — ICMP ${typeStr}`;
+        }
         const reverseCards = reverseHopActions.map((hop) => renderHopDecisionCard(hop)).join('');
         reverseHtml = `
-            <div class="hop-decisions-subheading">Return Path — ICMP Echo Reply</div>
+            <div class="hop-decisions-subheading">${escapeHtml(returnTitle)}</div>
             <div class="hop-decision-list">
                 ${reverseCards}
             </div>
@@ -2483,6 +2559,50 @@ function renderPacketInspector(packet, result) {
         `;
     }
 
+    let icmpErrorHtml = '';
+    const errPkt = result?.icmpErrorPacket;
+    if (errPkt && errPkt.icmp) {
+        const errType = formatIcmpType(errPkt.icmp.type || errPkt.icmp.typeName);
+        const errCode = typeof errPkt.icmp.code === 'number' ? String(errPkt.icmp.code) : '0';
+        const errCodeName = errPkt.icmp.codeName ? ` (${errPkt.icmp.codeName.replace(/_/g, ' ')})` : '';
+        const generatorName = errPkt.icmp.router?.name || errPkt.icmp.router?.id || 'Router';
+        const generatorIp = errPkt.sourceIp || errPkt.icmp.router?.ip || 'N/A';
+        const origDest = errPkt.icmp.originalPacket?.destinationIp || pkt.destinationIp || 'N/A';
+        const origSrc = errPkt.icmp.originalPacket?.sourceIp || pkt.sourceIp || 'N/A';
+
+        icmpErrorHtml = `
+            <div class="packet-inspector__section packet-inspector__section--icmp-error">
+                <h5 class="packet-inspector__section-title">ICMP DIAGNOSTIC ERROR</h5>
+                <div class="packet-inspector__grid">
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Error Type</span>
+                        <strong class="packet-inspector__value packet-inspector__value--warning">${escapeHtml(errType)} (Type ${escapeHtml(String(errPkt.icmp.type))})</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Code</span>
+                        <strong class="packet-inspector__value">${escapeHtml(errCode)}${escapeHtml(errCodeName)}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Generating Device</span>
+                        <strong class="packet-inspector__value">${escapeHtml(generatorName)} (${escapeHtml(generatorIp)})</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Target (Original Sender)</span>
+                        <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(errPkt.destinationIp || origSrc)}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Original Destination</span>
+                        <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(origDest)}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Description</span>
+                        <strong class="packet-inspector__value">${escapeHtml(errPkt.icmp.description || errPkt.icmp.reason || 'Diagnostic Error')}</strong>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
     return `
         <div class="packet-inspector">
             <h4>PACKET INSPECTOR</h4>
@@ -2494,6 +2614,7 @@ function renderPacketInspector(packet, result) {
             ${ethernetHtml}
             ${ipv4Html}
             ${icmpHtml}
+            ${icmpErrorHtml}
         </div>
     `;
 }
@@ -2517,7 +2638,8 @@ function getSendFramePanelHtml() {
     );
     const hopDecisionsHtml = renderHopDecisionsSection(
         networkState.lastFrameResult?.hopActions,
-        networkState.lastFrameResult?.reverseHopActions
+        networkState.lastFrameResult?.reverseHopActions,
+        networkState.lastFrameResult?.icmpErrorPacket
     );
 
     return cleanDisplayText(`
