@@ -2198,6 +2198,8 @@ function formatIcmpType(type) {
     const str = String(type).toUpperCase();
     if (str === 'ECHO_REQUEST' || str === '8') return 'Echo Request';
     if (str === 'ECHO_REPLY' || str === '0') return 'Echo Reply';
+    if (str === 'TIME_EXCEEDED' || str === '11') return 'Time to Live Exceeded';
+    if (str === 'DESTINATION_UNREACHABLE' || str === '3') return 'Destination Unreachable';
     return type;
 }
 
@@ -4639,6 +4641,151 @@ function validateSendFrameEndpoints(sourceDevice, destinationDevice) {
     return { valid: true, path };
 }
 
+const ICMP_ERROR_DEFINITIONS = {
+    TIME_EXCEEDED: {
+        type: 11,
+        typeName: 'TIME_EXCEEDED',
+        codes: {
+            0: {
+                code: 0,
+                codeName: 'TTL_EXPIRED_IN_TRANSIT',
+                description: 'Time to Live (TTL) expired in transit'
+            }
+        }
+    },
+    DESTINATION_UNREACHABLE: {
+        type: 3,
+        typeName: 'DESTINATION_UNREACHABLE',
+        codes: {
+            0: {
+                code: 0,
+                codeName: 'NET_UNREACHABLE',
+                description: 'Destination network unreachable'
+            },
+            1: {
+                code: 1,
+                codeName: 'HOST_UNREACHABLE',
+                description: 'Destination host unreachable'
+            }
+        }
+    }
+};
+
+function isIcmpPacket(packet) {
+    if (!packet || typeof packet !== 'object') {
+        return false;
+    }
+    return packet.protocol === 'ICMP' || Boolean(packet.icmp);
+}
+
+function isIcmpErrorPacket(packet) {
+    if (!packet || typeof packet !== 'object' || !packet.icmp) {
+        return false;
+    }
+    if (packet.icmp.isError === true) {
+        return true;
+    }
+    const type = packet.icmp.type;
+    const typeStr = String(type).toUpperCase();
+    return type === 3 || type === 11 || typeStr === 'DESTINATION_UNREACHABLE' || typeStr === 'TIME_EXCEEDED';
+}
+
+function isIcmpEchoPacket(packet) {
+    if (!packet || typeof packet !== 'object' || !packet.icmp) {
+        return false;
+    }
+    const type = packet.icmp.type;
+    const typeStr = String(type).toUpperCase();
+    return type === 0 || type === 8 || typeStr === 'ECHO_REQUEST' || typeStr === 'ECHO_REPLY';
+}
+
+function createIcmpErrorPacket(errorType, errorCode, originalPacket, generatingDevice = null, options = {}) {
+    if (!originalPacket || typeof originalPacket !== 'object') {
+        return null;
+    }
+
+    // RFC 792 Rule: Never generate an ICMP error in response to an ICMP error packet
+    if (isIcmpErrorPacket(originalPacket)) {
+        return null;
+    }
+
+    const typeKey = (typeof errorType === 'number' && errorType === 11) || String(errorType).toUpperCase() === 'TIME_EXCEEDED'
+        ? 'TIME_EXCEEDED'
+        : (typeof errorType === 'number' && errorType === 3) || String(errorType).toUpperCase() === 'DESTINATION_UNREACHABLE'
+            ? 'DESTINATION_UNREACHABLE'
+            : null;
+
+    if (!typeKey || !ICMP_ERROR_DEFINITIONS[typeKey]) {
+        return null;
+    }
+
+    const typeDef = ICMP_ERROR_DEFINITIONS[typeKey];
+    const codeNum = typeof errorCode === 'number' ? errorCode : (parseInt(errorCode, 10) || 0);
+    const codeDef = typeDef.codes[codeNum] || {
+        code: codeNum,
+        codeName: 'UNKNOWN',
+        description: 'ICMP Error'
+    };
+
+    let routerIp = options.routerIp || null;
+    if (!routerIp && generatingDevice) {
+        if (options.ingressInterface && generatingDevice.interfaces?.[options.ingressInterface]?.ip) {
+            routerIp = generatingDevice.interfaces[options.ingressInterface].ip;
+        } else if (generatingDevice.interfaces) {
+            for (const iface of Object.values(generatingDevice.interfaces)) {
+                if (iface?.status === 'up' && iface.ip) {
+                    routerIp = iface.ip;
+                    break;
+                }
+            }
+        } else if (generatingDevice.ip) {
+            routerIp = generatingDevice.ip;
+        }
+    }
+
+    const routerInfo = generatingDevice ? {
+        id: generatingDevice.id,
+        name: generatingDevice.name,
+        ip: routerIp,
+        ingressInterface: options.ingressInterface || null,
+        egressInterface: options.egressInterface || null
+    } : (options.router || null);
+
+    const origSnapshot = {
+        sourceIp: originalPacket.sourceIp || null,
+        destinationIp: originalPacket.destinationIp || null,
+        protocol: originalPacket.protocol || (originalPacket.icmp ? 'ICMP' : 'IPv4'),
+        ttl: typeof originalPacket.ttl === 'number' ? originalPacket.ttl : null
+    };
+
+    if (originalPacket.icmp) {
+        origSnapshot.icmp = {
+            type: originalPacket.icmp.type,
+            code: typeof originalPacket.icmp.code === 'number' ? originalPacket.icmp.code : 0,
+            identifier: originalPacket.icmp.identifier,
+            sequence: originalPacket.icmp.sequence
+        };
+    }
+
+    return {
+        sourceIp: routerIp,
+        destinationIp: originalPacket.sourceIp || null,
+        protocol: 'ICMP',
+        ttl: typeof options.ttl === 'number' ? options.ttl : 64,
+        icmp: {
+            type: typeDef.type,
+            code: codeDef.code,
+            typeName: typeDef.typeName,
+            codeName: codeDef.codeName,
+            description: codeDef.description,
+            isError: true,
+            reason: options.reason || codeDef.codeName.toLowerCase().replace(/_/g, '-'),
+            router: routerInfo,
+            originalPacket: origSnapshot
+        }
+    };
+}
+
 function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath) {
     const traversedPath = [topologyPath[0]];
     const hopActions = [];
@@ -4793,6 +4940,11 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     ? `Router ${toDevice.name} egress interface is down for destination ${frame.packet.destinationIp}.`
                     : `No route to destination ${frame.packet.destinationIp} at router ${toDevice.name}.`;
 
+                const icmpError = createIcmpErrorPacket(3, isInterfaceDown ? 1 : 0, frame.packet, toDevice, {
+                    ingressInterface: ingressPort,
+                    reason: dropReason
+                });
+
                 frame.events.push(logMsg);
                 hopActions.push({
                     deviceId: toDevice.id,
@@ -4801,14 +4953,16 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     action: 'DROP',
                     reason: dropReason,
                     ingressInterface: ingressPort,
-                    destinationIp: frame.packet.destinationIp
+                    destinationIp: frame.packet.destinationIp,
+                    icmpErrorPacket: icmpError || null
                 });
                 return {
                     success: false,
                     reason: returnReason,
                     path: traversedPath,
                     action: 'DROP',
-                    hopActions
+                    hopActions,
+                    icmpErrorPacket: icmpError || null
                 };
             }
 
@@ -4838,6 +4992,12 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
             }
 
             if (egressIface.status === 'down') {
+                const icmpError = createIcmpErrorPacket(3, 1, frame.packet, toDevice, {
+                    ingressInterface: ingressPort,
+                    egressInterface: egressPort,
+                    reason: 'interface-down'
+                });
+
                 frame.events.push(`Router ${toDevice.name} egress interface ${egressPort} is down`);
                 hopActions.push({
                     deviceId: toDevice.id,
@@ -4846,14 +5006,16 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     action: 'DROP',
                     reason: 'interface-down',
                     ingressInterface: ingressPort,
-                    egressInterface: egressPort
+                    egressInterface: egressPort,
+                    icmpErrorPacket: icmpError || null
                 });
                 return {
                     success: false,
                     reason: `Router ${toDevice.name} egress interface ${egressPort} is down.`,
                     path: traversedPath,
                     action: 'DROP',
-                    hopActions
+                    hopActions,
+                    icmpErrorPacket: icmpError || null
                 };
             }
 
@@ -4861,6 +5023,12 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
             frame.events.push(`Router ${toDevice.name} decremented IP TTL to ${frame.packet.ttl}`);
 
             if (frame.packet.ttl <= 0) {
+                const icmpError = createIcmpErrorPacket(11, 0, frame.packet, toDevice, {
+                    ingressInterface: ingressPort,
+                    egressInterface: egressPort,
+                    reason: 'ttl-expired'
+                });
+
                 frame.events.push(`Router ${toDevice.name} dropped packet: Time to Live (TTL) expired in transit`);
                 hopActions.push({
                     deviceId: toDevice.id,
@@ -4870,14 +5038,16 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     reason: 'ttl-expired',
                     ingressInterface: ingressPort,
                     egressInterface: egressPort,
-                    ttl: 0
+                    ttl: 0,
+                    icmpErrorPacket: icmpError || null
                 });
                 return {
                     success: false,
                     reason: `Time to Live (TTL) expired at router ${toDevice.name}.`,
                     path: traversedPath,
                     action: 'DROP',
-                    hopActions
+                    hopActions,
+                    icmpErrorPacket: icmpError || null
                 };
             }
 
@@ -4908,13 +5078,20 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
             });
 
             if (!routerArpResult.success) {
+                const icmpError = createIcmpErrorPacket(3, 1, frame.packet, toDevice, {
+                    ingressInterface: ingressPort,
+                    egressInterface: egressPort,
+                    reason: 'host-unreachable'
+                });
+
                 frame.events.push(...routerArpResult.events);
                 return {
                     success: false,
                     reason: routerArpResult.reason,
                     path: traversedPath,
                     action: 'DROP',
-                    hopActions
+                    hopActions,
+                    icmpErrorPacket: icmpError || null
                 };
             }
 
@@ -5245,6 +5422,197 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
     };
 }
 
+function routeIcmpErrorReturnPath(icmpErrorPacket, generatorDevice, targetDevice, forwardPath, options = {}) {
+    if (!icmpErrorPacket || !generatorDevice || !targetDevice) {
+        return null;
+    }
+
+    // Safety check: Never route an ICMP error for an invalid/non-error packet
+    if (!isIcmpErrorPacket(icmpErrorPacket)) {
+        return null;
+    }
+
+    const returnDestIp = icmpErrorPacket.destinationIp || targetDevice.ip;
+    if (!returnDestIp || !isValidIPv4(returnDestIp)) {
+        return {
+            success: false,
+            reason: `Invalid destination IP ${returnDestIp} for ICMP error return path.`,
+            path: [generatorDevice.id],
+            action: 'DROP',
+            hopActions: []
+        };
+    }
+
+    // Determine reverse topology path from generator back to target
+    let returnPath = null;
+    if (Array.isArray(forwardPath) && forwardPath.length >= 2) {
+        returnPath = [...forwardPath].reverse();
+    } else {
+        returnPath = findTopologyPath(generatorDevice.id, targetDevice.id);
+    }
+
+    if (!returnPath || returnPath.length < 2) {
+        return {
+            success: false,
+            reason: `No physical topology path from ${generatorDevice.name} to ${targetDevice.name}.`,
+            path: [generatorDevice.id],
+            action: 'DROP',
+            hopActions: []
+        };
+    }
+
+    // 1. Router route lookup toward original source IP
+    const routeResult = lookupRoute(generatorDevice.id, returnDestIp);
+    if (!routeResult.success) {
+        const dropReason = routeResult.reason === 'INTERFACE_DOWN' ? 'interface-down' : 'no-route';
+        const logMsg = `Router ${generatorDevice.name} could not route ICMP error: ${routeResult.reason} for destination ${returnDestIp}`;
+        const events = options.events ? [...options.events, logMsg] : [logMsg];
+        return {
+            success: false,
+            reason: `No return route to ${returnDestIp} at router ${generatorDevice.name}.`,
+            path: [generatorDevice.id],
+            action: 'DROP',
+            hopActions: [{
+                deviceId: generatorDevice.id,
+                deviceName: generatorDevice.name,
+                type: 'router',
+                action: 'DROP',
+                reason: dropReason,
+                destinationIp: returnDestIp
+            }],
+            events
+        };
+    }
+
+    const selectedRoute = routeResult.route;
+    const nextHopInfo = resolveRouteNextHop(generatorDevice.id, selectedRoute, returnDestIp);
+    const egressPort = nextHopInfo.egressInterface;
+    const egressIface = egressPort ? generatorDevice.interfaces?.[egressPort] : null;
+
+    if (!egressPort || !egressIface || egressIface.status === 'down') {
+        const logMsg = `Router ${generatorDevice.name} could not route ICMP error: egress interface ${egressPort || 'unknown'} is down or unconfigured`;
+        const events = options.events ? [...options.events, logMsg] : [logMsg];
+        return {
+            success: false,
+            reason: `Egress interface ${egressPort || 'unknown'} is down on error return path.`,
+            path: [generatorDevice.id],
+            action: 'DROP',
+            hopActions: [{
+                deviceId: generatorDevice.id,
+                deviceName: generatorDevice.name,
+                type: 'router',
+                action: 'DROP',
+                reason: 'interface-down',
+                ingressInterface: null,
+                egressInterface: egressPort,
+                destinationIp: returnDestIp
+            }],
+            events
+        };
+    }
+
+    // 2. Next-hop ARP resolution on egress interface
+    let arpTargetIp = nextHopInfo.nextHopIp;
+    const nextHopId = returnPath[1];
+    if (nextHopId && nextHopInfo.isDirect) {
+        const nextDevice = getDeviceById(nextHopId);
+        if (nextDevice?.type === 'router' && nextDevice.interfaces) {
+            for (const [, nIface] of Object.entries(nextDevice.interfaces)) {
+                const nMask = normalizeSubnetMask(nIface.subnetMask);
+                const egMask = normalizeSubnetMask(egressIface.subnetMask);
+                if (nMask && egMask && isSameSubnet(egressIface.ip, nIface.ip, egMask)) {
+                    arpTargetIp = nIface.ip;
+                    break;
+                }
+            }
+        }
+    }
+
+    const arpResult = simulateArpResolution(generatorDevice, arpTargetIp, returnPath, {
+        egressInterface: egressPort
+    });
+
+    if (!arpResult.success) {
+        const events = options.events ? [...options.events, ...arpResult.events] : [...arpResult.events];
+        return {
+            success: false,
+            reason: arpResult.reason,
+            path: [generatorDevice.id],
+            action: 'DROP',
+            hopActions: [],
+            events
+        };
+    }
+
+    const errorTypeName = formatIcmpType(icmpErrorPacket.icmp?.type || icmpErrorPacket.icmp?.typeName);
+    const initialEvents = options.events ? [...options.events] : [];
+    if (arpResult.events?.length) {
+        initialEvents.push(...arpResult.events);
+    }
+    initialEvents.push(`Router ${generatorDevice.name} sent ICMP ${errorTypeName} to ${targetDevice.name} (${returnDestIp})`);
+
+    const initialDestMac = arpResult.targetMac;
+    const errorFrame = {
+        sourceDeviceId: generatorDevice.id,
+        destinationDeviceId: targetDevice.id,
+        sourceMac: egressIface.mac,
+        destinationMac: initialDestMac,
+        etherType: 'IPv4',
+        packet: icmpErrorPacket,
+        path: returnPath,
+        events: initialEvents,
+        agingTimeSeconds: options.agingTimeSeconds,
+        now: options.now
+    };
+
+    const generatorHopAction = {
+        deviceId: generatorDevice.id,
+        deviceName: generatorDevice.name,
+        type: 'router',
+        action: 'ROUTE',
+        ingressInterface: null,
+        egressInterface: egressPort,
+        ttl: icmpErrorPacket.ttl,
+        sourceMac: egressIface.mac,
+        destinationMac: initialDestMac,
+        route: selectedRoute
+    };
+
+    // If directly connected to target (path length === 2 e.g. Router0 -> PC0)
+    if (returnPath.length === 2) {
+        errorFrame.events.push(`${targetDevice.name} received ICMP ${errorTypeName}`);
+        return {
+            success: true,
+            reason: '',
+            path: returnPath,
+            action: 'FORWARD',
+            hopActions: [generatorHopAction],
+            events: errorFrame.events,
+            packet: icmpErrorPacket,
+            arpResult
+        };
+    }
+
+    // Forward through remaining path (e.g. Router1 -> Router0 -> PC0 or Router0 -> Switch0 -> PC0)
+    const forwardResult = simulatePathTransmission(errorFrame, generatorDevice, targetDevice, returnPath);
+    const returnHopActions = [generatorHopAction, ...(forwardResult.hopActions || [])];
+
+    if (forwardResult.success) {
+        errorFrame.events.push(`${targetDevice.name} received ICMP ${errorTypeName}`);
+    }
+
+    return {
+        success: forwardResult.success,
+        reason: forwardResult.reason,
+        path: forwardResult.path,
+        action: forwardResult.action,
+        hopActions: returnHopActions,
+        events: errorFrame.events,
+        packet: errorFrame.packet,
+        arpResult
+    };
+}
+
 function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
     const topologyPath = findTopologyPath(sourceDevice.id, destinationDevice.id);
 
@@ -5345,15 +5713,50 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
     const forwardResult = simulatePathTransmission(frame, sourceDevice, destinationDevice, topologyPath);
 
     if (!forwardResult.success) {
+        let icmpErrorResult = null;
+        let returnHopActions = [];
+        let allEvents = [...frame.events];
+
+        if (forwardResult.icmpErrorPacket && forwardResult.path && forwardResult.path.length >= 1) {
+            const generatorId = forwardResult.path[forwardResult.path.length - 1];
+            const generatorDevice = getDeviceById(generatorId);
+
+            if (generatorDevice && generatorDevice.type === 'router' && sourceDevice) {
+                icmpErrorResult = routeIcmpErrorReturnPath(
+                    forwardResult.icmpErrorPacket,
+                    generatorDevice,
+                    sourceDevice,
+                    forwardResult.path,
+                    {
+                        events: allEvents,
+                        agingTimeSeconds: options?.agingTimeSeconds,
+                        now: options?.now
+                    }
+                );
+
+                if (icmpErrorResult) {
+                    if (icmpErrorResult.events) {
+                        allEvents = icmpErrorResult.events;
+                    }
+                    if (Array.isArray(icmpErrorResult.hopActions)) {
+                        returnHopActions = icmpErrorResult.hopActions;
+                    }
+                }
+            }
+        }
+
         return {
             success: false,
             reason: forwardResult.reason,
             path: forwardResult.path,
             action: forwardResult.action,
             hopActions: forwardResult.hopActions,
-            events: frame.events,
+            reverseHopActions: returnHopActions,
+            events: allEvents,
             packet: frame.packet,
-            arpResult
+            arpResult,
+            icmpErrorPacket: forwardResult.icmpErrorPacket || null,
+            icmpErrorResult
         };
     }
 
@@ -5367,7 +5770,8 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             hopActions: forwardResult.hopActions,
             events: frame.events,
             packet: frame.packet,
-            arpResult
+            arpResult,
+            icmpErrorPacket: null
         };
     }
 
@@ -5445,7 +5849,8 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
         reverseHopActions: reverseResult.hopActions,
         events: replyFrame.events,
         packet: replyFrame.packet,
-        arpResult
+        arpResult,
+        icmpErrorPacket: null
     };
 }
 

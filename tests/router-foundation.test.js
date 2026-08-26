@@ -7356,6 +7356,994 @@ runTest('215. Static route form input for Administrative Distance creates floati
     assert.ok(formHtml.includes('placeholder="1 (Default)"'), 'Must have placeholder indicating default 1');
 });
 
+// 216. ICMP Type 11 Code 0 construction (Time Exceeded - TTL expired in transit)
+runTest('216. ICMP Type 11 Code 0 construction (Time Exceeded - TTL expired in transit)', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const originalPacket = {
+        sourceIp: '192.168.1.10',
+        destinationIp: '10.0.0.5',
+        protocol: 'ICMP',
+        ttl: 0,
+        icmp: {
+            type: 'ECHO_REQUEST',
+            code: 0,
+            identifier: 101,
+            sequence: 1
+        }
+    };
+
+    const errPacket = createIcmpErrorPacket(11, 0, originalPacket, router, {
+        ingressInterface: 'Gig0/0',
+        egressInterface: 'Gig0/1',
+        reason: 'ttl-expired'
+    });
+
+    assert.ok(errPacket, 'ICMP Error packet must be constructed');
+    assert.strictEqual(errPacket.protocol, 'ICMP');
+    assert.strictEqual(errPacket.sourceIp, '192.168.1.1', 'Source IP must be the generating router IP');
+    assert.strictEqual(errPacket.destinationIp, '192.168.1.10', 'Destination IP must be the original sender IP');
+    assert.strictEqual(errPacket.icmp.type, 11);
+    assert.strictEqual(errPacket.icmp.code, 0);
+    assert.strictEqual(errPacket.icmp.typeName, 'TIME_EXCEEDED');
+    assert.strictEqual(errPacket.icmp.codeName, 'TTL_EXPIRED_IN_TRANSIT');
+    assert.strictEqual(errPacket.icmp.description, 'Time to Live (TTL) expired in transit');
+    assert.strictEqual(errPacket.icmp.isError, true);
+    assert.strictEqual(errPacket.icmp.reason, 'ttl-expired');
+});
+
+// 217. ICMP Type 3 Code 0 construction (Destination Network Unreachable)
+runTest('217. ICMP Type 3 Code 0 construction (Destination Network Unreachable)', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const originalPacket = {
+        sourceIp: '192.168.1.50',
+        destinationIp: '172.30.1.1',
+        protocol: 'IPv4',
+        ttl: 64
+    };
+
+    const errPacket = createIcmpErrorPacket(3, 0, originalPacket, router, {
+        ingressInterface: 'Gig0/0',
+        reason: 'no-route'
+    });
+
+    assert.ok(errPacket, 'ICMP Error packet must be constructed');
+    assert.strictEqual(errPacket.icmp.type, 3);
+    assert.strictEqual(errPacket.icmp.code, 0);
+    assert.strictEqual(errPacket.icmp.typeName, 'DESTINATION_UNREACHABLE');
+    assert.strictEqual(errPacket.icmp.codeName, 'NET_UNREACHABLE');
+    assert.strictEqual(errPacket.icmp.description, 'Destination network unreachable');
+    assert.strictEqual(errPacket.icmp.isError, true);
+    assert.strictEqual(errPacket.icmp.reason, 'no-route');
+});
+
+// 218. ICMP Type 3 Code 1 construction (Destination Host Unreachable)
+runTest('218. ICMP Type 3 Code 1 construction (Destination Host Unreachable)', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const originalPacket = {
+        sourceIp: '192.168.1.50',
+        destinationIp: '10.0.0.100',
+        protocol: 'ICMP',
+        ttl: 63
+    };
+
+    const errPacket = createIcmpErrorPacket(3, 1, originalPacket, router, {
+        ingressInterface: 'Gig0/0',
+        egressInterface: 'Gig0/1',
+        reason: 'host-unreachable'
+    });
+
+    assert.ok(errPacket, 'ICMP Error packet must be constructed');
+    assert.strictEqual(errPacket.icmp.type, 3);
+    assert.strictEqual(errPacket.icmp.code, 1);
+    assert.strictEqual(errPacket.icmp.typeName, 'DESTINATION_UNREACHABLE');
+    assert.strictEqual(errPacket.icmp.codeName, 'HOST_UNREACHABLE');
+    assert.strictEqual(errPacket.icmp.description, 'Destination host unreachable');
+    assert.strictEqual(errPacket.icmp.isError, true);
+    assert.strictEqual(errPacket.icmp.reason, 'host-unreachable');
+});
+
+// 219. Original packet information is preserved inside the ICMP error packet
+runTest('219. Original packet information is preserved inside the ICMP error packet', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const originalPacket = {
+        sourceIp: '192.168.1.75',
+        destinationIp: '10.20.30.40',
+        protocol: 'ICMP',
+        ttl: 1,
+        icmp: {
+            type: 'ECHO_REQUEST',
+            code: 0,
+            identifier: 9999,
+            sequence: 42
+        }
+    };
+
+    const errPacket = createIcmpErrorPacket(11, 0, originalPacket, router, {
+        ingressInterface: 'Gig0/0',
+        reason: 'ttl-expired'
+    });
+
+    const orig = errPacket.icmp.originalPacket;
+    assert.ok(orig, 'Original packet must be encapsulated in ICMP error');
+    assert.strictEqual(orig.sourceIp, '192.168.1.75');
+    assert.strictEqual(orig.destinationIp, '10.20.30.40');
+    assert.strictEqual(orig.protocol, 'ICMP');
+    assert.strictEqual(orig.ttl, 1);
+    assert.strictEqual(orig.icmp.identifier, 9999);
+    assert.strictEqual(orig.icmp.sequence, 42);
+});
+
+// 220. Generating router / device information is preserved inside the ICMP error packet
+runTest('220. Generating router / device information is preserved inside the ICMP error packet', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+    router.name = 'Core-Router-1';
+    router.interfaces['Gig0/0'].ip = '10.0.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.2.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    const originalPacket = {
+        sourceIp: '10.0.1.5',
+        destinationIp: '10.0.99.1',
+        protocol: 'IPv4',
+        ttl: 64
+    };
+
+    const errPacket = createIcmpErrorPacket(3, 0, originalPacket, router, {
+        ingressInterface: 'Gig0/0',
+        egressInterface: null,
+        reason: 'no-route'
+    });
+
+    const routerInfo = errPacket.icmp.router;
+    assert.ok(routerInfo, 'Router info must be present');
+    assert.strictEqual(routerInfo.id, router.id);
+    assert.strictEqual(routerInfo.name, 'Core-Router-1');
+    assert.strictEqual(routerInfo.ip, '10.0.1.1', 'Should use ingress interface IP');
+    assert.strictEqual(routerInfo.ingressInterface, 'Gig0/0');
+});
+
+// 221. Clean distinction between ICMP Echo Request/Reply and ICMP Diagnostic Error packets
+runTest('221. Clean distinction between ICMP Echo Request/Reply and ICMP Diagnostic Error packets', () => {
+    const echoReq = { protocol: 'ICMP', icmp: { type: 'ECHO_REQUEST', code: 0 } };
+    const echoRep = { protocol: 'ICMP', icmp: { type: 'ECHO_REPLY', code: 0 } };
+    const timeExceeded = { protocol: 'ICMP', icmp: { type: 11, code: 0, isError: true } };
+    const destUnreach = { protocol: 'ICMP', icmp: { type: 'DESTINATION_UNREACHABLE', code: 0, isError: true } };
+    const rawIpv4 = { protocol: 'IPv4', sourceIp: '1.1.1.1', destinationIp: '2.2.2.2' };
+
+    assert.strictEqual(isIcmpPacket(echoReq), true);
+    assert.strictEqual(isIcmpPacket(echoRep), true);
+    assert.strictEqual(isIcmpPacket(timeExceeded), true);
+    assert.strictEqual(isIcmpPacket(rawIpv4), false);
+
+    assert.strictEqual(isIcmpEchoPacket(echoReq), true);
+    assert.strictEqual(isIcmpEchoPacket(echoRep), true);
+    assert.strictEqual(isIcmpEchoPacket(timeExceeded), false);
+    assert.strictEqual(isIcmpEchoPacket(destUnreach), false);
+    assert.strictEqual(isIcmpEchoPacket(rawIpv4), false);
+
+    assert.strictEqual(isIcmpErrorPacket(echoReq), false);
+    assert.strictEqual(isIcmpErrorPacket(echoRep), false);
+    assert.strictEqual(isIcmpErrorPacket(timeExceeded), true);
+    assert.strictEqual(isIcmpErrorPacket(destUnreach), true);
+    assert.strictEqual(isIcmpErrorPacket(rawIpv4), false);
+});
+
+// 222. RFC 792 safety rule: Dropping an ICMP error packet does NOT generate another ICMP error
+runTest('222. RFC 792 safety rule: Dropping an ICMP error packet does NOT generate another ICMP error', () => {
+    resetLab();
+    addDevice('router', 200, 100);
+    const router = networkState.devices[0];
+
+    const errorPacket = {
+        sourceIp: '10.0.1.1',
+        destinationIp: '192.168.1.10',
+        protocol: 'ICMP',
+        ttl: 0,
+        icmp: {
+            type: 11,
+            code: 0,
+            typeName: 'TIME_EXCEEDED',
+            isError: true
+        }
+    };
+
+    // Attempt to generate error in response to an existing error packet
+    const result = createIcmpErrorPacket(11, 0, errorPacket, router, { reason: 'ttl-expired' });
+    assert.strictEqual(result, null, 'Must return null according to RFC 792 safety rule');
+});
+
+// 223. Router TTL expiry in simulatePathTransmission constructs ICMP Type 11 Code 0 error packet
+runTest('223. Router TTL expiry in simulatePathTransmission constructs ICMP Type 11 Code 0 error packet', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('server', 350, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    const result = simulateSendFrame(pc, server, { initialTtl: 1 });
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.action, 'DROP');
+    assert.ok(result.reason.includes('Time to Live (TTL) expired'));
+
+    const err = result.icmpErrorPacket;
+    assert.ok(err, 'simulateSendFrame must attach icmpErrorPacket on TTL expiry');
+    assert.strictEqual(err.icmp.type, 11);
+    assert.strictEqual(err.icmp.code, 0);
+    assert.strictEqual(err.icmp.typeName, 'TIME_EXCEEDED');
+    assert.strictEqual(err.sourceIp, '192.168.1.1');
+    assert.strictEqual(err.destinationIp, '192.168.1.10');
+    assert.strictEqual(err.icmp.originalPacket.destinationIp, '10.0.0.10');
+});
+
+// 224. Router NO_ROUTE in simulatePathTransmission constructs ICMP Type 3 Code 0 error packet
+runTest('224. Router NO_ROUTE in simulatePathTransmission constructs ICMP Type 3 Code 0 error packet', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('server', 350, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    // router only has Gig0/0 configured; no route for 10.0.0.0
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '192.168.1.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    const frame = {
+        sourceDeviceId: pc.id,
+        destinationDeviceId: server.id,
+        sourceMac: pc.mac,
+        destinationMac: router.interfaces['Gig0/0'].mac,
+        etherType: 'IPv4',
+        packet: {
+            sourceIp: pc.ip,
+            destinationIp: server.ip,
+            ttl: 64
+        },
+        path: ['PC0', 'Router0', 'Server0'],
+        events: []
+    };
+
+    const result = simulatePathTransmission(frame, pc, server, ['PC0', 'Router0', 'Server0']);
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.action, 'DROP');
+    assert.ok(result.reason.includes('No route'));
+
+    const err = result.icmpErrorPacket;
+    assert.ok(err, 'Must construct ICMP error on NO_ROUTE');
+    assert.strictEqual(err.icmp.type, 3);
+    assert.strictEqual(err.icmp.code, 0);
+    assert.strictEqual(err.icmp.typeName, 'DESTINATION_UNREACHABLE');
+    assert.strictEqual(err.icmp.codeName, 'NET_UNREACHABLE');
+    assert.strictEqual(err.destinationIp, '192.168.1.10');
+});
+
+// 225. Router egress interface down in simulatePathTransmission constructs ICMP Type 3 Code 1 error packet
+runTest('225. Router egress interface down in simulatePathTransmission constructs ICMP Type 3 Code 1 error packet', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('server', 350, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    addStaticRoute(router.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        interface: 'Gig0/1'
+    });
+
+    router.interfaces['Gig0/1'].status = 'down'; // Interface administratively down
+
+    const frame = {
+        sourceDeviceId: pc.id,
+        destinationDeviceId: server.id,
+        sourceMac: pc.mac,
+        destinationMac: router.interfaces['Gig0/0'].mac,
+        etherType: 'IPv4',
+        packet: {
+            sourceIp: pc.ip,
+            destinationIp: server.ip,
+            ttl: 64
+        },
+        path: ['PC0', 'Router0', 'Server0'],
+        events: []
+    };
+
+    const result = simulatePathTransmission(frame, pc, server, ['PC0', 'Router0', 'Server0']);
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.action, 'DROP');
+
+    const err = result.icmpErrorPacket;
+    assert.ok(err, 'Must construct ICMP error on down interface');
+    assert.strictEqual(err.icmp.type, 3);
+    assert.strictEqual(err.icmp.code, 1);
+    assert.strictEqual(err.icmp.codeName, 'HOST_UNREACHABLE');
+});
+
+// 226. formatIcmpType formats all standard and error ICMP types accurately
+runTest('226. formatIcmpType formats all standard and error ICMP types accurately', () => {
+    assert.strictEqual(formatIcmpType('ECHO_REQUEST'), 'Echo Request');
+    assert.strictEqual(formatIcmpType('8'), 'Echo Request');
+    assert.strictEqual(formatIcmpType('ECHO_REPLY'), 'Echo Reply');
+    assert.strictEqual(formatIcmpType('0'), 'Echo Reply');
+    assert.strictEqual(formatIcmpType('TIME_EXCEEDED'), 'Time to Live Exceeded');
+    assert.strictEqual(formatIcmpType('11'), 'Time to Live Exceeded');
+    assert.strictEqual(formatIcmpType('DESTINATION_UNREACHABLE'), 'Destination Unreachable');
+    assert.strictEqual(formatIcmpType('3'), 'Destination Unreachable');
+});
+
+// 227. Hop actions record icmpErrorPacket on dropped hops
+runTest('227. Hop actions record icmpErrorPacket on dropped hops', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('server', 350, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    const result = simulateSendFrame(pc, server, { initialTtl: 1 });
+    assert.strictEqual(result.success, false);
+    assert.ok(result.hopActions.length > 0);
+    const dropHop = result.hopActions.find(h => h.action === 'DROP');
+    assert.ok(dropHop);
+    assert.ok(dropHop.icmpErrorPacket);
+    assert.strictEqual(dropHop.icmpErrorPacket.icmp.type, 11);
+    assert.strictEqual(dropHop.icmpErrorPacket.icmp.code, 0);
+});
+
+// 228. Single-router return path: Router0 generates ICMP Destination Unreachable and returns to PC0
+runTest('228. Single-router return path: Router0 generates ICMP Destination Unreachable and returns to PC0', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('server', 350, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    // router only has Gig0/0 configured (no route for server subnet 10.0.0.0)
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '192.168.1.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    const frame = {
+        sourceDeviceId: pc.id,
+        destinationDeviceId: server.id,
+        sourceMac: pc.mac,
+        destinationMac: router.interfaces['Gig0/0'].mac,
+        etherType: 'IPv4',
+        packet: {
+            sourceIp: pc.ip,
+            destinationIp: server.ip,
+            ttl: 64
+        },
+        path: ['PC0', 'Router0', 'Server0'],
+        events: []
+    };
+
+    const forwardResult = simulatePathTransmission(frame, pc, server, ['PC0', 'Router0', 'Server0']);
+    assert.strictEqual(forwardResult.success, false);
+    assert.ok(forwardResult.icmpErrorPacket);
+
+    const errorReturn = routeIcmpErrorReturnPath(forwardResult.icmpErrorPacket, router, pc, forwardResult.path);
+    assert.ok(errorReturn, 'Error return path must execute');
+    assert.strictEqual(errorReturn.success, true);
+    assert.strictEqual(errorReturn.path.join(' -> '), 'Router0 -> PC0');
+    assert.ok(errorReturn.events.some(e => e.includes('PC0 received ICMP Destination Unreachable')));
+});
+
+// 229. Multi-router return path: Router1 failure routes ICMP error back through Router0 to PC0
+runTest('229. Multi-router return path: Router1 failure routes ICMP error back through Router0 to PC0', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    // R1 has no route for server subnet 10.0.0.0
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    // Forward route on R0 toward 10.0.0.0 via R1
+    addStaticRoute(r0.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.2'
+    });
+
+    // Return route on R1 toward PC subnet 192.168.1.0 via R0
+    addStaticRoute(r1.id, {
+        network: '192.168.1.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '172.16.1.1'
+    });
+
+    const frame = {
+        sourceDeviceId: pc.id,
+        destinationDeviceId: server.id,
+        sourceMac: pc.mac,
+        destinationMac: r0.interfaces['Gig0/0'].mac,
+        etherType: 'IPv4',
+        packet: {
+            sourceIp: pc.ip,
+            destinationIp: server.ip,
+            ttl: 64
+        },
+        path: ['PC0', 'Router0', 'Router1', 'Server0'],
+        events: []
+    };
+
+    const forwardResult = simulatePathTransmission(frame, pc, server, ['PC0', 'Router0', 'Router1', 'Server0']);
+    assert.strictEqual(forwardResult.success, false);
+    assert.strictEqual(forwardResult.path.join(' -> '), 'PC0 -> Router0 -> Router1');
+
+    const errorReturn = routeIcmpErrorReturnPath(forwardResult.icmpErrorPacket, r1, pc, forwardResult.path);
+    assert.ok(errorReturn, 'Error return path must execute');
+    assert.strictEqual(errorReturn.success, true);
+    assert.strictEqual(errorReturn.path.join(' -> '), 'Router1 -> Router0 -> PC0');
+    assert.strictEqual(errorReturn.hopActions.length, 2, 'Must have 2 router hops on return path (R1 and R0)');
+    assert.strictEqual(errorReturn.hopActions[0].deviceId, r1.id);
+    assert.strictEqual(errorReturn.hopActions[1].deviceId, r0.id);
+    assert.ok(errorReturn.events.some(e => e.includes('PC0 received ICMP Destination Unreachable')));
+});
+
+// 230. Return-path TTL decrement: ICMP error packet TTL decrements at each return-path router hop
+runTest('230. Return-path TTL decrement: ICMP error packet TTL decrements at each return-path router hop', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    addStaticRoute(r0.id, { network: '10.0.0.0', subnetMask: '255.255.255.0', nextHop: '172.16.1.2' });
+    addStaticRoute(r1.id, { network: '192.168.1.0', subnetMask: '255.255.255.0', nextHop: '172.16.1.1' });
+
+    const frame = {
+        sourceDeviceId: pc.id,
+        destinationDeviceId: server.id,
+        sourceMac: pc.mac,
+        destinationMac: r0.interfaces['Gig0/0'].mac,
+        etherType: 'IPv4',
+        packet: { sourceIp: pc.ip, destinationIp: server.ip, ttl: 64 },
+        path: ['PC0', 'Router0', 'Router1', 'Server0'],
+        events: []
+    };
+
+    const forwardResult = simulatePathTransmission(frame, pc, server, ['PC0', 'Router0', 'Router1', 'Server0']);
+    const errorReturn = routeIcmpErrorReturnPath(forwardResult.icmpErrorPacket, r1, pc, forwardResult.path);
+
+    assert.strictEqual(errorReturn.success, true);
+    assert.strictEqual(errorReturn.hopActions[0].ttl, 64, 'R1 initial ICMP error TTL');
+    assert.strictEqual(errorReturn.hopActions[1].ttl, 63, 'R0 decremented ICMP error TTL to 63');
+    assert.strictEqual(errorReturn.packet.ttl, 63, 'Final delivered TTL to PC0 is 63');
+});
+
+// 231. TTL expiry in multi-router topology: initialTtl=2 drops at Router1 and returns ICMP Type 11 to PC0
+runTest('231. TTL expiry in multi-router topology: initialTtl=2 drops at Router1 and returns ICMP Type 11 to PC0', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    addStaticRoute(r0.id, { network: '10.0.0.0', subnetMask: '255.255.255.0', nextHop: '172.16.1.2' });
+    addStaticRoute(r1.id, { network: '192.168.1.0', subnetMask: '255.255.255.0', nextHop: '172.16.1.1' });
+
+    // initialTtl = 2: R0 decrements 2 -> 1, R1 decrements 1 -> 0 (TTL expired at R1)
+    const result = simulateSendFrame(pc, server, { icmp: true, initialTtl: 2 });
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.action, 'DROP');
+    assert.ok(result.reason.includes('Time to Live (TTL) expired'));
+
+    assert.ok(result.icmpErrorPacket);
+    assert.strictEqual(result.icmpErrorPacket.icmp.type, 11);
+    assert.strictEqual(result.icmpErrorPacket.icmp.typeName, 'TIME_EXCEEDED');
+    assert.strictEqual(result.icmpErrorPacket.sourceIp, '172.16.1.2', 'ICMP Time Exceeded from Router1');
+
+    assert.ok(result.icmpErrorResult);
+    assert.strictEqual(result.icmpErrorResult.success, true);
+    assert.strictEqual(result.reverseHopActions.length, 2);
+    assert.strictEqual(result.reverseHopActions[0].deviceId, r1.id);
+    assert.strictEqual(result.reverseHopActions[1].deviceId, r0.id);
+    assert.ok(result.events.some(e => e.includes('PC0 received ICMP Time to Live Exceeded')));
+});
+
+// 232. Return-path ARP resolution: ICMP error return triggers ARP resolution if cache is cold
+runTest('232. Return-path ARP resolution: ICMP error return triggers ARP resolution if cache is cold', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('server', 350, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    // Clear ARP table on Router0
+    clearArpTable(router.id);
+
+    const result = simulateSendFrame(pc, server, { icmp: true, initialTtl: 1 });
+    assert.strictEqual(result.success, false);
+    assert.ok(result.icmpErrorResult);
+    assert.strictEqual(result.icmpErrorResult.success, true);
+    assert.ok(lookupArp(router.id, pc.ip), 'Router ARP table must cache PC0 MAC after error return');
+});
+
+// 233. Return-path ARP cache hit: warm ARP cache avoids ARP broadcast on error return path
+runTest('233. Return-path ARP cache hit: warm ARP cache avoids ARP broadcast on error return path', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('server', 350, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    // Pre-populate warm ARP cache on Router0
+    learnArp(router.id, pc.ip, pc.mac, { interface: 'Gig0/0' });
+
+    const result = simulateSendFrame(pc, server, { icmp: true, initialTtl: 1 });
+    assert.strictEqual(result.success, false);
+    assert.ok(result.icmpErrorResult);
+    assert.strictEqual(result.icmpErrorResult.arpResult.cacheHit, true, 'Must hit warm ARP cache');
+});
+
+// 234. Missing return route on generator router records DROP without second ICMP error
+runTest('234. Missing return route on generator router records DROP without second ICMP error', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    // Forward route on R0 toward 10.0.0.0
+    addStaticRoute(r0.id, { network: '10.0.0.0', subnetMask: '255.255.255.0', nextHop: '172.16.1.2' });
+    // R1 deliberately has NO return route for 192.168.1.0
+
+    const result = simulateSendFrame(pc, server, { icmp: true, initialTtl: 2 });
+    assert.strictEqual(result.success, false);
+    assert.ok(result.reason.includes('Time to Live (TTL) expired'));
+    assert.ok(result.icmpErrorPacket);
+    assert.ok(result.icmpErrorResult);
+    assert.strictEqual(result.icmpErrorResult.success, false);
+    assert.ok(result.icmpErrorResult.reason.includes('No return route'));
+    assert.strictEqual(result.reverseHopActions[0].action, 'DROP');
+});
+
+// 235. Intermediate router failure on return path records DROP without second ICMP error
+runTest('235. Intermediate router failure on return path records DROP without second ICMP error', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 320, 100);
+    addDevice('server', 450, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.1.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Server0');
+
+    addStaticRoute(r0.id, { network: '10.0.0.0', subnetMask: '255.255.255.0', nextHop: '172.16.1.2' });
+    addStaticRoute(r1.id, { network: '192.168.1.0', subnetMask: '255.255.255.0', nextHop: '172.16.1.1' });
+
+    // Set R0's Gig0/0 interface DOWN after forwarding
+    const frame = {
+        sourceDeviceId: pc.id,
+        destinationDeviceId: server.id,
+        sourceMac: pc.mac,
+        destinationMac: r0.interfaces['Gig0/0'].mac,
+        etherType: 'IPv4',
+        packet: { sourceIp: pc.ip, destinationIp: server.ip, ttl: 64 },
+        path: ['PC0', 'Router0', 'Router1', 'Server0'],
+        events: []
+    };
+
+    const forwardResult = simulatePathTransmission(frame, pc, server, ['PC0', 'Router0', 'Router1', 'Server0']);
+    assert.strictEqual(forwardResult.success, false);
+
+    // Shut down R0 Gig0/0 before return path
+    r0.interfaces['Gig0/0'].status = 'down';
+
+    const errorReturn = routeIcmpErrorReturnPath(forwardResult.icmpErrorPacket, r1, pc, forwardResult.path);
+    assert.strictEqual(errorReturn.success, false);
+    assert.strictEqual(errorReturn.action, 'DROP');
+    assert.strictEqual(errorReturn.icmpErrorPacket, undefined, 'Must not create second ICMP error');
+});
+
+// 236. Original packet payload is completely preserved across return path
+runTest('236. Original packet payload is completely preserved across return path', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('server', 350, 100);
+
+    const pc = networkState.devices[0];
+    const router = networkState.devices[1];
+    const server = networkState.devices[2];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    const result = simulateSendFrame(pc, server, {
+        icmp: true,
+        initialTtl: 1,
+        icmp: { type: 'ECHO_REQUEST', identifier: 777, sequence: 888 }
+    });
+
+    assert.strictEqual(result.success, false);
+    const orig = result.icmpErrorPacket.icmp.originalPacket;
+    assert.strictEqual(orig.sourceIp, pc.ip);
+    assert.strictEqual(orig.destinationIp, server.ip);
+    assert.strictEqual(orig.protocol, 'ICMP');
+    assert.strictEqual(orig.ttl, 0, 'TTL decremented to 0 upon expiry');
+    assert.strictEqual(orig.icmp.identifier, 777);
+    assert.strictEqual(orig.icmp.sequence, 888);
+});
+
+// 237. Normal ICMP Echo roundtrip across 3 routers continues to succeed without regression
+runTest('237. Normal ICMP Echo roundtrip across 3 routers continues to succeed without regression', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 180, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 420, 100);
+    addDevice('server', 540, 100);
+
+    const pc = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const r2 = networkState.devices[3];
+    const server = networkState.devices[4];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.23.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r2.interfaces['Gig0/0'].ip = '10.0.23.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r2.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '172.16.1.50';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '172.16.1.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'Router2');
+    addConnection('Router2', 'Server0');
+
+    // Forward static routes
+    addStaticRoute(r0.id, { network: '172.16.1.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.2' });
+    addStaticRoute(r1.id, { network: '172.16.1.0', subnetMask: '255.255.255.0', nextHop: '10.0.23.2' });
+
+    // Reverse static routes
+    addStaticRoute(r2.id, { network: '192.168.1.0', subnetMask: '255.255.255.0', nextHop: '10.0.23.1' });
+    addStaticRoute(r1.id, { network: '192.168.1.0', subnetMask: '255.255.255.0', nextHop: '10.0.12.1' });
+
+    const result = simulateSendFrame(pc, server, { icmp: true, initialTtl: 64 });
+    assert.strictEqual(result.success, true, 'ICMP Echo roundtrip must succeed');
+    assert.strictEqual(result.icmpErrorPacket, null);
+    assert.strictEqual(result.packet.ttl, 61, '64 - 3 router hops = 61');
+});
+
+// 238. Return-path across switches and routers preserves complete event timeline
+runTest('238. Return-path across switches and routers preserves complete event timeline', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 150, 100);
+    addDevice('router', 280, 100);
+    addDevice('server', 420, 100);
+
+    const pc = networkState.devices[0];
+    const sw = networkState.devices[1];
+    const router = networkState.devices[2];
+    const server = networkState.devices[3];
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    router.interfaces['Gig0/1'].ip = '10.0.0.1';
+    router.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '10.0.0.10';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '10.0.0.1';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Router0');
+    addConnection('Router0', 'Server0');
+
+    const result = simulateSendFrame(pc, server, { icmp: true, initialTtl: 1 });
+    assert.strictEqual(result.success, false);
+    assert.ok(result.events.some(e => e.includes('PC0 sent ICMP Echo Request')));
+    assert.ok(result.events.some(e => e.includes('Time to Live (TTL) expired in transit')));
+    assert.ok(result.events.some(e => e.includes('Router0 sent ICMP Time to Live Exceeded to PC0')));
+    assert.ok(result.events.some(e => e.includes('PC0 received ICMP Time to Live Exceeded')));
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
