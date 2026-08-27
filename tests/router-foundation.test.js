@@ -10751,17 +10751,20 @@ runTest('326. Case-insensitivity and multiple whitespace tokens handling in CLI 
     assert.strictEqual(resMixed.success, true);
 });
 
-// 327. Common utilities preview messages for ping and traceroute in Phase 1
-runTest('327. Common utilities preview messages for ping and traceroute in Phase 1', () => {
+// 327. Help command listing includes ping and traceroute in Phase 2
+runTest('327. Help command listing includes ping and traceroute in Phase 2', () => {
     resetLab();
     addDevice('pc', 50, 100);
-    const resPing = executeCliCommand('PC0', 'ping 192.168.1.1');
-    assert.strictEqual(resPing.success, false);
-    assert.ok(resPing.output.includes("% 'ping' will be fully simulated in Phase 2 CLI"));
+    const resHelpHost = executeCliCommand('PC0', 'help');
+    assert.strictEqual(resHelpHost.success, true);
+    assert.ok(resHelpHost.output.includes('ping <IP>'));
+    assert.ok(resHelpHost.output.includes('traceroute <IP>'));
 
-    const resTrace = executeCliCommand('PC0', 'traceroute 192.168.1.1');
-    assert.strictEqual(resTrace.success, false);
-    assert.ok(resTrace.output.includes("% 'traceroute' will be fully simulated in Phase 2 CLI"));
+    addDevice('router', 200, 100);
+    const resHelpRouter = executeCliCommand('Router0', 'help');
+    assert.strictEqual(resHelpRouter.success, true);
+    assert.ok(resHelpRouter.output.includes('ping <IP>'));
+    assert.ok(resHelpRouter.output.includes('traceroute <IP>'));
 });
 
 // 328. Educational error message for arbitrary unsupported/unknown commands
@@ -10849,6 +10852,479 @@ runTest('333. Terminal session state does not corrupt topology snapshots or undo
     // Redo should restore modified IP
     redo();
     assert.strictEqual(networkState.devices[0].ip, '192.168.1.20');
+});
+
+// 334. Successful ping on the same subnet
+runTest('334. Successful ping on the same subnet', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('pc', 200, 100);
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[1];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'PC1');
+
+    const res = executeCliCommand('PC0', 'ping 192.168.1.20');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.status, 'success');
+    assert.ok(res.output.includes('Pinging 192.168.1.20...'));
+    assert.ok(res.output.includes('Reply from 192.168.1.20: bytes=32 TTL=64'));
+    assert.ok(res.output.includes('Packets: Sent = 4, Received = 4, Lost = 0 (0% loss)'));
+});
+
+// 335. Successful ping across a single router
+runTest('335. Successful ping across a single router', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    const res = executeCliCommand('PC0', 'ping 192.168.2.10');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Reply from 192.168.2.10: bytes=32 TTL=64'));
+    assert.ok(res.output.includes('Lost = 0 (0% loss)'));
+});
+
+// 336. Successful ping across multiple routers
+runTest('336. Successful ping across multiple routers', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 150, 100);
+    addDevice('router', 250, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '10.0.0.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'PC1');
+
+    addStaticRoute(r0.id, { network: '192.168.2.0', subnetMask: '255.255.255.0', nextHop: '10.0.0.2', interface: 'Gig0/1' });
+    addStaticRoute(r1.id, { network: '192.168.1.0', subnetMask: '255.255.255.0', nextHop: '10.0.0.1', interface: 'Gig0/0' });
+
+    const res = executeCliCommand('PC0', 'ping 192.168.2.10');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Reply from 192.168.2.10: bytes=32 TTL=64'));
+    assert.ok(res.output.includes('Lost = 0 (0% loss)'));
+});
+
+// 337. Ping to an unknown IP
+runTest('337. Ping to an unknown IP', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const pc0 = networkState.devices[0];
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+
+    const res = executeCliCommand('PC0', 'ping 192.168.99.99');
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.status, 'error');
+    assert.ok(res.output.includes('Pinging 192.168.99.99...'));
+    assert.ok(res.output.includes('Ping request could not find host 192.168.99.99'));
+    assert.ok(res.output.includes('Packets: Sent = 4, Received = 0, Lost = 4 (100% loss)'));
+});
+
+// 338. Ping to an existing but unreachable destination (missing route / down interface)
+runTest('338. Ping to an existing but unreachable destination', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    // Shut down egress interface
+    toggleRouterInterfaceStatus(r0.id, 'Gig0/1');
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    const res = executeCliCommand('PC0', 'ping 192.168.2.10');
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.status, 'error');
+    assert.ok(res.output.includes('Packets: Sent = 4, Received = 0, Lost = 4 (100% loss)'));
+});
+
+// 339. Ping with invalid or malformed IP input
+runTest('339. Ping with invalid or malformed IP input', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const pc0 = networkState.devices[0];
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+
+    const resAbc = executeCliCommand('PC0', 'ping abc');
+    assert.strictEqual(resAbc.success, false);
+    assert.ok(resAbc.output.includes('Ping request could not find host abc'));
+
+    const resBadOctet = executeCliCommand('PC0', 'ping 999.999.999.999');
+    assert.strictEqual(resBadOctet.success, false);
+    assert.ok(resBadOctet.output.includes('Ping request could not find host 999.999.999.999'));
+});
+
+// 340. Ping with missing argument
+runTest('340. Ping with missing argument', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const pc0 = networkState.devices[0];
+    pc0.ip = '192.168.1.10';
+
+    const res = executeCliCommand('PC0', 'ping');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Usage: ping <destination-ip>'));
+});
+
+// 341. Ping from an unconfigured device returns clean error
+runTest('341. Ping from an unconfigured device returns clean error', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const pc0 = networkState.devices[0];
+    pc0.ip = '';
+
+    const res = executeCliCommand('PC0', 'ping 192.168.1.1');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('% Source device "PC0" has no IPv4 address configured.'));
+});
+
+// 342. Successful traceroute to a directly reachable destination
+runTest('342. Successful traceroute to a directly reachable destination', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('pc', 200, 100);
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[1];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'PC1');
+
+    const res = executeCliCommand('PC0', 'traceroute 192.168.1.20');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Tracing route to 192.168.1.20'));
+    assert.ok(res.output.includes('1    192.168.1.20'));
+    assert.ok(res.output.includes('Trace complete.'));
+});
+
+// 343. Successful traceroute across one router
+runTest('343. Successful traceroute across one router', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    const res = executeCliCommand('PC0', 'traceroute 192.168.2.10');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Tracing route to 192.168.2.10'));
+    assert.ok(res.output.includes('1    192.168.1.1'));
+    assert.ok(res.output.includes('2    192.168.2.10'));
+    assert.ok(res.output.includes('Trace complete.'));
+});
+
+// 344. Successful traceroute across multiple routers
+runTest('344. Successful traceroute across multiple routers', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 150, 100);
+    addDevice('router', 250, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const r1 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '10.0.0.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'PC1');
+
+    addStaticRoute(r0.id, { network: '192.168.2.0', subnetMask: '255.255.255.0', nextHop: '10.0.0.2', interface: 'Gig0/1' });
+    addStaticRoute(r1.id, { network: '192.168.1.0', subnetMask: '255.255.255.0', nextHop: '10.0.0.1', interface: 'Gig0/0' });
+
+    const res = executeCliCommand('PC0', 'traceroute 192.168.2.10');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('1    192.168.1.1'));
+    assert.ok(res.output.includes('2    10.0.0.2'));
+    assert.ok(res.output.includes('3    192.168.2.10'));
+    assert.ok(res.output.includes('Trace complete.'));
+});
+
+// 345. Intermediate TTL-expired hops are returned
+runTest('345. Intermediate TTL-expired hops are returned', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    const res = executeCliCommand('PC0', 'traceroute 192.168.2.10');
+    assert.ok(res.output.includes('1    192.168.1.1'));
+});
+
+// 346. Final destination is correctly identified
+runTest('346. Final destination is correctly identified', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    const res = executeCliCommand('PC0', 'traceroute 192.168.2.10');
+    assert.ok(res.output.includes('2    192.168.2.10'));
+    assert.ok(res.output.includes('Trace complete.'));
+});
+
+// 347. Traceroute to an unknown IP
+runTest('347. Traceroute to an unknown IP', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const pc0 = networkState.devices[0];
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+
+    const res = executeCliCommand('PC0', 'traceroute 192.168.99.99');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Tracing route to 192.168.99.99'));
+    assert.ok(res.output.includes('Destination host unreachable.'));
+});
+
+// 348. Traceroute to an unreachable destination (missing route / down interface)
+runTest('348. Traceroute to an unreachable destination', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    // Shut down egress interface
+    toggleRouterInterfaceStatus(r0.id, 'Gig0/1');
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    const res = executeCliCommand('PC0', 'traceroute 192.168.2.10');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Destination host unreachable.'));
+});
+
+// 349. Traceroute with invalid/malformed IP input and missing argument
+runTest('349. Traceroute with invalid/malformed IP input and missing argument', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const pc0 = networkState.devices[0];
+    pc0.ip = '192.168.1.10';
+
+    const resEmpty = executeCliCommand('PC0', 'traceroute');
+    assert.strictEqual(resEmpty.success, false);
+    assert.ok(resEmpty.output.includes('Usage: traceroute <destination-ip>'));
+
+    const resInvalid = executeCliCommand('PC0', 'traceroute invalid_ip');
+    assert.strictEqual(resInvalid.success, false);
+    assert.ok(resInvalid.output.includes('Unable to resolve target system name invalid_ip.'));
+});
+
+// 350. tracert behaves as an exact alias for traceroute
+runTest('350. tracert behaves as an exact alias for traceroute', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('pc', 200, 100);
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[1];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'PC1');
+
+    const resTracert = executeCliCommand('PC0', 'tracert 192.168.1.20');
+    const resTraceroute = executeCliCommand('PC0', 'traceroute 192.168.1.20');
+
+    assert.strictEqual(resTracert.success, true);
+    assert.strictEqual(resTracert.output, resTraceroute.output);
+});
+
+// 351. Router CLI can execute ping and traceroute across the network
+runTest('351. Router CLI can execute ping and traceroute across the network', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+
+    const r0 = networkState.devices[0];
+    const pc0 = networkState.devices[1];
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection('Router0', 'PC0');
+
+    const pingRes = executeCliCommand('Router0', 'ping 192.168.1.10');
+    assert.strictEqual(pingRes.success, true);
+    assert.ok(pingRes.output.includes('Reply from 192.168.1.10: bytes=32 TTL=64'));
+
+    const traceRes = executeCliCommand('Router0', 'traceroute 192.168.1.10');
+    assert.strictEqual(traceRes.success, true);
+    assert.ok(traceRes.output.includes('Trace complete.'));
 });
 
 console.log('----------------------------------------------------');

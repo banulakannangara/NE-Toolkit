@@ -6060,6 +6060,12 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                 });
             }
         } else if (toDevice.type === 'router') {
+            if (toDevice.id === toEndpoint.id) {
+                const ingressPort = getPortForRouterAndNeighbor(toDevice.id, fromId);
+                frame.events.push(`Frame received by destination router ${toDevice.name} on ${ingressPort || 'interface'}`);
+                continue;
+            }
+
             const ingressPort = getPortForRouterAndNeighbor(toDevice.id, fromId);
             const ingressIface = ingressPort ? toDevice.interfaces?.[ingressPort] : null;
 
@@ -7930,6 +7936,337 @@ function formatCliRouterAcls(router) {
     return lines.join('\n');
 }
 
+function findDeviceByIp(ip) {
+    if (!ip || typeof ip !== 'string') {
+        return null;
+    }
+    const targetIp = ip.trim();
+    if (!isValidIPv4(targetIp)) {
+        return null;
+    }
+
+    for (const dev of (networkState.devices || [])) {
+        if (dev.type === 'router' && dev.interfaces) {
+            for (const [ifName, iface] of Object.entries(dev.interfaces)) {
+                if (iface && iface.ip === targetIp) {
+                    return {
+                        device: dev,
+                        interfaceName: ifName,
+                        ip: iface.ip,
+                        subnetMask: iface.subnetMask,
+                        mac: iface.mac,
+                        status: iface.status || 'up'
+                    };
+                }
+            }
+        } else if (dev.ip === targetIp) {
+            return {
+                device: dev,
+                interfaceName: null,
+                ip: dev.ip,
+                subnetMask: dev.subnetMask,
+                mac: dev.mac,
+                status: 'up'
+            };
+        }
+    }
+    return null;
+}
+
+function executeCliPing(sourceDev, targetIpArg) {
+    const rawTarget = typeof targetIpArg === 'string' ? targetIpArg.trim() : '';
+
+    if (!rawTarget) {
+        return {
+            success: false,
+            output: 'Usage: ping <destination-ip>',
+            clear: false,
+            status: 'error'
+        };
+    }
+
+    if (!isValidIPv4(rawTarget)) {
+        return {
+            success: false,
+            output: `Ping request could not find host ${rawTarget}. Please check the name and try again.`,
+            clear: false,
+            status: 'error'
+        };
+    }
+
+    // Source device readiness check
+    let srcEndpoint = null;
+    if (sourceDev.type === 'router') {
+        const routeMatch = lookupRoute(sourceDev.id, rawTarget);
+        if (routeMatch && routeMatch.success && routeMatch.route && routeMatch.route.interface && sourceDev.interfaces?.[routeMatch.route.interface]) {
+            const iface = sourceDev.interfaces[routeMatch.route.interface];
+            srcEndpoint = {
+                id: sourceDev.id,
+                name: sourceDev.name,
+                ip: iface.ip,
+                subnetMask: iface.subnetMask,
+                mac: iface.mac,
+                type: 'router',
+                interfaces: sourceDev.interfaces
+            };
+        } else {
+            let firstIface = null;
+            if (sourceDev.interfaces) {
+                for (const ifObj of Object.values(sourceDev.interfaces)) {
+                    if (ifObj && ifObj.ip && isValidIPv4(ifObj.ip)) {
+                        firstIface = ifObj;
+                        break;
+                    }
+                }
+            }
+            if (firstIface) {
+                srcEndpoint = {
+                    id: sourceDev.id,
+                    name: sourceDev.name,
+                    ip: firstIface.ip,
+                    subnetMask: firstIface.subnetMask,
+                    mac: firstIface.mac,
+                    type: 'router',
+                    interfaces: sourceDev.interfaces
+                };
+            }
+        }
+    } else {
+        if (sourceDev.ip && isValidIPv4(sourceDev.ip)) {
+            srcEndpoint = sourceDev;
+        }
+    }
+
+    if (!srcEndpoint || !srcEndpoint.ip) {
+        return {
+            success: false,
+            output: `% Source device "${sourceDev.name}" has no IPv4 address configured.`,
+            clear: false,
+            status: 'error'
+        };
+    }
+
+    const targetMatch = findDeviceByIp(rawTarget);
+    if (!targetMatch) {
+        const lines = [
+            `Pinging ${rawTarget}...`,
+            '',
+            `Ping request could not find host ${rawTarget}.`,
+            '',
+            `Ping statistics for ${rawTarget}:`,
+            '    Packets: Sent = 4, Received = 0, Lost = 4 (100% loss)'
+        ];
+        return {
+            success: false,
+            output: lines.join('\n'),
+            clear: false,
+            status: 'error'
+        };
+    }
+
+    let destEndpoint = null;
+    if (targetMatch.device.type === 'router') {
+        destEndpoint = {
+            id: targetMatch.device.id,
+            name: targetMatch.device.name,
+            ip: targetMatch.ip,
+            subnetMask: targetMatch.subnetMask,
+            mac: targetMatch.mac,
+            type: 'router',
+            interfaces: targetMatch.device.interfaces
+        };
+    } else {
+        destEndpoint = targetMatch.device;
+    }
+
+    const simResult = simulateSendFrame(srcEndpoint, destEndpoint, { icmp: true });
+
+    if (simResult.success) {
+        const lines = [
+            `Pinging ${rawTarget}...`,
+            '',
+            `Reply from ${rawTarget}: bytes=32 TTL=64`,
+            `Reply from ${rawTarget}: bytes=32 TTL=64`,
+            `Reply from ${rawTarget}: bytes=32 TTL=64`,
+            `Reply from ${rawTarget}: bytes=32 TTL=64`,
+            '',
+            `Ping statistics for ${rawTarget}:`,
+            '    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss)'
+        ];
+        return {
+            success: true,
+            output: lines.join('\n'),
+            clear: false,
+            status: 'success'
+        };
+    } else {
+        let errLine = 'Destination host unreachable.';
+        if (simResult.icmpErrorPacket && simResult.icmpErrorPacket.icmp) {
+            const icmp = simResult.icmpErrorPacket.icmp;
+            const repIp = simResult.icmpErrorPacket.sourceIp || 'Router';
+            if (icmp.type === 3 && icmp.code === 0) {
+                errLine = `Reply from ${repIp}: Destination network unreachable.`;
+            } else if (icmp.type === 3 && icmp.code === 13) {
+                errLine = `Reply from ${repIp}: Destination host unreachable.`;
+            } else if (icmp.type === 3) {
+                errLine = `Reply from ${repIp}: Destination host unreachable.`;
+            } else if (icmp.type === 11) {
+                errLine = `Reply from ${repIp}: Time to live exceeded in transit.`;
+            }
+        } else if (simResult.reason && simResult.reason.toLowerCase().includes('time to live')) {
+            errLine = 'Request timed out.';
+        }
+
+        const lines = [
+            `Pinging ${rawTarget}...`,
+            '',
+            errLine,
+            errLine,
+            errLine,
+            errLine,
+            '',
+            `Ping statistics for ${rawTarget}:`,
+            '    Packets: Sent = 4, Received = 0, Lost = 4 (100% loss)'
+        ];
+        return {
+            success: false,
+            output: lines.join('\n'),
+            clear: false,
+            status: 'error'
+        };
+    }
+}
+
+function executeCliTraceroute(sourceDev, targetIpArg) {
+    const rawTarget = typeof targetIpArg === 'string' ? targetIpArg.trim() : '';
+
+    if (!rawTarget) {
+        return {
+            success: false,
+            output: 'Usage: traceroute <destination-ip>',
+            clear: false,
+            status: 'error'
+        };
+    }
+
+    if (!isValidIPv4(rawTarget)) {
+        return {
+            success: false,
+            output: `Unable to resolve target system name ${rawTarget}.`,
+            clear: false,
+            status: 'error'
+        };
+    }
+
+    // Source device readiness check
+    let srcEndpoint = null;
+    if (sourceDev.type === 'router') {
+        const routeMatch = lookupRoute(sourceDev.id, rawTarget);
+        if (routeMatch && routeMatch.success && routeMatch.route && routeMatch.route.interface && sourceDev.interfaces?.[routeMatch.route.interface]) {
+            const iface = sourceDev.interfaces[routeMatch.route.interface];
+            srcEndpoint = {
+                id: sourceDev.id,
+                name: sourceDev.name,
+                ip: iface.ip,
+                subnetMask: iface.subnetMask,
+                mac: iface.mac,
+                type: 'router',
+                interfaces: sourceDev.interfaces
+            };
+        } else {
+            let firstIface = null;
+            if (sourceDev.interfaces) {
+                for (const ifObj of Object.values(sourceDev.interfaces)) {
+                    if (ifObj && ifObj.ip && isValidIPv4(ifObj.ip)) {
+                        firstIface = ifObj;
+                        break;
+                    }
+                }
+            }
+            if (firstIface) {
+                srcEndpoint = {
+                    id: sourceDev.id,
+                    name: sourceDev.name,
+                    ip: firstIface.ip,
+                    subnetMask: firstIface.subnetMask,
+                    mac: firstIface.mac,
+                    type: 'router',
+                    interfaces: sourceDev.interfaces
+                };
+            }
+        }
+    } else {
+        if (sourceDev.ip && isValidIPv4(sourceDev.ip)) {
+            srcEndpoint = sourceDev;
+        }
+    }
+
+    if (!srcEndpoint || !srcEndpoint.ip) {
+        return {
+            success: false,
+            output: `% Source device "${sourceDev.name}" has no IPv4 address configured.`,
+            clear: false,
+            status: 'error'
+        };
+    }
+
+    const targetMatch = findDeviceByIp(rawTarget);
+    if (!targetMatch) {
+        const lines = [
+            `Tracing route to ${rawTarget}`,
+            '',
+            '  1    *',
+            'Destination host unreachable.'
+        ];
+        return {
+            success: false,
+            output: lines.join('\n'),
+            clear: false,
+            status: 'error'
+        };
+    }
+
+    let destEndpoint = null;
+    if (targetMatch.device.type === 'router') {
+        destEndpoint = {
+            id: targetMatch.device.id,
+            name: targetMatch.device.name,
+            ip: targetMatch.ip,
+            subnetMask: targetMatch.subnetMask,
+            mac: targetMatch.mac,
+            type: 'router',
+            interfaces: targetMatch.device.interfaces
+        };
+    } else {
+        destEndpoint = targetMatch.device;
+    }
+
+    const traceResult = simulateTraceroute(srcEndpoint, destEndpoint);
+    const lines = [`Tracing route to ${rawTarget}`, ''];
+
+    if (traceResult.hops && traceResult.hops.length > 0) {
+        traceResult.hops.forEach((hop) => {
+            const hopNumStr = String(hop.hop).padStart(3, ' ');
+            const ipStr = hop.ip || '*';
+            lines.push(`${hopNumStr}    ${ipStr}`);
+        });
+    }
+
+    lines.push('');
+    if (traceResult.success) {
+        lines.push('Trace complete.');
+    } else {
+        lines.push('Destination host unreachable.');
+    }
+
+    return {
+        success: traceResult.success,
+        output: lines.join('\n'),
+        clear: false,
+        status: traceResult.success ? 'success' : 'error'
+    };
+}
+
 function executeCliCommand(deviceId, rawInput) {
     const dev = getDeviceById(deviceId);
     if (!dev) {
@@ -7981,6 +8318,8 @@ function executeCliCommand(deviceId, rawInput) {
   show ip route     - Display current IPv4 routing table
   show arp          - Display router ARP table and interface bindings
   show access-lists - Display configured Access Control Lists (ACLs) and hit counts
+  ping <IP>         - Send ICMP Echo requests to test IPv4 reachability
+  traceroute <IP>   - Trace packet hops to a destination IPv4 address (alias: tracert)
   clear, cls        - Clear the terminal screen
   help, ?           - Show available commands and usage`;
         } else {
@@ -7988,6 +8327,8 @@ function executeCliCommand(deviceId, rawInput) {
   ipconfig          - Display IP configuration, Subnet Mask, Gateway, and MAC
   ipconfig /all     - Display detailed IP and interface configuration
   arp -a            - Display the current ARP cache entries
+  ping <IP>         - Send ICMP Echo requests to test IPv4 reachability
+  traceroute <IP>   - Trace packet hops to a destination IPv4 address (alias: tracert)
   clear, cls        - Clear the terminal screen
   help, ?           - Show available commands and usage`;
         }
@@ -8144,7 +8485,7 @@ function executeCliCommand(deviceId, rawInput) {
         } else {
             return {
                 success: false,
-                output: `% 'show' commands are for Cisco IOS routers. End hosts support 'ipconfig', 'arp -a', 'help', and 'clear'.`,
+                output: `% 'show' commands are for Cisco IOS routers. End hosts support 'ipconfig', 'arp -a', 'ping', 'traceroute', 'help', and 'clear'.`,
                 clear: false,
                 status: 'error',
                 command,
@@ -8153,24 +8494,22 @@ function executeCliCommand(deviceId, rawInput) {
         }
     }
 
-    // 6. Common Utilities Preview (ping, traceroute, tracert)
+    // 6. Real Utilities (ping, traceroute, tracert)
     if (mainCmd === 'ping') {
+        const targetArg = tokens.slice(1).join(' ').trim();
+        const pingRes = executeCliPing(dev, targetArg);
         return {
-            success: false,
-            output: `% 'ping' will be fully simulated in Phase 2 CLI. Use the 'Send Frame' or 'Test Connection' toolbar tools in the meantime.`,
-            clear: false,
-            status: 'info',
+            ...pingRes,
             command,
             device: dev
         };
     }
 
     if (mainCmd === 'traceroute' || mainCmd === 'tracert') {
+        const targetArg = tokens.slice(1).join(' ').trim();
+        const traceRes = executeCliTraceroute(dev, targetArg);
         return {
-            success: false,
-            output: `% 'traceroute' will be fully simulated in Phase 2 CLI. Use the 'Send Frame' panel's Trace Route feature in the meantime.`,
-            clear: false,
-            status: 'info',
+            ...traceRes,
             command,
             device: dev
         };
