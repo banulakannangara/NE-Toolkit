@@ -7744,7 +7744,10 @@ function getDeviceTerminalSession(deviceId) {
         terminalRuntime.sessions[deviceId] = {
             history: [],
             historyIndex: -1,
-            logs: []
+            logs: [],
+            mode: 'exec',
+            selectedInterface: null,
+            prevMode: 'exec'
         };
     }
     return terminalRuntime.sessions[deviceId];
@@ -7761,6 +7764,13 @@ function getDeviceCliPrompt(deviceOrId) {
     if (!dev) return 'Device>';
     const name = dev.name || dev.id;
     if (dev.type === 'router') {
+        const session = getDeviceTerminalSession(dev.id);
+        if (session.mode === 'config-if') {
+            return `${name}(config-if)#`;
+        }
+        if (session.mode === 'config') {
+            return `${name}(config)#`;
+        }
         return `${name}#`;
     }
     return `${name}>`;
@@ -8412,7 +8422,7 @@ function executeCliTraceroute(sourceDev, targetIpArg) {
 }
 
 function executeCliCommand(deviceId, rawInput) {
-    const dev = getDeviceById(deviceId);
+    const dev = getDeviceById(deviceId) || networkState.devices.find((d) => d.name === deviceId);
     if (!dev) {
         return {
             success: false,
@@ -8454,11 +8464,54 @@ function executeCliCommand(deviceId, rawInput) {
     const tokens = lowerCmd.split(/\s+/);
     const mainCmd = tokens[0];
 
+    // 0. DO <command> (execute operational command from any config mode)
+    if (mainCmd === 'do' && isRouter) {
+        const innerCmd = command.replace(/^do\s+/i, '').trim();
+        if (!innerCmd) {
+            return {
+                success: false,
+                output: '% Incomplete command: do <command>',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        return executeCliCommand(dev.id, innerCmd);
+    }
+
+    const session = getDeviceTerminalSession(dev.id);
+
     // 1. HELP / ?
     if (mainCmd === 'help' || mainCmd === '?') {
         let helpText = '';
         if (isRouter) {
-            helpText = `Commands available on ${dev.name} (Cisco IOS-style):
+            if (session.mode === 'config-if') {
+                helpText = `Commands available in Interface Configuration mode on ${dev.name}:
+  ip address <IP> <mask/prefix> - Set IPv4 address and subnet mask on this interface
+  no ip address                 - Remove IPv4 address from this interface
+  shutdown                      - Administratively disable this interface
+  no shutdown                   - Administratively enable this interface
+  interface <name>              - Switch to another interface (alias: int)
+  exit                          - Return to Global Configuration mode
+  end                           - Return to Privileged EXEC mode
+  do <command>                  - Execute an operational command
+  help, ?                       - Show available commands`;
+            } else if (session.mode === 'config') {
+                helpText = `Commands available in Global Configuration mode on ${dev.name}:
+  hostname <name>               - Set device system name
+  interface <name>              - Enter interface configuration mode (alias: int)
+  ip route <net> <mask> <next-hop> [ad] [metric] - Configure a static route
+  no ip route <net> <mask> [next-hop]            - Delete a static route
+  exit                          - Return to Privileged EXEC mode
+  end                           - Return to Privileged EXEC mode
+  do <command>                  - Execute an operational command
+  help, ?                       - Show available commands`;
+            } else {
+                helpText = `Commands available on ${dev.name} (Cisco IOS-style):
+  configure terminal - Enter global configuration mode (alias: conf t)
+  hostname <name>   - Set device system name
+  interface <name>  - Enter interface configuration mode (alias: int)
   show ip route     - Display current IPv4 routing table
   show interfaces   - Display router interfaces and status (alias: show int)
   show arp          - Display router ARP table and interface bindings
@@ -8469,8 +8522,10 @@ function executeCliCommand(deviceId, rawInput) {
   traceroute <IP>   - Trace packet hops to a destination IPv4 address (alias: tracert)
   clear, cls        - Clear the terminal screen
   help, ?           - Show available commands and usage`;
+            }
         } else {
             helpText = `Commands available on ${dev.name}:
+  hostname <name>   - Set device system name
   ipconfig          - Display IP configuration, Subnet Mask, Gateway, and MAC
   ipconfig /all     - Display detailed IP and interface configuration
   ifconfig          - Display network interface configuration
@@ -8504,7 +8559,655 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 3. IPCONFIG
+    // 3. CONFIGURE TERMINAL / CONF T / CONFIG T
+    if (mainCmd === 'configure' || mainCmd === 'conf' || mainCmd === 'config') {
+        if (tokens[1] === 'terminal' || tokens[1] === 't' || tokens.length === 1) {
+            if (!isRouter) {
+                return {
+                    success: false,
+                    output: `% 'configure terminal' is a Cisco IOS router command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            session.mode = 'config';
+            session.selectedInterface = null;
+            return {
+                success: true,
+                output: 'Enter configuration commands, one per line. End with CNTL/Z or "end".',
+                clear: false,
+                status: 'info',
+                command,
+                device: dev
+            };
+        }
+    }
+
+    // 4. EXIT
+    if (mainCmd === 'exit') {
+        if (session.mode === 'config-if') {
+            session.mode = 'config';
+            session.selectedInterface = null;
+            return { success: true, output: '', clear: false, status: 'info', command, device: dev };
+        }
+        if (session.mode === 'config') {
+            session.mode = 'exec';
+            session.selectedInterface = null;
+            return { success: true, output: '', clear: false, status: 'info', command, device: dev };
+        }
+        return { success: true, output: '', clear: false, status: 'info', command, device: dev };
+    }
+
+    // 5. END
+    if (mainCmd === 'end') {
+        if (isRouter) {
+            session.mode = 'exec';
+            session.selectedInterface = null;
+            return { success: true, output: '', clear: false, status: 'info', command, device: dev };
+        }
+        return { success: true, output: '', clear: false, status: 'info', command, device: dev };
+    }
+
+    // 6. HOSTNAME
+    if (mainCmd === 'hostname') {
+        if (tokens.length === 1) {
+            return {
+                success: true,
+                output: dev.name,
+                clear: false,
+                status: 'info',
+                command,
+                device: dev
+            };
+        }
+        const rawNameParts = command.split(/\s+/).slice(1);
+        const newName = rawNameParts.join(' ').trim();
+        if (!newName) {
+            return {
+                success: false,
+                output: '% Incomplete command: hostname <name>',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (!/^[a-zA-Z0-9_-]{1,32}$/.test(newName)) {
+            return {
+                success: false,
+                output: '% Invalid hostname: must contain 1-32 alphanumeric characters, dashes, or underscores.',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (dev.name !== newName) {
+            pushHistory();
+            dev.name = newName;
+            render();
+        }
+        return {
+            success: true,
+            output: '',
+            clear: false,
+            status: 'success',
+            command,
+            device: dev
+        };
+    }
+
+    // 7. INTERFACE <ifName> / INT <ifName>
+    if (mainCmd === 'interface' || mainCmd === 'int') {
+        if (!isRouter) {
+            return {
+                success: false,
+                output: "% 'interface' is a Cisco IOS router command.",
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (tokens.length < 2) {
+            return {
+                success: false,
+                output: '% Incomplete command: interface <interface-name>',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        const rawIfName = tokens[1];
+        let matchedIfName = null;
+        const available = Object.keys(dev.interfaces || {});
+        for (const ifName of available) {
+            const lowerIf = ifName.toLowerCase();
+            const lowerRaw = rawIfName.toLowerCase();
+            if (lowerIf === lowerRaw
+                || (lowerRaw === 'g0/0' && ifName === 'Gig0/0')
+                || (lowerRaw === 'g0/1' && ifName === 'Gig0/1')
+                || (lowerRaw === 'gigabitethernet0/0' && ifName === 'Gig0/0')
+                || (lowerRaw === 'gigabitethernet0/1' && ifName === 'Gig0/1')) {
+                matchedIfName = ifName;
+                break;
+            }
+        }
+        if (!matchedIfName) {
+            return {
+                success: false,
+                output: `% Invalid interface: "${rawIfName}". Available interfaces: ${available.join(', ')}`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        session.prevMode = session.mode === 'config' ? 'config' : 'exec';
+        session.mode = 'config-if';
+        session.selectedInterface = matchedIfName;
+        return {
+            success: true,
+            output: '',
+            clear: false,
+            status: 'success',
+            command,
+            device: dev
+        };
+    }
+
+    // 8. SHUTDOWN / SHUT
+    if ((mainCmd === 'shutdown' || mainCmd === 'shut') && tokens.length === 1) {
+        if (!isRouter) {
+            return {
+                success: false,
+                output: "% 'shutdown' is a Cisco IOS router command.",
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (session.mode !== 'config-if' || !session.selectedInterface || !dev.interfaces?.[session.selectedInterface]) {
+            return {
+                success: false,
+                output: '% "shutdown" must be executed inside interface configuration mode (e.g. "interface Gig0/0").',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        const iface = dev.interfaces[session.selectedInterface];
+        if (iface.status !== 'down') {
+            pushHistory();
+            iface.status = 'down';
+            render();
+        }
+        return {
+            success: true,
+            output: `% Interface ${session.selectedInterface} changed state to administratively down`,
+            clear: false,
+            status: 'success',
+            command,
+            device: dev
+        };
+    }
+
+    // 9. NO commands (no shutdown, no ip address, no ip route)
+    if (mainCmd === 'no') {
+        const sub1 = tokens[1] || '';
+        const sub2 = tokens[2] || '';
+
+        // no shutdown / no shut
+        if (sub1 === 'shutdown' || sub1 === 'shut') {
+            if (!isRouter) {
+                return {
+                    success: false,
+                    output: "% 'no shutdown' is a Cisco IOS router command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode !== 'config-if' || !session.selectedInterface || !dev.interfaces?.[session.selectedInterface]) {
+                return {
+                    success: false,
+                    output: '% "no shutdown" must be executed inside interface configuration mode (e.g. "interface Gig0/0").',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const iface = dev.interfaces[session.selectedInterface];
+            if (iface.status !== 'up') {
+                pushHistory();
+                iface.status = 'up';
+                render();
+            }
+            return {
+                success: true,
+                output: `% Interface ${session.selectedInterface} changed state to up`,
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // no ip address / no ip addr
+        if (sub1 === 'ip' && (sub2 === 'address' || sub2 === 'addr')) {
+            if (!isRouter) {
+                return {
+                    success: false,
+                    output: "% 'no ip address' is a Cisco IOS router command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode !== 'config-if' || !session.selectedInterface || !dev.interfaces?.[session.selectedInterface]) {
+                return {
+                    success: false,
+                    output: '% "no ip address" must be executed inside interface configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const iface = dev.interfaces[session.selectedInterface];
+            pushHistory();
+            const oldIp = iface.ip;
+            if (oldIp) {
+                removeArpEntriesForIp(oldIp);
+            }
+            iface.ip = '';
+            iface.subnetMask = '';
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // no ip route <network> <mask/prefix> [next-hop/interface]
+        if (sub1 === 'ip' && (sub2 === 'route' || sub2 === 'routes')) {
+            if (!isRouter) {
+                return {
+                    success: false,
+                    output: "% 'no ip route' is a Cisco IOS router command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            let rawDest = '';
+            let rawMask = '';
+            let nextHopArg = '';
+            if (tokens[3] && tokens[3].includes('/')) {
+                const parts = tokens[3].split('/');
+                rawDest = parts[0].trim();
+                const prefix = parseInt(parts[1], 10);
+                rawMask = getMaskFromPrefixLength(prefix);
+                nextHopArg = tokens[4] ? tokens[4].trim() : '';
+            } else {
+                if (tokens.length < 5) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: no ip route <network> <mask/prefix> [next-hop/interface]',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                rawDest = tokens[3].trim();
+                rawMask = tokens[4].trim();
+                nextHopArg = tokens[5] ? tokens[5].trim() : '';
+            }
+
+            const normMask = normalizeSubnetMask(rawMask);
+            if (!normMask || !isValidIPv4(rawDest)) {
+                return {
+                    success: false,
+                    output: `% Invalid destination network or mask: ${rawDest} ${rawMask}`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+
+            const runtime = getRouterRuntime(dev.id);
+            const targetNetwork = calculateNetworkAddress(rawDest, normMask);
+            const targetPrefix = getPrefixLengthFromMask(normMask);
+            const matchedIndex = (runtime.staticRoutes || []).findIndex((r) => {
+                return r.network === targetNetwork
+                    && r.prefixLength === targetPrefix
+                    && (!nextHopArg || r.nextHop === nextHopArg || r.interface?.toLowerCase() === nextHopArg.toLowerCase());
+            });
+
+            if (matchedIndex === -1) {
+                return {
+                    success: false,
+                    output: `% No matching static route found for ${rawDest} ${rawMask}`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+
+            pushHistory();
+            const routeId = runtime.staticRoutes[matchedIndex].id;
+            removeStaticRoute(dev.id, routeId);
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+    }
+
+    // 10. IP ADDRESS / IP ADDR
+    if (mainCmd === 'ip' && (tokens[1] === 'address' || tokens[1] === 'addr')) {
+        if (!isRouter) {
+            return {
+                success: false,
+                output: "% 'ip address' is a Cisco IOS router command.",
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (session.mode !== 'config-if' || !session.selectedInterface || !dev.interfaces?.[session.selectedInterface]) {
+            return {
+                success: false,
+                output: '% "ip address" must be executed inside interface configuration mode (e.g. "interface Gig0/0").',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        const iface = dev.interfaces[session.selectedInterface];
+        let rawIp = '';
+        let rawMask = '';
+        if (tokens[2] && tokens[2].includes('/')) {
+            const parts = tokens[2].split('/');
+            rawIp = parts[0].trim();
+            const prefix = parseInt(parts[1], 10);
+            if (isNaN(prefix) || prefix < 0 || prefix > 32) {
+                return {
+                    success: false,
+                    output: '% Invalid CIDR prefix length.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            rawMask = getMaskFromPrefixLength(prefix);
+        } else {
+            if (tokens.length < 4) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: ip address <IP> <Subnet-Mask>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            rawIp = tokens[2].trim();
+            rawMask = tokens[3].trim();
+        }
+
+        if (!isValidIPv4(rawIp)) {
+            return {
+                success: false,
+                output: `% Invalid IPv4 address: "${rawIp}"`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        const normMask = normalizeSubnetMask(rawMask);
+        if (!normMask || !isValidSubnetMask(normMask)) {
+            return {
+                success: false,
+                output: `% Invalid subnet mask: "${rawMask}"`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
+        for (const [otherIfName, otherIf] of Object.entries(dev.interfaces || {})) {
+            if (otherIfName !== session.selectedInterface && otherIf && otherIf.ip === rawIp) {
+                return {
+                    success: false,
+                    output: `% IP address ${rawIp} is already configured on ${otherIfName}.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+        }
+
+        pushHistory();
+        const oldIp = iface.ip;
+        if (oldIp && oldIp !== rawIp) {
+            removeArpEntriesForIp(oldIp);
+        }
+        iface.ip = rawIp;
+        iface.subnetMask = normMask;
+        render();
+        return {
+            success: true,
+            output: '',
+            clear: false,
+            status: 'success',
+            command,
+            device: dev
+        };
+    }
+
+    // 11. IP ROUTE <network> <mask/prefix> <nextHop/interface> [ad] [metric]
+    if (mainCmd === 'ip' && (tokens[1] === 'route' || tokens[1] === 'routes')) {
+        if (!isRouter) {
+            return {
+                success: false,
+                output: "% 'ip route' is a Cisco IOS router command.",
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (tokens.length === 2) {
+            return {
+                success: true,
+                output: formatCliRouterRoutingTable(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+        let rawDest = '';
+        let rawMask = '';
+        let nextHopArg = '';
+        let rawAd;
+        let rawMetric;
+        if (tokens[2] && tokens[2].includes('/')) {
+            const parts = tokens[2].split('/');
+            rawDest = parts[0].trim();
+            const prefix = parseInt(parts[1], 10);
+            if (isNaN(prefix) || prefix < 0 || prefix > 32) {
+                return {
+                    success: false,
+                    output: '% Invalid CIDR prefix length.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            rawMask = getMaskFromPrefixLength(prefix);
+            nextHopArg = tokens[3] ? tokens[3].trim() : '';
+            rawAd = tokens[4];
+            rawMetric = tokens[5];
+        } else {
+            if (tokens.length < 5) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: ip route <network> <mask/prefix> <next-hop/interface> [admin-distance] [metric]',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            rawDest = tokens[2].trim();
+            rawMask = tokens[3].trim();
+            nextHopArg = tokens[4] ? tokens[4].trim() : '';
+            rawAd = tokens[5];
+            rawMetric = tokens[6];
+        }
+
+        if (!isValidIPv4(rawDest)) {
+            return {
+                success: false,
+                output: `% Invalid destination network IPv4 address: "${rawDest}"`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        const normMask = normalizeSubnetMask(rawMask);
+        if (!normMask || !isValidSubnetMask(normMask)) {
+            return {
+                success: false,
+                output: `% Invalid subnet mask: "${rawMask}"`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (!nextHopArg) {
+            return {
+                success: false,
+                output: '% Incomplete command: missing next-hop IP or egress interface.',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
+        let adVal = 1;
+        if (rawAd !== undefined) {
+            adVal = parseInt(rawAd, 10);
+            if (isNaN(adVal) || adVal < 1 || adVal > 255) {
+                return {
+                    success: false,
+                    output: '% Administrative Distance must be an integer between 1 and 255.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+        }
+        let metricVal = 0;
+        if (rawMetric !== undefined) {
+            metricVal = parseInt(rawMetric, 10);
+            if (isNaN(metricVal) || metricVal < 0) {
+                return {
+                    success: false,
+                    output: '% Metric must be a non-negative integer.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+        }
+
+        let egressIface = null;
+        let nextHopIp = null;
+        const ifMatch = Object.keys(dev.interfaces || {}).find(k => k.toLowerCase() === nextHopArg.toLowerCase() || (nextHopArg.toLowerCase() === 'g0/0' && k === 'Gig0/0') || (nextHopArg.toLowerCase() === 'g0/1' && k === 'Gig0/1'));
+        if (ifMatch) {
+            egressIface = ifMatch;
+        } else if (isValidIPv4(nextHopArg)) {
+            nextHopIp = nextHopArg;
+        } else {
+            return {
+                success: false,
+                output: `% Invalid next-hop address or interface: "${nextHopArg}"`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
+        pushHistory();
+        const routeData = {
+            network: rawDest,
+            subnetMask: normMask,
+            nextHop: nextHopIp || undefined,
+            interface: egressIface || undefined,
+            adminDistance: adVal,
+            metric: metricVal
+        };
+        const result = addStaticRoute(dev.id, routeData);
+        if (!result.success) {
+            networkState.history.pop();
+            return {
+                success: false,
+                output: `% ${result.reason}`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        render();
+        return {
+            success: true,
+            output: '',
+            clear: false,
+            status: 'success',
+            command,
+            device: dev
+        };
+    }
+
+    // 12. IPCONFIG
     if (mainCmd === 'ipconfig' || mainCmd.startsWith('ipconfig/')) {
         if (isRouter) {
             return {
@@ -8526,7 +9229,7 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 4. IFCONFIG
+    // 13. IFCONFIG
     if (mainCmd === 'ifconfig') {
         if (isRouter) {
             return {
@@ -8548,7 +9251,7 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 5. ARP
+    // 14. ARP
     if (mainCmd === 'arp') {
         if (tokens[1] === '-a' || tokens[1] === '-g') {
             if (isRouter) {
@@ -8592,7 +9295,7 @@ function executeCliCommand(deviceId, rawInput) {
         }
     }
 
-    // 6. ROUTE / ROUTE PRINT / NETSTAT -R
+    // 15. ROUTE / ROUTE PRINT / NETSTAT -R
     if (mainCmd === 'route' || (mainCmd === 'netstat' && tokens[1] === '-r')) {
         if (isRouter) {
             return {
@@ -8614,7 +9317,7 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 7. SHOW commands (show ip route, show interfaces, show arp, show access-lists)
+    // 16. SHOW commands (show ip route, show interfaces, show arp, show access-lists)
     if (mainCmd === 'show') {
         const sub1 = tokens[1] || '';
         const sub2 = tokens[2] || '';
@@ -8729,7 +9432,7 @@ function executeCliCommand(deviceId, rawInput) {
         }
     }
 
-    // 8. Real Utilities (ping, traceroute, tracert)
+    // 17. Real Utilities (ping, traceroute, tracert)
     if (mainCmd === 'ping') {
         const targetArg = tokens.slice(1).join(' ').trim();
         const pingRes = executeCliPing(dev, targetArg);
@@ -8750,7 +9453,7 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 9. Unknown / Unsupported command
+    // 18. Unknown / Unsupported command
     return {
         success: false,
         output: `% Invalid command or syntax: "${command}". Type "help" or "?" to see available commands.`,
@@ -8914,6 +9617,17 @@ function handleTerminalInputSubmit() {
 
     inputEl.value = '';
     session.historyIndex = -1;
+
+    // Update active prompt & title in DOM if mode/name changed
+    const promptEl = document.getElementById('terminalPrompt');
+    if (promptEl) {
+        promptEl.textContent = getDeviceCliPrompt(dev);
+    }
+    const titleEl = document.getElementById('terminalTitle');
+    if (titleEl) {
+        titleEl.textContent = `${dev.name} — ${isRouter ? 'Router Console (Cisco IOS)' : 'Device Terminal'}`;
+    }
+
     scrollTerminalToBottom();
 }
 

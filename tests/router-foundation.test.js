@@ -259,6 +259,9 @@ function resetLab() {
     networkState.history = [];
     networkState.future = [];
     inspectorDrafts = {};
+    terminalRuntime.sessions = {};
+    terminalRuntime.activeDeviceId = null;
+    terminalRuntime.isOpen = false;
 }
 
 // 1. Router creation
@@ -11722,6 +11725,540 @@ runTest('371. Help command output includes all inspection commands', () => {
     assert.ok(resRouter.output.includes('show access-lists'));
     assert.ok(resRouter.output.includes('route'));
     assert.ok(resRouter.output.includes('ifconfig'));
+});
+
+// 372. hostname <name> updates device name and reflects in prompt across exec, config, and config-if modes
+runTest('372. hostname <name> updates device name and reflects in prompt across exec, config, and config-if modes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    assert.strictEqual(getDeviceCliPrompt(r0), 'Router0#');
+
+    const res = executeCliCommand('Router0', 'hostname CoreRouter-1');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(r0.name, 'CoreRouter-1');
+    assert.strictEqual(getDeviceCliPrompt(r0), 'CoreRouter-1#');
+
+    executeCliCommand(r0.id, 'configure terminal');
+    assert.strictEqual(getDeviceCliPrompt(r0), 'CoreRouter-1(config)#');
+
+    executeCliCommand(r0.id, 'interface Gig0/0');
+    assert.strictEqual(getDeviceCliPrompt(r0), 'CoreRouter-1(config-if)#');
+});
+
+// 373. hostname command validates input (rejects empty/invalid characters) and queries current hostname
+runTest('373. hostname command validates input (rejects empty/invalid characters) and queries current hostname', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+
+    // Query current hostname
+    const queryRes = executeCliCommand('Router0', 'hostname');
+    assert.strictEqual(queryRes.success, true);
+    assert.strictEqual(queryRes.output, 'Router0');
+
+    // Reject invalid names (spaces, invalid symbols)
+    const errRes1 = executeCliCommand('Router0', 'hostname Bad Hostname With Spaces');
+    assert.strictEqual(errRes1.success, false);
+    assert.ok(errRes1.output.includes('Invalid hostname'));
+    assert.strictEqual(r0.name, 'Router0');
+
+    const errRes2 = executeCliCommand('Router0', 'hostname Core@Router!#$');
+    assert.strictEqual(errRes2.success, false);
+    assert.ok(errRes2.output.includes('Invalid hostname'));
+    assert.strictEqual(r0.name, 'Router0');
+});
+
+// 374. hostname maintains stable device ID and preserves existing connection references
+runTest('374. hostname maintains stable device ID and preserves existing connection references', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const r0 = networkState.devices[0];
+    const pc0 = networkState.devices[1];
+    addConnection('Router0', 'PC0');
+
+    const conn = networkState.connections[0];
+    assert.strictEqual(conn.source, r0.id);
+    assert.strictEqual(conn.target, pc0.id);
+
+    executeCliCommand(r0.id, 'hostname EdgeGateway');
+    assert.strictEqual(networkState.devices[0].name, 'EdgeGateway');
+    assert.strictEqual(networkState.devices[0].id, 'Router0');
+    assert.strictEqual(conn.source, 'Router0');
+});
+
+// 375. hostname on end hosts (PC/Server) successfully updates name and prompt
+runTest('375. hostname on end hosts (PC/Server) successfully updates name and prompt', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const pc = networkState.devices[0];
+    assert.strictEqual(getDeviceCliPrompt(pc), 'PC0>');
+
+    const res = executeCliCommand('PC0', 'hostname Workstation-A');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(pc.name, 'Workstation-A');
+    assert.strictEqual(getDeviceCliPrompt(pc), 'Workstation-A>');
+});
+
+// 376. configure terminal enters Global Configuration mode and updates prompt to Router(config)#
+runTest('376. configure terminal enters Global Configuration mode and updates prompt to Router(config)#', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+
+    const res1 = executeCliCommand('Router0', 'configure terminal');
+    assert.strictEqual(res1.success, true);
+    assert.ok(res1.output.includes('Enter configuration commands'));
+    assert.strictEqual(getDeviceCliPrompt(r0), 'Router0(config)#');
+
+    executeCliCommand('Router0', 'exit');
+    assert.strictEqual(getDeviceCliPrompt(r0), 'Router0#');
+
+    const res2 = executeCliCommand('Router0', 'conf t');
+    assert.strictEqual(res2.success, true);
+    assert.strictEqual(getDeviceCliPrompt(r0), 'Router0(config)#');
+});
+
+// 377. configure terminal on end host is rejected with educational error
+runTest('377. configure terminal on end host is rejected with educational error', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const res = executeCliCommand('PC0', 'configure terminal');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Cisco IOS router command'));
+});
+
+// 378. interface <name> enters Interface Configuration mode with Router(config-if)# prompt and supports aliases
+runTest('378. interface <name> enters Interface Configuration mode with Router(config-if)# prompt and supports aliases', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    const session = getDeviceTerminalSession(r0.id);
+
+    const res1 = executeCliCommand('Router0', 'interface Gig0/0');
+    assert.strictEqual(res1.success, true);
+    assert.strictEqual(session.mode, 'config-if');
+    assert.strictEqual(session.selectedInterface, 'Gig0/0');
+    assert.strictEqual(getDeviceCliPrompt(r0), 'Router0(config-if)#');
+
+    // Alias: int g0/1
+    const res2 = executeCliCommand('Router0', 'int g0/1');
+    assert.strictEqual(res2.success, true);
+    assert.strictEqual(session.selectedInterface, 'Gig0/1');
+    assert.strictEqual(getDeviceCliPrompt(r0), 'Router0(config-if)#');
+});
+
+// 379. interface <name> rejects nonexistent interfaces and rejects execution on end hosts
+runTest('379. interface <name> rejects nonexistent interfaces and rejects execution on end hosts', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+
+    const resErr = executeCliCommand('Router0', 'interface FastEthernet0/0');
+    assert.strictEqual(resErr.success, false);
+    assert.ok(resErr.output.includes('Invalid interface'));
+
+    const resHost = executeCliCommand('PC0', 'interface eth0');
+    assert.strictEqual(resHost.success, false);
+    assert.ok(resHost.output.includes('Cisco IOS router command'));
+});
+
+// 380. ip address <ip> <mask/prefix> configures router interface IP and mask in config-if mode
+runTest('380. ip address <ip> <mask/prefix> configures router interface IP and mask in config-if mode', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+
+    executeCliCommand('Router0', 'interface Gig0/0');
+    const res1 = executeCliCommand('Router0', 'ip address 192.168.1.1 255.255.255.0');
+    assert.strictEqual(res1.success, true);
+    assert.strictEqual(r0.interfaces['Gig0/0'].ip, '192.168.1.1');
+    assert.strictEqual(r0.interfaces['Gig0/0'].subnetMask, '255.255.255.0');
+
+    // CIDR notation on Gig0/1
+    executeCliCommand('Router0', 'interface Gig0/1');
+    const res2 = executeCliCommand('Router0', 'ip address 10.0.0.1/24');
+    assert.strictEqual(res2.success, true);
+    assert.strictEqual(r0.interfaces['Gig0/1'].ip, '10.0.0.1');
+    assert.strictEqual(r0.interfaces['Gig0/1'].subnetMask, '255.255.255.0');
+
+    const showRes = executeCliCommand('Router0', 'show interfaces');
+    assert.ok(showRes.output.includes('Internet address is 192.168.1.1/24'));
+    assert.ok(showRes.output.includes('Internet address is 10.0.0.1/24'));
+});
+
+// 381. ip address rejects invalid IP, invalid subnet mask, and execution outside config-if mode
+runTest('381. ip address rejects invalid IP, invalid subnet mask, and execution outside config-if mode', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+
+    // Outside config-if mode
+    const resOutside = executeCliCommand('Router0', 'ip address 10.0.0.1 255.255.255.0');
+    assert.strictEqual(resOutside.success, false);
+    assert.ok(resOutside.output.includes('must be executed inside interface configuration mode'));
+
+    executeCliCommand('Router0', 'interface Gig0/0');
+
+    // Invalid IP
+    const resBadIp = executeCliCommand('Router0', 'ip address 999.999.999.999 255.255.255.0');
+    assert.strictEqual(resBadIp.success, false);
+    assert.ok(resBadIp.output.includes('Invalid IPv4 address'));
+
+    // Invalid Mask
+    const resBadMask = executeCliCommand('Router0', 'ip address 10.0.0.1 255.0.255.0');
+    assert.strictEqual(resBadMask.success, false);
+    assert.ok(resBadMask.output.includes('Invalid subnet mask'));
+});
+
+// 382. ip address prevents duplicate IP assignment across interfaces on the same router
+runTest('382. ip address prevents duplicate IP assignment across interfaces on the same router', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+
+    executeCliCommand('Router0', 'interface Gig0/0');
+    executeCliCommand('Router0', 'ip address 192.168.1.1 255.255.255.0');
+
+    executeCliCommand('Router0', 'interface Gig0/1');
+    const resDup = executeCliCommand('Router0', 'ip address 192.168.1.1 255.255.255.0');
+    assert.strictEqual(resDup.success, false);
+    assert.ok(resDup.output.includes('already configured on Gig0/0'));
+    assert.strictEqual(r0.interfaces['Gig0/1'].ip, '');
+});
+
+// 383. no ip address clears interface IP and mask and removes connected route
+runTest('383. no ip address clears interface IP and mask and removes connected route', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+
+    executeCliCommand('Router0', 'interface Gig0/0');
+    executeCliCommand('Router0', 'ip address 192.168.1.1 255.255.255.0');
+    assert.strictEqual(r0.interfaces['Gig0/0'].ip, '192.168.1.1');
+
+    const resClear = executeCliCommand('Router0', 'no ip address');
+    assert.strictEqual(resClear.success, true);
+    assert.strictEqual(r0.interfaces['Gig0/0'].ip, '');
+    assert.strictEqual(r0.interfaces['Gig0/0'].subnetMask, '');
+
+    const routeRes = executeCliCommand('Router0', 'show ip route');
+    assert.ok(!routeRes.output.includes('192.168.1.0/24'));
+});
+
+// 384. shutdown sets router interface administratively down and stops route advertisements
+runTest('384. shutdown sets router interface administratively down and stops route advertisements', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+
+    executeCliCommand('Router0', 'interface Gig0/0');
+    executeCliCommand('Router0', 'ip address 192.168.1.1 255.255.255.0');
+
+    const resShut = executeCliCommand('Router0', 'shutdown');
+    assert.strictEqual(resShut.success, true);
+    assert.strictEqual(r0.interfaces['Gig0/0'].status, 'down');
+
+    const showInt = executeCliCommand('Router0', 'show interfaces');
+    assert.ok(showInt.output.includes('Gig0/0 is administratively down, line protocol is down'));
+
+    const showRoute = executeCliCommand('Router0', 'show ip route');
+    assert.ok(!showRoute.output.includes('192.168.1.0/24'));
+});
+
+// 385. no shutdown restores router interface to up state and re-enables connected routes
+runTest('385. no shutdown restores router interface to up state and re-enables connected routes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+
+    executeCliCommand('Router0', 'interface Gig0/0');
+    executeCliCommand('Router0', 'ip address 192.168.1.1 255.255.255.0');
+    executeCliCommand('Router0', 'shutdown');
+    assert.strictEqual(r0.interfaces['Gig0/0'].status, 'down');
+
+    const resNoShut = executeCliCommand('Router0', 'no shutdown');
+    assert.strictEqual(resNoShut.success, true);
+    assert.strictEqual(r0.interfaces['Gig0/0'].status, 'up');
+
+    const showInt = executeCliCommand('Router0', 'show interfaces');
+    assert.ok(showInt.output.includes('Gig0/0 is up, line protocol is up'));
+
+    const showRoute = executeCliCommand('Router0', 'show ip route');
+    assert.ok(showRoute.output.includes('192.168.1.0/24 is directly connected, Gig0/0'));
+});
+
+// 386. ip route configures real static route visible in show ip route
+runTest('386. ip route configures real static route visible in show ip route', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const res = executeCliCommand('Router0', 'ip route 192.168.50.0 255.255.255.0 10.0.0.2');
+    assert.strictEqual(res.success, true);
+
+    const showRoute = executeCliCommand('Router0', 'show ip route');
+    assert.ok(showRoute.output.includes('S    192.168.50.0/24 [1/0] via 10.0.0.2, Gig0/0'));
+});
+
+// 387. ip route supports Floating Static Routes with Administrative Distance and metric
+runTest('387. ip route supports Floating Static Routes with Administrative Distance and metric', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    r0.interfaces['Gig0/0'].ip = '10.0.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    // Primary route AD=1
+    executeCliCommand('Router0', 'ip route 172.16.0.0 255.255.0.0 10.0.1.2 1 0');
+    // Floating backup route AD=200
+    executeCliCommand('Router0', 'ip route 172.16.0.0 255.255.0.0 10.0.2.2 200 5');
+
+    const showRoute = executeCliCommand('Router0', 'show ip route');
+    assert.ok(showRoute.output.includes('172.16.0.0/16 [1/0] via 10.0.1.2, Gig0/0'));
+    assert.ok(showRoute.output.includes('172.16.0.0/16 [200/5] via 10.0.2.2, Gig0/1'));
+});
+
+// 388. no ip route removes matching static route from routing table
+runTest('388. no ip route removes matching static route from routing table', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand('Router0', 'ip route 192.168.20.0 255.255.255.0 10.0.0.2');
+    const showBefore = executeCliCommand('Router0', 'show ip route');
+    assert.ok(showBefore.output.includes('192.168.20.0/24'));
+
+    const resDel = executeCliCommand('Router0', 'no ip route 192.168.20.0 255.255.255.0 10.0.0.2');
+    assert.strictEqual(resDel.success, true);
+
+    const showAfter = executeCliCommand('Router0', 'show ip route');
+    assert.ok(!showAfter.output.includes('192.168.20.0/24'));
+});
+
+// 389. exit navigates back through context hierarchy (config-if -> config -> exec)
+runTest('389. exit navigates back through context hierarchy (config-if -> config -> exec)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    const session = getDeviceTerminalSession(r0.id);
+
+    executeCliCommand('Router0', 'configure terminal');
+    assert.strictEqual(session.mode, 'config');
+    assert.strictEqual(getDeviceCliPrompt(r0), 'Router0(config)#');
+
+    executeCliCommand('Router0', 'interface Gig0/0');
+    assert.strictEqual(session.mode, 'config-if');
+    assert.strictEqual(session.selectedInterface, 'Gig0/0');
+    assert.strictEqual(getDeviceCliPrompt(r0), 'Router0(config-if)#');
+
+    executeCliCommand('Router0', 'exit');
+    assert.strictEqual(session.mode, 'config');
+    assert.strictEqual(session.selectedInterface, null);
+    assert.strictEqual(getDeviceCliPrompt(r0), 'Router0(config)#');
+
+    executeCliCommand('Router0', 'exit');
+    assert.strictEqual(session.mode, 'exec');
+    assert.strictEqual(session.selectedInterface, null);
+    assert.strictEqual(getDeviceCliPrompt(r0), 'Router0#');
+});
+
+// 390. end jumps directly from any configuration mode back to Privileged EXEC mode
+runTest('390. end jumps directly from any configuration mode back to Privileged EXEC mode', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    const session = getDeviceTerminalSession(r0.id);
+
+    executeCliCommand('Router0', 'configure terminal');
+    executeCliCommand('Router0', 'interface Gig0/0');
+    assert.strictEqual(session.mode, 'config-if');
+
+    const resEnd = executeCliCommand('Router0', 'end');
+    assert.strictEqual(resEnd.success, true);
+    assert.strictEqual(session.mode, 'exec');
+    assert.strictEqual(session.selectedInterface, null);
+    assert.strictEqual(getDeviceCliPrompt(r0), 'Router0#');
+});
+
+// 391. do <command> allows executing operational commands from config and config-if modes
+runTest('391. do <command> allows executing operational commands from config and config-if modes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand('Router0', 'configure terminal');
+    executeCliCommand('Router0', 'interface Gig0/0');
+
+    const doRes1 = executeCliCommand('Router0', 'do show ip route');
+    assert.strictEqual(doRes1.success, true);
+    assert.ok(doRes1.output.includes('10.0.0.0/24 is directly connected'));
+
+    const doRes2 = executeCliCommand('Router0', 'do show interfaces');
+    assert.strictEqual(doRes2.success, true);
+    assert.ok(doRes2.output.includes('Gig0/0 is up, line protocol is up'));
+});
+
+// 392. Context-aware help / ? displays specific commands for exec, config, and config-if modes
+runTest('392. Context-aware help / ? displays specific commands for exec, config, and config-if modes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+
+    const helpExec = executeCliCommand('Router0', 'help');
+    assert.ok(helpExec.output.includes('configure terminal'));
+    assert.ok(helpExec.output.includes('show ip route'));
+
+    executeCliCommand('Router0', 'configure terminal');
+    const helpConfig = executeCliCommand('Router0', 'help');
+    assert.ok(helpConfig.output.includes('hostname <name>'));
+    assert.ok(helpConfig.output.includes('ip route'));
+
+    executeCliCommand('Router0', 'interface Gig0/0');
+    const helpConfigIf = executeCliCommand('Router0', 'help');
+    assert.ok(helpConfigIf.output.includes('ip address'));
+    assert.ok(helpConfigIf.output.includes('shutdown'));
+    assert.ok(helpConfigIf.output.includes('no shutdown'));
+});
+
+// 393. CLI session context is isolated per device and does not leak across routers
+runTest('393. CLI session context is isolated per device and does not leak across routers', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const r0 = networkState.devices[0];
+    const r1 = networkState.devices[1];
+
+    executeCliCommand('Router0', 'configure terminal');
+    executeCliCommand('Router0', 'interface Gig0/0');
+
+    const s0 = getDeviceTerminalSession(r0.id);
+    const s1 = getDeviceTerminalSession(r1.id);
+
+    assert.strictEqual(s0.mode, 'config-if');
+    assert.strictEqual(s0.selectedInterface, 'Gig0/0');
+    assert.strictEqual(s1.mode, 'exec');
+    assert.strictEqual(s1.selectedInterface, null);
+
+    assert.strictEqual(getDeviceCliPrompt(r0), 'Router0(config-if)#');
+    assert.strictEqual(getDeviceCliPrompt(r1), 'Router1#');
+});
+
+// 394. Undo / Redo (pushHistory()) integrates with CLI mutating commands (hostname, ip, route, shutdown)
+runTest('394. Undo / Redo (pushHistory()) integrates with CLI mutating commands (hostname, ip, route, shutdown)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+
+    // 1. Hostname change
+    executeCliCommand('Router0', 'hostname EdgeRouter');
+    assert.strictEqual(networkState.devices[0].name, 'EdgeRouter');
+    undo();
+    assert.strictEqual(networkState.devices[0].name, 'Router0');
+    redo();
+    assert.strictEqual(networkState.devices[0].name, 'EdgeRouter');
+
+    // 2. IP address configuration
+    executeCliCommand('EdgeRouter', 'interface Gig0/0');
+    executeCliCommand('EdgeRouter', 'ip address 192.168.10.1 255.255.255.0');
+    assert.strictEqual(networkState.devices[0].interfaces['Gig0/0'].ip, '192.168.10.1');
+    undo();
+    assert.strictEqual(networkState.devices[0].interfaces['Gig0/0'].ip, '');
+    redo();
+    assert.strictEqual(networkState.devices[0].interfaces['Gig0/0'].ip, '192.168.10.1');
+
+    // 3. Shutdown
+    executeCliCommand('EdgeRouter', 'shutdown');
+    assert.strictEqual(networkState.devices[0].interfaces['Gig0/0'].status, 'down');
+    undo();
+    assert.strictEqual(networkState.devices[0].interfaces['Gig0/0'].status, 'up');
+    redo();
+    assert.strictEqual(networkState.devices[0].interfaces['Gig0/0'].status, 'down');
+});
+
+// 395. End-to-end network test: Full multi-router topology configured entirely via CLI commands with successful ping and traceroute
+runTest('395. End-to-end network test: Full multi-router topology configured entirely via CLI commands with successful ping and traceroute', () => {
+    resetLab();
+
+    // Topology: PC0 (192.168.1.10/24) --- (Gig0/0) Router0 (Gig0/1: 10.0.0.1/30) --- (Gig0/1: 10.0.0.2/30) Router1 (Gig0/0: 192.168.2.1/24) --- PC1 (192.168.2.10/24)
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 400, 100);
+    addDevice('pc', 550, 100);
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[3];
+
+    // Configure PC0
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    // Configure PC1
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    // Connect topology
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'Router1');
+    addConnection('Router1', 'PC1');
+
+    // Configure Router0 ENTIRELY via CLI commands
+    executeCliCommand('Router0', 'configure terminal');
+    executeCliCommand('Router0', 'interface Gig0/0');
+    executeCliCommand('Router0', 'ip address 192.168.1.1 255.255.255.0');
+    executeCliCommand('Router0', 'no shutdown');
+    executeCliCommand('Router0', 'interface Gig0/1');
+    executeCliCommand('Router0', 'ip address 10.0.0.1 255.255.255.252');
+    executeCliCommand('Router0', 'no shutdown');
+    executeCliCommand('Router0', 'exit');
+    executeCliCommand('Router0', 'ip route 192.168.2.0 255.255.255.0 10.0.0.2');
+    executeCliCommand('Router0', 'end');
+
+    // Configure Router1 ENTIRELY via CLI commands
+    // Note: Router1's first connection (to Router0) is on Gig0/0, second connection (to PC1) is on Gig0/1
+    executeCliCommand('Router1', 'configure terminal');
+    executeCliCommand('Router1', 'interface Gig0/0');
+    executeCliCommand('Router1', 'ip address 10.0.0.2 255.255.255.252');
+    executeCliCommand('Router1', 'no shutdown');
+    executeCliCommand('Router1', 'interface Gig0/1');
+    executeCliCommand('Router1', 'ip address 192.168.2.1 255.255.255.0');
+    executeCliCommand('Router1', 'no shutdown');
+    executeCliCommand('Router1', 'exit');
+    executeCliCommand('Router1', 'ip route 192.168.1.0 255.255.255.0 10.0.0.1');
+    executeCliCommand('Router1', 'end');
+
+    // Verify routing tables
+    const r0Route = executeCliCommand('Router0', 'show ip route');
+    assert.ok(r0Route.output.includes('192.168.1.0/24 is directly connected, Gig0/0'));
+    assert.ok(r0Route.output.includes('10.0.0.0/30 is directly connected, Gig0/1'));
+    assert.ok(r0Route.output.includes('192.168.2.0/24 [1/0] via 10.0.0.2, Gig0/1'));
+
+    const r1Route = executeCliCommand('Router1', 'show ip route');
+    assert.ok(r1Route.output.includes('10.0.0.0/30 is directly connected, Gig0/0'));
+    assert.ok(r1Route.output.includes('192.168.2.0/24 is directly connected, Gig0/1'));
+    assert.ok(r1Route.output.includes('192.168.1.0/24 [1/0] via 10.0.0.1, Gig0/0'));
+
+    // Execute real ICMP simulation via CLI ping from PC0 to PC1
+    const pingRes = executeCliCommand('PC0', 'ping 192.168.2.10');
+    assert.strictEqual(pingRes.success, true);
+    assert.ok(pingRes.output.includes('Reply from 192.168.2.10'));
+    assert.ok(pingRes.output.includes('Packets: Sent = 4, Received = 4, Lost = 0 (0% loss)'));
+
+    // Execute traceroute from PC0 to PC1
+    const traceRes = executeCliCommand('PC0', 'traceroute 192.168.2.10');
+    assert.strictEqual(traceRes.success, true);
+    assert.ok(traceRes.output.includes('192.168.1.1'));
+    assert.ok(traceRes.output.includes('10.0.0.2'));
+    assert.ok(traceRes.output.includes('192.168.2.10'));
+    assert.ok(traceRes.output.includes('Trace complete.'));
 });
 
 console.log('----------------------------------------------------');
