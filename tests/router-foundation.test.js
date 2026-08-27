@@ -11327,6 +11327,403 @@ runTest('351. Router CLI can execute ping and traceroute across the network', ()
     assert.ok(traceRes.output.includes('Trace complete.'));
 });
 
+// 352. ipconfig on host with multiple interfaces renders each interface
+runTest('352. ipconfig on host with multiple interfaces renders each interface', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const pc = networkState.devices[0];
+    pc.interfaces = {
+        'eth0': { ip: '192.168.1.50', subnetMask: '255.255.255.0', gateway: '192.168.1.1', mac: '02:00:00:11:22:33' },
+        'eth1': { ip: '10.0.0.50', subnetMask: '255.0.0.0', gateway: '10.0.0.1', mac: '02:00:00:44:55:66' }
+    };
+
+    const res = executeCliCommand('PC0', 'ipconfig');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Ethernet adapter eth0:'));
+    assert.ok(res.output.includes('IPv4 Address. . . . . . . . . . . : 192.168.1.50'));
+    assert.ok(res.output.includes('Ethernet adapter eth1:'));
+    assert.ok(res.output.includes('IPv4 Address. . . . . . . . . . . : 10.0.0.50'));
+});
+
+// 353. ipconfig on unknown or nonexistent device returns error cleanly
+runTest('353. ipconfig on unknown or nonexistent device returns error cleanly', () => {
+    resetLab();
+    const res = executeCliCommand('NonExistentDevice', 'ipconfig');
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.status, 'error');
+    assert.ok(res.output.includes('% Error: Device "NonExistentDevice" not found.'));
+});
+
+// 354. ifconfig on host exposes host interface configuration accurately
+runTest('354. ifconfig on host exposes host interface configuration accurately', () => {
+    resetLab();
+    addDevice('laptop', 50, 100);
+    const laptop = networkState.devices[0];
+    laptop.ip = '172.16.0.25';
+    laptop.subnetMask = '255.255.0.0';
+    laptop.gateway = '172.16.0.1';
+    laptop.mac = '02:aa:bb:cc:dd:ee';
+
+    const res = executeCliCommand('Laptop0', 'ifconfig');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('IPv4 Address. . . . . . . . . . . : 172.16.0.25'));
+    assert.ok(res.output.includes('Subnet Mask . . . . . . . . . . . : 255.255.0.0'));
+    assert.ok(res.output.includes('Default Gateway . . . . . . . . . : 172.16.0.1'));
+    assert.ok(res.output.includes('02-AA-BB-CC-DD-EE'));
+});
+
+// 355. ifconfig on router exposes real router interfaces (Gig0/0, Gig0/1, IP, status, MAC)
+runTest('355. ifconfig on router exposes real router interfaces (Gig0/0, Gig0/1, IP, status, MAC)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    r0.interfaces['Gig0/0'].ip = '192.168.10.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.1.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    const res = executeCliCommand('Router0', 'ifconfig');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Gig0/0 is up, line protocol is up'));
+    assert.ok(res.output.includes('Internet address is 192.168.10.1/24'));
+    assert.ok(res.output.includes('Gig0/1 is up, line protocol is up'));
+    assert.ok(res.output.includes('Internet address is 10.1.1.1/30'));
+});
+
+// 356. ifconfig is read-only and does not mutate device or router state
+runTest('356. ifconfig is read-only and does not mutate device or router state', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const beforeState = JSON.stringify(r0);
+    executeCliCommand('Router0', 'ifconfig');
+    const afterState = JSON.stringify(r0);
+    assert.strictEqual(beforeState, afterState);
+});
+
+// 357. arp on host and router with empty cache returns clear empty message
+runTest('357. arp on host and router with empty cache returns clear empty message', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 150, 100);
+
+    const resHost = executeCliCommand('PC0', 'arp');
+    assert.strictEqual(resHost.success, true);
+    assert.ok(resHost.output.includes('No ARP entries found.'));
+
+    const resRouter = executeCliCommand('Router0', 'arp');
+    assert.strictEqual(resRouter.success, true);
+    assert.ok(resRouter.output.includes('No ARP entries found.'));
+});
+
+// 358. arp on host with multiple learned entries renders dynamic IP/MAC table
+runTest('358. arp on host with multiple learned entries renders dynamic IP/MAC table', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const pc0 = networkState.devices[0];
+    pc0.ip = '192.168.1.50';
+
+    learnArp(pc0.id, '192.168.1.1', '02:00:00:11:11:11');
+    learnArp(pc0.id, '192.168.1.20', '02:00:00:22:22:22');
+    learnArp(pc0.id, '192.168.1.30', '02:00:00:33:33:33');
+
+    const res = executeCliCommand('PC0', 'arp');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('192.168.1.1'));
+    assert.ok(res.output.includes('02:00:00:11:11:11'));
+    assert.ok(res.output.includes('192.168.1.20'));
+    assert.ok(res.output.includes('02:00:00:22:22:22'));
+    assert.ok(res.output.includes('192.168.1.30'));
+    assert.ok(res.output.includes('02:00:00:33:33:33'));
+});
+
+// 359. arp on router without flags renders Cisco IOS-style ARP table
+runTest('359. arp on router without flags renders Cisco IOS-style ARP table', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+
+    learnArp(r0.id, '10.0.0.2', '02:00:00:aa:bb:cc', { interface: 'Gig0/0' });
+
+    const res = executeCliCommand('Router0', 'arp');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Internet'));
+    assert.ok(res.output.includes('10.0.0.2'));
+    assert.ok(res.output.includes('02:00:00:aa:bb:cc'));
+    assert.ok(res.output.includes('Gig0/0'));
+});
+
+// 360. arp execution is read-only and leaves ARP cache unmodified
+runTest('360. arp execution is read-only and leaves ARP cache unmodified', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const pc0 = networkState.devices[0];
+    learnArp(pc0.id, '192.168.1.1', '02:00:00:11:11:11');
+
+    const beforeArp = JSON.stringify(getArpTable(pc0.id));
+    executeCliCommand('PC0', 'arp');
+    executeCliCommand('PC0', 'arp -a');
+    const afterArp = JSON.stringify(getArpTable(pc0.id));
+    assert.strictEqual(beforeArp, afterArp);
+});
+
+// 361. route / route print on host renders IPv4 route table with active on-link subnet and default gateway
+runTest('361. route / route print on host renders IPv4 route table with active on-link subnet and default gateway', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const pc = networkState.devices[0];
+    pc.ip = '192.168.1.100';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    const resRoute = executeCliCommand('PC0', 'route');
+    assert.strictEqual(resRoute.success, true);
+    assert.ok(resRoute.output.includes('IPv4 Route Table'));
+    assert.ok(resRoute.output.includes('0.0.0.0'));
+    assert.ok(resRoute.output.includes('192.168.1.1'));
+    assert.ok(resRoute.output.includes('192.168.1.0'));
+    assert.ok(resRoute.output.includes('255.255.255.0'));
+    assert.ok(resRoute.output.includes('192.168.1.100'));
+
+    const resRoutePrint = executeCliCommand('PC0', 'route print');
+    assert.strictEqual(resRoutePrint.success, true);
+    assert.strictEqual(resRoutePrint.output, resRoute.output);
+});
+
+// 362. route on router renders router routing table with connected and static routes
+runTest('362. route on router renders router routing table with connected and static routes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    r0.interfaces['Gig0/0'].ip = '10.0.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(r0.id, {
+        network: '10.0.2.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '10.0.1.2',
+        interface: 'Gig0/0',
+        adminDistance: 1,
+        metric: 0
+    });
+
+    const res = executeCliCommand('Router0', 'route');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('10.0.1.0/24 is directly connected, Gig0/0'));
+    assert.ok(res.output.includes('10.0.2.0/24 [1/0] via 10.0.1.2, Gig0/0'));
+});
+
+// 363. route command dynamically reflects router routing changes without mutation
+runTest('363. route command dynamically reflects router routing changes without mutation', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    r0.interfaces['Gig0/0'].ip = '10.0.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const resInitial = executeCliCommand('Router0', 'show ip route');
+    assert.ok(resInitial.output.includes('10.0.1.0/24 is directly connected'));
+    assert.ok(!resInitial.output.includes('172.16.0.0'));
+
+    addStaticRoute(r0.id, {
+        network: '172.16.0.0',
+        subnetMask: '255.255.0.0',
+        nextHop: '10.0.1.254',
+        interface: 'Gig0/0',
+        adminDistance: 1,
+        metric: 0
+    });
+
+    const resUpdated = executeCliCommand('Router0', 'show ip route');
+    assert.ok(resUpdated.output.includes('172.16.0.0/16 [1/0] via 10.0.1.254, Gig0/0'));
+});
+
+// 364. show interfaces on router renders interface status, line protocol, MAC, IP/mask, and connected neighbor link
+runTest('364. show interfaces on router renders interface status, line protocol, MAC, IP/mask, and connected neighbor link', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const r0 = networkState.devices[0];
+    const pc0 = networkState.devices[1];
+
+    r0.interfaces['Gig0/0'].ip = '192.168.5.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addConnection('Router0', 'PC0');
+
+    const res = executeCliCommand('Router0', 'show interfaces');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Gig0/0 is up, line protocol is up'));
+    assert.ok(res.output.includes('Hardware is GigabitEthernet'));
+    assert.ok(res.output.includes('Internet address is 192.168.5.1/24 (mask 255.255.255.0)'));
+    assert.ok(res.output.includes('Connected to PC0'));
+    assert.ok(res.output.includes('Gig0/1 is up, line protocol is up'));
+    assert.ok(res.output.includes('Internet address is unassigned'));
+    assert.ok(res.output.includes('Link status: not connected'));
+});
+
+// 365. show interfaces indicates administratively down state when interface is shut down
+runTest('365. show interfaces indicates administratively down state when interface is shut down', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    toggleRouterInterfaceStatus(r0.id, 'Gig0/0');
+
+    const res = executeCliCommand('Router0', 'show interfaces');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Gig0/0 is administratively down, line protocol is down'));
+});
+
+// 366. show interfaces on end host returns educational error explaining router command
+runTest('366. show interfaces on end host returns educational error explaining router command', () => {
+    resetLab();
+    addDevice('server', 50, 100);
+    const res = executeCliCommand('Server0', 'show interfaces');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes("% 'show interfaces' is a Cisco IOS router command"));
+    assert.ok(res.output.includes("On end hosts, use 'ipconfig' or 'ifconfig'"));
+});
+
+// 367. show ip route renders default route (0.0.0.0/0) with Gateway of last resort and candidate default S*
+runTest('367. show ip route renders default route (0.0.0.0/0) with Gateway of last resort and candidate default S*', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(r0.id, {
+        network: '0.0.0.0',
+        subnetMask: '0.0.0.0',
+        nextHop: '192.168.1.254',
+        interface: 'Gig0/0',
+        adminDistance: 1,
+        metric: 0
+    });
+
+    const res = executeCliCommand('Router0', 'show ip route');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Gateway of last resort is 192.168.1.254 to network 0.0.0.0'));
+    assert.ok(res.output.includes('S*   0.0.0.0/0 [1/0] via 192.168.1.254, Gig0/0'));
+});
+
+// 368. show ip route accurately differentiates primary vs floating static routes with AD
+runTest('368. show ip route accurately differentiates primary vs floating static routes with AD', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    r0.interfaces['Gig0/0'].ip = '10.0.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    // Primary route (AD = 1)
+    addStaticRoute(r0.id, {
+        network: '192.168.100.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '10.0.1.2',
+        interface: 'Gig0/0',
+        adminDistance: 1,
+        metric: 0
+    });
+
+    // Floating static backup route (AD = 10)
+    addStaticRoute(r0.id, {
+        network: '192.168.100.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '10.0.2.2',
+        interface: 'Gig0/1',
+        adminDistance: 10,
+        metric: 0
+    });
+
+    const res = executeCliCommand('Router0', 'show ip route');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('192.168.100.0/24 [1/0] via 10.0.1.2, Gig0/0'));
+    assert.ok(res.output.includes('192.168.100.0/24 [10/0] via 10.0.2.2, Gig0/1'));
+});
+
+// 369. show ip route respects router context (Router0 vs Router1 isolation)
+runTest('369. show ip route respects router context (Router0 vs Router1 isolation)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const r0 = networkState.devices[0];
+    const r1 = networkState.devices[1];
+
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '172.16.0.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.0.0';
+
+    const resR0 = executeCliCommand('Router0', 'show ip route');
+    const resR1 = executeCliCommand('Router1', 'show ip route');
+
+    assert.ok(resR0.output.includes('10.0.0.0/24 is directly connected'));
+    assert.ok(!resR0.output.includes('172.16.0.0/16'));
+
+    assert.ok(resR1.output.includes('172.16.0.0/16 is directly connected'));
+    assert.ok(!resR1.output.includes('10.0.0.0/24'));
+});
+
+// 370. Network inspection CLI commands do not alter undo/redo history or mutate topology state
+runTest('370. Network inspection CLI commands do not alter undo/redo history or mutate topology state', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const r0 = networkState.devices[0];
+    const pc0 = networkState.devices[1];
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+    addConnection('Router0', 'PC0');
+
+    const historyLenBefore = networkState.history.length;
+    const devicesBefore = JSON.stringify(networkState.devices);
+    const connsBefore = JSON.stringify(networkState.connections);
+
+    executeCliCommand('PC0', 'ipconfig');
+    executeCliCommand('PC0', 'ifconfig');
+    executeCliCommand('PC0', 'arp');
+    executeCliCommand('PC0', 'route');
+    executeCliCommand('Router0', 'show ip route');
+    executeCliCommand('Router0', 'show interfaces');
+    executeCliCommand('Router0', 'show arp');
+    executeCliCommand('Router0', 'route');
+    executeCliCommand('Router0', 'ifconfig');
+
+    assert.strictEqual(networkState.history.length, historyLenBefore);
+    assert.strictEqual(JSON.stringify(networkState.devices), devicesBefore);
+    assert.strictEqual(JSON.stringify(networkState.connections), connsBefore);
+});
+
+// 371. Help command output includes all inspection commands
+runTest('371. Help command output includes all inspection commands', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const resHost = executeCliCommand('PC0', 'help');
+    assert.ok(resHost.output.includes('ipconfig'));
+    assert.ok(resHost.output.includes('ifconfig'));
+    assert.ok(resHost.output.includes('arp'));
+    assert.ok(resHost.output.includes('route'));
+
+    addDevice('router', 150, 100);
+    const resRouter = executeCliCommand('Router0', 'help');
+    assert.ok(resRouter.output.includes('show ip route'));
+    assert.ok(resRouter.output.includes('show interfaces'));
+    assert.ok(resRouter.output.includes('show arp'));
+    assert.ok(resRouter.output.includes('show access-lists'));
+    assert.ok(resRouter.output.includes('route'));
+    assert.ok(resRouter.output.includes('ifconfig'));
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

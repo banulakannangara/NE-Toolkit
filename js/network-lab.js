@@ -7794,21 +7794,38 @@ function clearCliTerminal(deviceId) {
 }
 
 function formatCliIpconfig(device) {
-    const ip = device.ip || '0.0.0.0';
-    const mask = device.subnetMask || '0.0.0.0';
-    const gateway = device.gateway || '0.0.0.0';
-    const mac = device.mac ? device.mac.replace(/:/g, '-').toUpperCase() : '00-00-00-00-00-00';
-
-    return `Windows IP Configuration
-
-Ethernet adapter Local Area Connection:
-
-   Connection-specific DNS Suffix  . :
-   Link-local IPv6 Address . . . . . : fe80::1
-   IPv4 Address. . . . . . . . . . . : ${ip}
-   Subnet Mask . . . . . . . . . . . : ${mask}
-   Default Gateway . . . . . . . . . : ${gateway}
-   Physical Address. . . . . . . . . : ${mac}`;
+    const lines = ['Windows IP Configuration', ''];
+    if (device.interfaces && typeof device.interfaces === 'object' && Object.keys(device.interfaces).length > 0) {
+        Object.entries(device.interfaces).forEach(([ifName, iface]) => {
+            const ip = iface.ip || '0.0.0.0';
+            const mask = iface.subnetMask || '0.0.0.0';
+            const gateway = iface.gateway || device.gateway || '0.0.0.0';
+            const mac = iface.mac ? iface.mac.replace(/:/g, '-').toUpperCase() : '00-00-00-00-00-00';
+            lines.push(`Ethernet adapter ${ifName}:`);
+            lines.push('');
+            lines.push('   Connection-specific DNS Suffix  . :');
+            lines.push('   Link-local IPv6 Address . . . . . : fe80::1');
+            lines.push(`   IPv4 Address. . . . . . . . . . . : ${ip}`);
+            lines.push(`   Subnet Mask . . . . . . . . . . . : ${mask}`);
+            lines.push(`   Default Gateway . . . . . . . . . : ${gateway}`);
+            lines.push(`   Physical Address. . . . . . . . . : ${mac}`);
+            lines.push('');
+        });
+    } else {
+        const ip = device.ip || '0.0.0.0';
+        const mask = device.subnetMask || '0.0.0.0';
+        const gateway = device.gateway || '0.0.0.0';
+        const mac = device.mac ? device.mac.replace(/:/g, '-').toUpperCase() : '00-00-00-00-00-00';
+        lines.push('Ethernet adapter Local Area Connection:');
+        lines.push('');
+        lines.push('   Connection-specific DNS Suffix  . :');
+        lines.push('   Link-local IPv6 Address . . . . . : fe80::1');
+        lines.push(`   IPv4 Address. . . . . . . . . . . : ${ip}`);
+        lines.push(`   Subnet Mask . . . . . . . . . . . : ${mask}`);
+        lines.push(`   Default Gateway . . . . . . . . . : ${gateway}`);
+        lines.push(`   Physical Address. . . . . . . . . : ${mac}`);
+    }
+    return lines.join('\n').trimEnd();
 }
 
 function formatCliHostArpTable(device) {
@@ -7835,13 +7852,136 @@ function formatCliHostArpTable(device) {
     return lines.join('\n');
 }
 
+function formatCliHostRouteTable(device) {
+    const ip = device.ip || '127.0.0.1';
+    const gateway = device.gateway || '0.0.0.0';
+
+    const lines = [
+        '===========================================================================',
+        'Interface List',
+        `  11 ...${(device.mac || '00:00:00:00:00:00').replace(/:/g, ' ').toLowerCase()} ...... Ethernet adapter Local Area Connection`,
+        '===========================================================================',
+        '',
+        'IPv4 Route Table',
+        '===========================================================================',
+        'Active Routes:',
+        'Network Destination        Netmask          Gateway       Interface  Metric'
+    ];
+
+    const pad = (s, len) => String(s).padEnd(len, ' ');
+
+    // Default route
+    if (device.gateway && isValidIPv4(device.gateway)) {
+        lines.push(`          0.0.0.0          0.0.0.0  ${pad(device.gateway, 15)} ${pad(ip, 10)}      25`);
+    } else {
+        lines.push(`          0.0.0.0          0.0.0.0          On-link   ${pad(ip, 10)}      25`);
+    }
+
+    // Loopback
+    lines.push(`        127.0.0.0        255.0.0.0          On-link        127.0.0.1     331`);
+    lines.push(`        127.0.0.1  255.255.255.255          On-link        127.0.0.1     331`);
+
+    // Connected subnet if configured
+    if (device.ip && isValidIPv4(device.ip) && device.subnetMask) {
+        const normMask = normalizeSubnetMask(device.subnetMask);
+        if (normMask) {
+            const net = calculateNetworkAddress(device.ip, normMask);
+            if (net) {
+                lines.push(`  ${pad(net, 15)}  ${pad(normMask, 15)}          On-link   ${pad(ip, 10)}     281`);
+            }
+        }
+        lines.push(`  ${pad(device.ip, 15)}  255.255.255.255          On-link   ${pad(ip, 10)}     281`);
+    }
+
+    lines.push(`  255.255.255.255  255.255.255.255          On-link   ${pad(ip, 10)}     281`);
+    lines.push('===========================================================================');
+    lines.push('Persistent Routes:');
+    if (device.gateway && isValidIPv4(device.gateway)) {
+        lines.push('  Network Address          Netmask  Gateway Address  Metric');
+        lines.push(`          0.0.0.0          0.0.0.0  ${pad(device.gateway, 15)}      25`);
+    } else {
+        lines.push('  None');
+    }
+    lines.push('===========================================================================');
+
+    return lines.join('\n');
+}
+
+function getRouterInterfaceConnectionInfo(routerId, ifName) {
+    const runtime = networkState.routerRuntime?.[routerId];
+    if (!runtime || !runtime.ports) return null;
+    let matchedConnId = null;
+    for (const [connId, portName] of Object.entries(runtime.ports)) {
+        if (portName === ifName) {
+            matchedConnId = connId;
+            break;
+        }
+    }
+    if (!matchedConnId) return null;
+    const conn = (networkState.connections || []).find((c) => c.id === matchedConnId);
+    if (!conn) return null;
+    const neighborId = conn.source === routerId ? conn.target : conn.source;
+    const neighborDev = getDeviceById(neighborId);
+    return {
+        connectionId: conn.id,
+        neighborId,
+        neighborName: neighborDev ? neighborDev.name : neighborId,
+        neighborType: neighborDev ? neighborDev.type : 'unknown'
+    };
+}
+
+function formatCliRouterInterfaces(router) {
+    if (!router.interfaces || Object.keys(router.interfaces).length === 0) {
+        return 'No interfaces configured.';
+    }
+
+    const blocks = [];
+    Object.entries(router.interfaces).forEach(([ifName, iface]) => {
+        const isDown = iface.status === 'down';
+        const statusText = isDown ? 'administratively down' : 'up';
+        const protoText = isDown ? 'down' : 'up';
+        const mac = (iface.mac || '00:00:00:00:00:00').toLowerCase();
+
+        const lines = [
+            `${ifName} is ${statusText}, line protocol is ${protoText}`,
+            `  Hardware is GigabitEthernet, address is ${mac}`
+        ];
+
+        if (iface.ip && isValidIPv4(iface.ip)) {
+            const normMask = normalizeSubnetMask(iface.subnetMask);
+            const prefixLen = normMask ? getPrefixLengthFromMask(normMask) : 24;
+            lines.push(`  Internet address is ${iface.ip}/${prefixLen} (mask ${iface.subnetMask || normMask})`);
+        } else {
+            lines.push('  Internet address is unassigned');
+        }
+
+        lines.push('  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec');
+
+        const linkInfo = getRouterInterfaceConnectionInfo(router.id, ifName);
+        if (linkInfo) {
+            lines.push(`  Connected to ${linkInfo.neighborName} (${linkInfo.connectionId})`);
+        } else {
+            lines.push('  Link status: not connected');
+        }
+
+        blocks.push(lines.join('\n'));
+    });
+
+    return blocks.join('\n\n');
+}
+
 function formatCliRouterRoutingTable(router) {
     const routes = getRouterRoutingTable(router.id);
+    const defaultRoute = routes ? routes.find((r) => (r.network === '0.0.0.0' && (r.prefixLength === 0 || r.subnetMask === '0.0.0.0')) && r.status !== 'down') : null;
+    const gatewayText = defaultRoute
+        ? `Gateway of last resort is ${defaultRoute.nextHop || defaultRoute.interface} to network 0.0.0.0`
+        : 'Gateway of last resort is not set';
+
     const lines = [
         'Codes: C - connected, S - static, R - RIP, M - mobile, B - BGP',
         '       D - EIGRP, EX - EIGRP external, O - OSPF, IA - OSPF inter area',
         '',
-        'Gateway of last resort is not set',
+        gatewayText,
         ''
     ];
 
@@ -7851,7 +7991,11 @@ function formatCliRouterRoutingTable(router) {
     }
 
     routes.forEach((route) => {
-        const code = route.code || (route.type === 'connected' ? 'C' : 'S');
+        const isDefault = route.network === '0.0.0.0' && (route.prefixLength === 0 || route.subnetMask === '0.0.0.0');
+        let code = route.code || (route.type === 'connected' ? 'C' : (isDefault ? 'S*' : 'S'));
+        if (isDefault && code === 'S') {
+            code = 'S*';
+        }
         const net = `${route.network}/${route.prefixLength}`;
         const iface = route.interface || '—';
         const ad = typeof route.adminDistance === 'number' ? route.adminDistance : (code === 'C' ? 0 : 1);
@@ -8316,8 +8460,11 @@ function executeCliCommand(deviceId, rawInput) {
         if (isRouter) {
             helpText = `Commands available on ${dev.name} (Cisco IOS-style):
   show ip route     - Display current IPv4 routing table
+  show interfaces   - Display router interfaces and status (alias: show int)
   show arp          - Display router ARP table and interface bindings
   show access-lists - Display configured Access Control Lists (ACLs) and hit counts
+  route             - Display current routing table
+  ifconfig          - Display interface configuration
   ping <IP>         - Send ICMP Echo requests to test IPv4 reachability
   traceroute <IP>   - Trace packet hops to a destination IPv4 address (alias: tracert)
   clear, cls        - Clear the terminal screen
@@ -8326,7 +8473,9 @@ function executeCliCommand(deviceId, rawInput) {
             helpText = `Commands available on ${dev.name}:
   ipconfig          - Display IP configuration, Subnet Mask, Gateway, and MAC
   ipconfig /all     - Display detailed IP and interface configuration
-  arp -a            - Display the current ARP cache entries
+  ifconfig          - Display network interface configuration
+  arp, arp -a       - Display the current ARP cache entries
+  route, route print- Display current IPv4 routing table
   ping <IP>         - Send ICMP Echo requests to test IPv4 reachability
   traceroute <IP>   - Trace packet hops to a destination IPv4 address (alias: tracert)
   clear, cls        - Clear the terminal screen
@@ -8355,8 +8504,8 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 3. IPCONFIG / IFCONFIG
-    if (mainCmd === 'ipconfig' || mainCmd === 'ifconfig' || mainCmd.startsWith('ipconfig/')) {
+    // 3. IPCONFIG
+    if (mainCmd === 'ipconfig' || mainCmd.startsWith('ipconfig/')) {
         if (isRouter) {
             return {
                 success: false,
@@ -8377,9 +8526,31 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 4. ARP -A
+    // 4. IFCONFIG
+    if (mainCmd === 'ifconfig') {
+        if (isRouter) {
+            return {
+                success: true,
+                output: formatCliRouterInterfaces(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+        return {
+            success: true,
+            output: formatCliIpconfig(dev),
+            clear: false,
+            status: 'success',
+            command,
+            device: dev
+        };
+    }
+
+    // 5. ARP
     if (mainCmd === 'arp') {
-        if (tokens[1] === '-a' || tokens[1] === '-g' || tokens.length === 1) {
+        if (tokens[1] === '-a' || tokens[1] === '-g') {
             if (isRouter) {
                 return {
                     success: false,
@@ -8399,9 +8570,51 @@ function executeCliCommand(deviceId, rawInput) {
                 device: dev
             };
         }
+        if (tokens.length === 1) {
+            if (isRouter) {
+                return {
+                    success: true,
+                    output: formatCliRouterArpTable(dev),
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: formatCliHostArpTable(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
     }
 
-    // 5. SHOW commands (show ip route, show arp, show access-lists)
+    // 6. ROUTE / ROUTE PRINT / NETSTAT -R
+    if (mainCmd === 'route' || (mainCmd === 'netstat' && tokens[1] === '-r')) {
+        if (isRouter) {
+            return {
+                success: true,
+                output: formatCliRouterRoutingTable(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+        return {
+            success: true,
+            output: formatCliHostRouteTable(dev),
+            clear: false,
+            status: 'success',
+            command,
+            device: dev
+        };
+    }
+
+    // 7. SHOW commands (show ip route, show interfaces, show arp, show access-lists)
     if (mainCmd === 'show') {
         const sub1 = tokens[1] || '';
         const sub2 = tokens[2] || '';
@@ -8421,6 +8634,28 @@ function executeCliCommand(deviceId, rawInput) {
             return {
                 success: true,
                 output: formatCliRouterRoutingTable(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // show interfaces / show interface / show ip interface / show int
+        if (sub1 === 'interfaces' || sub1 === 'interface' || sub1 === 'int' || (sub1 === 'ip' && (sub2 === 'interface' || sub2 === 'interfaces' || sub2 === 'int'))) {
+            if (!isRouter) {
+                return {
+                    success: false,
+                    output: `% 'show interfaces' is a Cisco IOS router command. On end hosts, use 'ipconfig' or 'ifconfig'.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: formatCliRouterInterfaces(dev),
                 clear: false,
                 status: 'success',
                 command,
@@ -8476,7 +8711,7 @@ function executeCliCommand(deviceId, rawInput) {
         if (isRouter) {
             return {
                 success: false,
-                output: `% Unrecognized show command: "${command}". Available: "show ip route", "show arp", "show access-lists".`,
+                output: `% Unrecognized show command: "${command}". Available: "show ip route", "show interfaces", "show arp", "show access-lists".`,
                 clear: false,
                 status: 'error',
                 command,
@@ -8485,7 +8720,7 @@ function executeCliCommand(deviceId, rawInput) {
         } else {
             return {
                 success: false,
-                output: `% 'show' commands are for Cisco IOS routers. End hosts support 'ipconfig', 'arp -a', 'ping', 'traceroute', 'help', and 'clear'.`,
+                output: `% 'show' commands are for Cisco IOS routers. End hosts support 'ipconfig', 'ifconfig', 'arp', 'route', 'ping', 'traceroute', 'help', and 'clear'.`,
                 clear: false,
                 status: 'error',
                 command,
@@ -8494,7 +8729,7 @@ function executeCliCommand(deviceId, rawInput) {
         }
     }
 
-    // 6. Real Utilities (ping, traceroute, tracert)
+    // 8. Real Utilities (ping, traceroute, tracert)
     if (mainCmd === 'ping') {
         const targetArg = tokens.slice(1).join(' ').trim();
         const pingRes = executeCliPing(dev, targetArg);
@@ -8515,7 +8750,7 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 7. Unknown / Unsupported command
+    // 9. Unknown / Unsupported command
     return {
         success: false,
         output: `% Invalid command or syntax: "${command}". Type "help" or "?" to see available commands.`,
