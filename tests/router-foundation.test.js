@@ -14538,6 +14538,983 @@ runTest('510. End-to-End: Full ROAS configuration entirely from scratch via CLI 
     assert.ok(pingTest.output.includes('Reply from 192.168.20.10'));
 });
 
+// ==========================================
+// V5.12 PHASE 4: SWITCHED VIRTUAL INTERFACES (SVIs) & MULTILAYER SWITCHING
+// Tests 511 - 555
+// ==========================================
+
+// 511. normalizeSviName, isSviName, and getSviVlanId parse SVI interface names correctly
+runTest('511. normalizeSviName, isSviName, and getSviVlanId parse SVI interface names correctly', () => {
+    assert.strictEqual(normalizeSviName('vlan10'), 'Vlan10');
+    assert.strictEqual(normalizeSviName('Vlan 20'), 'Vlan20');
+    assert.strictEqual(normalizeSviName('VLAN 100'), 'Vlan100');
+    assert.strictEqual(normalizeSviName('vl 5'), 'Vlan5');
+    assert.strictEqual(normalizeSviName('Fa0/1'), null);
+
+    assert.strictEqual(isSviName('Vlan10'), true);
+    assert.strictEqual(isSviName('vlan20'), true);
+    assert.strictEqual(isSviName('Fa0/1'), false);
+    assert.strictEqual(isSviName('Gig0/0.10'), false);
+
+    assert.strictEqual(getSviVlanId('Vlan10'), 10);
+    assert.strictEqual(getSviVlanId('vlan 50'), 50);
+    assert.strictEqual(getSviVlanId('Fa0/1'), null);
+});
+
+// 512. ensureSwitchSvi creates SVI with correct VLAN association, default adminStatus up, and switch MAC
+runTest('512. ensureSwitchSvi creates SVI with correct VLAN association, default adminStatus up, and switch MAC', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    const svi = ensureSwitchSvi(sw, 10);
+    assert.ok(svi);
+    assert.strictEqual(svi.id, 'Vlan10');
+    assert.strictEqual(svi.vlanId, 10);
+    assert.strictEqual(svi.adminStatus, 'up');
+    assert.strictEqual(svi.mac, sw.mac);
+    assert.ok(sw.svis[10]);
+});
+
+// 513. ensureSwitchSvi preserves existing IP and configuration on re-entry
+runTest('513. ensureSwitchSvi preserves existing IP and configuration on re-entry', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    setSwitchSviIp(sw, 10, '192.168.10.1', '255.255.255.0');
+    const svi = ensureSwitchSvi(sw, 10);
+    assert.strictEqual(svi.ip, '192.168.10.1');
+    assert.strictEqual(svi.subnetMask, '255.255.255.0');
+});
+
+// 514. deleteSwitchSvi removes SVI from switch data model and clears associated ARP entries
+runTest('514. deleteSwitchSvi removes SVI from switch data model and clears associated ARP entries', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    setSwitchSviIp(sw, 10, '192.168.10.1', '255.255.255.0');
+    assert.ok(sw.svis[10]);
+
+    deleteSwitchSvi(sw, 10);
+    assert.strictEqual(sw.svis[10], undefined);
+});
+
+// 515. setSwitchSviIp assigns valid IPv4 address and subnet mask to SVI and normalizes CIDR/mask
+runTest('515. setSwitchSviIp assigns valid IPv4 address and subnet mask to SVI and normalizes CIDR/mask', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    const svi = setSwitchSviIp(sw, 20, '172.16.20.1', '24');
+    assert.strictEqual(svi.ip, '172.16.20.1');
+    assert.strictEqual(svi.subnetMask, '255.255.255.0');
+});
+
+// 516. setSwitchSviIp rejects invalid IP or mask and prevents duplicate IP assignment across SVIs
+runTest('516. setSwitchSviIp rejects invalid IP or mask and prevents duplicate IP assignment across SVIs', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    assert.throws(() => setSwitchSviIp(sw, 10, 'invalid.ip', '255.255.255.0'));
+    setSwitchSviIp(sw, 10, '192.168.10.1', '255.255.255.0');
+    assert.throws(() => setSwitchSviIp(sw, 20, '192.168.10.1', '255.255.255.0'));
+});
+
+// 517. setSwitchSviAdminStatus toggles administrative status
+runTest('517. setSwitchSviAdminStatus toggles administrative status', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    setSwitchSviAdminStatus(sw, 10, 'down');
+    assert.strictEqual(sw.svis[10].adminStatus, 'down');
+
+    setSwitchSviAdminStatus(sw, 10, 'up');
+    assert.strictEqual(sw.svis[10].adminStatus, 'up');
+});
+
+// 518. Cisco Autostate algorithm: getEffectiveSviStatus evaluates SVI up when VLAN exists, adminStatus is up, and active member port is connected
+runTest('518. Cisco Autostate algorithm: getEffectiveSviStatus evaluates SVI up when VLAN exists, adminStatus is up, and active member port is connected', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const sw = networkState.devices[0];
+
+    createSwitchVlan(sw, 10, 'Sales');
+    setSwitchSviIp(sw, 10, '192.168.10.1', '255.255.255.0');
+
+    // No port connected to VLAN 10 yet
+    assert.strictEqual(getEffectiveSviStatus(sw, 10), 'down');
+
+    // Connect PC to Fa0/1 on VLAN 10
+    addConnection('Switch0', 'PC0');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+    assert.strictEqual(getEffectiveSviStatus(sw, 10), 'up');
+});
+
+// 519. SVI line protocol goes down when administrative status is down even if active ports exist
+runTest('519. SVI line protocol goes down when administrative status is down even if active ports exist', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const sw = networkState.devices[0];
+
+    createSwitchVlan(sw, 10, 'Sales');
+    setSwitchSviIp(sw, 10, '192.168.10.1', '255.255.255.0');
+    addConnection('Switch0', 'PC0');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+
+    assert.strictEqual(getEffectiveSviStatus(sw, 10), 'up');
+    setSwitchSviAdminStatus(sw, 10, 'down');
+    assert.strictEqual(getEffectiveSviStatus(sw, 10), 'down');
+});
+
+// 520. SVI line protocol goes down when associated VLAN is deleted from switch
+runTest('520. SVI line protocol goes down when associated VLAN is deleted from switch', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const sw = networkState.devices[0];
+
+    createSwitchVlan(sw, 10, 'Sales');
+    setSwitchSviIp(sw, 10, '192.168.10.1', '255.255.255.0');
+    addConnection('Switch0', 'PC0');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+
+    assert.strictEqual(getEffectiveSviStatus(sw, 10), 'up');
+    deleteSwitchVlan(sw, 10);
+    assert.strictEqual(getEffectiveSviStatus(sw, 10), 'down');
+});
+
+// 521. SVI line protocol goes down when all ports in the VLAN are disconnected
+runTest('521. SVI line protocol goes down when all ports in the VLAN are disconnected', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const sw = networkState.devices[0];
+
+    createSwitchVlan(sw, 10, 'Sales');
+    setSwitchSviIp(sw, 10, '192.168.10.1', '255.255.255.0');
+    addConnection('Switch0', 'PC0');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+    assert.strictEqual(getEffectiveSviStatus(sw, 10), 'up');
+
+    // Remove connection
+    networkState.connections = [];
+    assert.strictEqual(getEffectiveSviStatus(sw, 10), 'down');
+});
+
+// 522. SVI line protocol becomes up via trunk port when trunk allows the SVI VLAN and is connected
+runTest('522. SVI line protocol becomes up via trunk port when trunk allows the SVI VLAN and is connected', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    const sw0 = networkState.devices[0];
+    const sw1 = networkState.devices[1];
+
+    createSwitchVlan(sw0, 30, 'Guest');
+    setSwitchSviIp(sw0, 30, '10.30.0.1', '255.255.255.0');
+    addConnection('Switch0', 'Switch1');
+
+    setSwitchPortMode(sw0, 'Fa0/1', 'trunk');
+    setSwitchPortAllowedVlans(sw0, 'Fa0/1', 'set', '10,20,30');
+
+    assert.strictEqual(getEffectiveSviStatus(sw0, 30), 'up');
+});
+
+// 523. SVI line protocol stays down when trunk port specifically disallows the SVI VLAN
+runTest('523. SVI line protocol stays down when trunk port specifically disallows the SVI VLAN', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    const sw0 = networkState.devices[0];
+
+    createSwitchVlan(sw0, 30, 'Guest');
+    setSwitchSviIp(sw0, 30, '10.30.0.1', '255.255.255.0');
+    addConnection('Switch0', 'Switch1');
+
+    setSwitchPortMode(sw0, 'Fa0/1', 'trunk');
+    setSwitchPortAllowedVlans(sw0, 'Fa0/1', 'set', '10,20');
+
+    assert.strictEqual(getEffectiveSviStatus(sw0, 30), 'down');
+});
+
+// 524. setSwitchIpRouting toggles L3 routing capability on switch
+runTest('524. setSwitchIpRouting toggles L3 routing capability on switch', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    assert.strictEqual(sw.ipRouting, false);
+
+    setSwitchIpRouting(sw, true);
+    assert.strictEqual(sw.ipRouting, true);
+
+    setSwitchIpRouting(sw, false);
+    assert.strictEqual(sw.ipRouting, false);
+});
+
+// 525. getSwitchRoutingTable returns empty array when ipRouting is false
+runTest('525. getSwitchRoutingTable returns empty array when ipRouting is false', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    setSwitchSviIp(sw, 10, '192.168.10.1', '255.255.255.0');
+
+    assert.strictEqual(getSwitchRoutingTable(sw.id).length, 0);
+});
+
+// 526. getSwitchRoutingTable generates Connected routes for active SVIs when ipRouting is true
+runTest('526. getSwitchRoutingTable generates Connected routes for active SVIs when ipRouting is true', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const sw = networkState.devices[0];
+
+    createSwitchVlan(sw, 10, 'Sales');
+    setSwitchSviIp(sw, 10, '192.168.10.1', '255.255.255.0');
+    addConnection('Switch0', 'PC0');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+    setSwitchIpRouting(sw, true);
+
+    const routes = getSwitchRoutingTable(sw.id);
+    assert.strictEqual(routes.length, 1);
+    assert.strictEqual(routes[0].code, 'C');
+    assert.strictEqual(routes[0].network, '192.168.10.0');
+    assert.strictEqual(routes[0].prefixLength, 24);
+    assert.strictEqual(routes[0].interface, 'Vlan10');
+    assert.strictEqual(routes[0].status, 'active');
+});
+
+// 527. getSwitchRoutingTable marks Connected route status as down when SVI is down or admin down
+runTest('527. getSwitchRoutingTable marks Connected route status as down when SVI is down or admin down', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const sw = networkState.devices[0];
+
+    createSwitchVlan(sw, 10, 'Sales');
+    setSwitchSviIp(sw, 10, '192.168.10.1', '255.255.255.0');
+    addConnection('Switch0', 'PC0');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+    setSwitchIpRouting(sw, true);
+
+    setSwitchSviAdminStatus(sw, 10, 'down');
+    const routes = getSwitchRoutingTable(sw.id);
+    assert.strictEqual(routes.length, 0);
+});
+
+// 528. addStaticRoute on switch adds Static routes when ipRouting is true and rejects when false
+runTest('528. addStaticRoute on switch adds Static routes when ipRouting is true and rejects when false', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const sw = networkState.devices[0];
+
+    createSwitchVlan(sw, 10, 'V10');
+    setSwitchSviIp(sw, 10, '192.168.10.1', '255.255.255.0');
+    addConnection('Switch0', 'PC0');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+
+    const resDisabled = addStaticRoute(sw.id, { network: '10.0.0.0', subnetMask: '255.0.0.0', nextHop: '192.168.10.254' });
+    assert.strictEqual(resDisabled.success, false);
+
+    setSwitchIpRouting(sw, true);
+    const resEnabled = addStaticRoute(sw.id, { network: '10.0.0.0', subnetMask: '255.0.0.0', nextHop: '192.168.10.254' });
+    assert.strictEqual(resEnabled.success, true);
+});
+
+// 529. lookupRoute on switch performs Longest Prefix Match and prefers more specific routes over default routes
+runTest('529. lookupRoute on switch performs Longest Prefix Match and prefers more specific routes over default routes', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const sw = networkState.devices[0];
+
+    createSwitchVlan(sw, 10, 'V10');
+    createSwitchVlan(sw, 20, 'V20');
+    setSwitchSviIp(sw, 10, '192.168.10.1', '255.255.255.0');
+    setSwitchSviIp(sw, 20, '192.168.20.1', '255.255.255.0');
+    addConnection('Switch0', 'PC0');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+    setSwitchIpRouting(sw, true);
+
+    addStaticRoute(sw.id, { network: '0.0.0.0', subnetMask: '0.0.0.0', nextHop: '192.168.10.254' });
+    addStaticRoute(sw.id, { network: '172.16.0.0', subnetMask: '255.255.0.0', nextHop: '192.168.10.100' });
+    addStaticRoute(sw.id, { network: '172.16.5.0', subnetMask: '255.255.255.0', nextHop: '192.168.10.105' });
+
+    const matchDefault = lookupRoute(sw.id, '8.8.8.8');
+    assert.strictEqual(matchDefault.route.prefixLength, 0);
+
+    const matchSpecific = lookupRoute(sw.id, '172.16.5.50');
+    assert.strictEqual(matchSpecific.route.prefixLength, 24);
+    assert.strictEqual(matchSpecific.route.nextHop, '192.168.10.105');
+});
+
+// 530. setSwitchDefaultGateway configures L2 default gateway and validates IPv4 format
+runTest('530. setSwitchDefaultGateway configures L2 default gateway and validates IPv4 format', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    setSwitchDefaultGateway(sw, '192.168.1.1');
+    assert.strictEqual(sw.defaultGateway, '192.168.1.1');
+
+    assert.throws(() => setSwitchDefaultGateway(sw, 'invalid.gw'));
+});
+
+// 531. Switch CLI interface vlan <id> enters config-if mode with prompt Switch(config-if)# and ensures SVI creation
+runTest('531. Switch CLI interface vlan <id> enters config-if mode with prompt Switch(config-if)# and ensures SVI creation', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    executeCliCommand('Switch0', 'configure terminal');
+    const res = executeCliCommand('Switch0', 'interface vlan 10');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getDeviceCliPrompt(sw), 'Switch0(config-if)#');
+    assert.ok(sw.svis[10]);
+});
+
+// 532. Switch CLI ip address <ip> <mask> in SVI mode configures SVI IP address and subnet mask
+runTest('532. Switch CLI ip address <ip> <mask> in SVI mode configures SVI IP address and subnet mask', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    executeCliCommand('Switch0', 'conf t');
+    executeCliCommand('Switch0', 'interface Vlan10');
+    const res = executeCliCommand('Switch0', 'ip address 192.168.10.1 255.255.255.0');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(sw.svis[10].ip, '192.168.10.1');
+    assert.strictEqual(sw.svis[10].subnetMask, '255.255.255.0');
+});
+
+// 533. Switch CLI shutdown and no shutdown on SVI toggle adminStatus
+runTest('533. Switch CLI shutdown and no shutdown on SVI toggle adminStatus', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    executeCliCommand('Switch0', 'conf t');
+    executeCliCommand('Switch0', 'interface vlan 10');
+    const resShut = executeCliCommand('Switch0', 'shutdown');
+    assert.strictEqual(resShut.success, true);
+    assert.strictEqual(sw.svis[10].adminStatus, 'down');
+
+    const resNoShut = executeCliCommand('Switch0', 'no shutdown');
+    assert.strictEqual(resNoShut.success, true);
+    assert.strictEqual(sw.svis[10].adminStatus, 'up');
+});
+
+// 534. Switch CLI no ip address on SVI removes configured IP address
+runTest('534. Switch CLI no ip address on SVI removes configured IP address', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    executeCliCommand('Switch0', 'conf t');
+    executeCliCommand('Switch0', 'interface vlan 10');
+    executeCliCommand('Switch0', 'ip address 192.168.10.1 255.255.255.0');
+    assert.strictEqual(sw.svis[10].ip, '192.168.10.1');
+
+    const resNoIp = executeCliCommand('Switch0', 'no ip address');
+    assert.strictEqual(resNoIp.success, true);
+    assert.strictEqual(sw.svis[10].ip, '');
+});
+
+// 535. Switch CLI no interface vlan <id> deletes SVI
+runTest('535. Switch CLI no interface vlan <id> deletes SVI', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    executeCliCommand('Switch0', 'conf t');
+    executeCliCommand('Switch0', 'interface vlan 10');
+    assert.ok(sw.svis[10]);
+
+    executeCliCommand('Switch0', 'no interface vlan 10');
+    assert.strictEqual(sw.svis[10], undefined);
+});
+
+// 536. Switch CLI ip routing and no ip routing toggle multilayer routing
+runTest('536. Switch CLI ip routing and no ip routing toggle multilayer routing', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    executeCliCommand('Switch0', 'conf t');
+    const resEnable = executeCliCommand('Switch0', 'ip routing');
+    assert.strictEqual(resEnable.success, true);
+    assert.strictEqual(sw.ipRouting, true);
+
+    const resDisable = executeCliCommand('Switch0', 'no ip routing');
+    assert.strictEqual(resDisable.success, true);
+    assert.strictEqual(sw.ipRouting, false);
+});
+
+// 537. Switch CLI ip default-gateway <ip> and no ip default-gateway configure L2 management gateway
+runTest('537. Switch CLI ip default-gateway <ip> and no ip default-gateway configure L2 management gateway', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    executeCliCommand('Switch0', 'conf t');
+    const resGw = executeCliCommand('Switch0', 'ip default-gateway 192.168.1.1');
+    assert.strictEqual(resGw.success, true);
+    assert.strictEqual(sw.defaultGateway, '192.168.1.1');
+
+    const resNoGw = executeCliCommand('Switch0', 'no ip default-gateway');
+    assert.strictEqual(resNoGw.success, true);
+    assert.strictEqual(sw.defaultGateway, '');
+});
+
+// 538. Switch CLI show ip interface brief formats tabular SVI status
+runTest('538. Switch CLI show ip interface brief formats tabular SVI status', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const sw = networkState.devices[0];
+
+    createSwitchVlan(sw, 10, 'Sales');
+    setSwitchSviIp(sw, 10, '192.168.10.1', '255.255.255.0');
+    addConnection('Switch0', 'PC0');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+
+    const res = executeCliCommand('Switch0', 'show ip interface brief');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Interface              IP-Address      OK? Method Status                Protocol'));
+    assert.ok(res.output.includes('Vlan10                 192.168.10.1    YES manual up                    up'));
+});
+
+// 539. Switch CLI show ip route renders switch routing table with codes when routing is enabled
+runTest('539. Switch CLI show ip route renders switch routing table with codes when routing is enabled', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const sw = networkState.devices[0];
+
+    createSwitchVlan(sw, 10, 'Sales');
+    setSwitchSviIp(sw, 10, '192.168.10.1', '255.255.255.0');
+    addConnection('Switch0', 'PC0');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+
+    // When ip routing is disabled
+    const resDisabled = executeCliCommand('Switch0', 'show ip route');
+    assert.ok(resDisabled.output.includes('IP routing is disabled'));
+
+    // When ip routing is enabled
+    setSwitchIpRouting(sw, true);
+    const resEnabled = executeCliCommand('Switch0', 'show ip route');
+    assert.ok(resEnabled.output.includes('Codes: C - connected, S - static'));
+    assert.ok(resEnabled.output.includes('C    192.168.10.0/24 is directly connected, Vlan10'));
+});
+
+// 540. Switch CLI show interfaces vlan <id> renders detailed SVI interface status
+runTest('540. Switch CLI show interfaces vlan <id> renders detailed SVI interface status', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const sw = networkState.devices[0];
+
+    createSwitchVlan(sw, 10, 'Sales');
+    setSwitchSviIp(sw, 10, '192.168.10.1', '255.255.255.0');
+    addConnection('Switch0', 'PC0');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+
+    const res = executeCliCommand('Switch0', 'show interfaces vlan 10');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Vlan10 is up, line protocol is up'));
+    assert.ok(res.output.includes('Hardware is EtherSVI'));
+    assert.ok(res.output.includes('Internet address is 192.168.10.1/24'));
+});
+
+// 541. Switch CLI ping to local subnet host succeeds from management SVI
+runTest('541. Switch CLI ping to local subnet host succeeds from management SVI', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const sw = networkState.devices[0];
+    const pc = networkState.devices[1];
+
+    setSwitchSviIp(sw, 1, '192.168.1.2', '255.255.255.0');
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    addConnection('Switch0', 'PC0');
+
+    const res = executeCliCommand('Switch0', 'ping 192.168.1.10');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Reply from 192.168.1.10'));
+});
+
+// 542. Switch CLI ping to remote subnet host succeeds using ip default-gateway when ipRouting is false
+runTest('542. Switch CLI ping to remote subnet host succeeds using ip default-gateway when ipRouting is false', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('router', 250, 100);
+    addDevice('pc', 400, 100);
+    const sw = networkState.devices[0];
+    const r0 = networkState.devices[1];
+    const pc = networkState.devices[2];
+
+    setSwitchSviIp(sw, 1, '192.168.1.2', '255.255.255.0');
+    setSwitchDefaultGateway(sw, '192.168.1.1');
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc.ip = '192.168.2.10';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.2.1';
+
+    addConnection('Switch0', 'Router0');
+    addConnection('Router0', 'PC0');
+
+    const res = executeCliCommand('Switch0', 'ping 192.168.2.10');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Reply from 192.168.2.10'));
+});
+
+// 543. Host pings Switch management SVI IP successfully on access port
+runTest('543. Host pings Switch management SVI IP successfully on access port', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const sw = networkState.devices[0];
+    const pc = networkState.devices[1];
+
+    createSwitchVlan(sw, 10, 'MGMT');
+    setSwitchSviIp(sw, 10, '192.168.10.2', '255.255.255.0');
+    addConnection('Switch0', 'PC0');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+
+    pc.ip = '192.168.10.10';
+    pc.subnetMask = '255.255.255.0';
+
+    const res = executeCliCommand('PC0', 'ping 192.168.10.2');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Reply from 192.168.10.2'));
+});
+
+// 544. Host pings Switch management SVI IP across 802.1Q trunk
+runTest('544. Host pings Switch management SVI IP across 802.1Q trunk', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 200, 100);
+    addDevice('switch', 350, 100);
+    const pc0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+    const sw1 = networkState.devices[2];
+
+    createSwitchVlan(sw0, 99, 'MGMT');
+    createSwitchVlan(sw1, 99, 'MGMT');
+    setSwitchSviIp(sw1, 99, '10.99.0.2', '255.255.255.0');
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Switch1');
+
+    setSwitchPortAccessVlan(sw0, 'Fa0/1', 99);
+    setSwitchPortMode(sw0, 'Fa0/2', 'trunk');
+    setSwitchPortMode(sw1, 'Fa0/1', 'trunk');
+
+    pc0.ip = '10.99.0.10';
+    pc0.subnetMask = '255.255.255.0';
+
+    const res = executeCliCommand('PC0', 'ping 10.99.0.2');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Reply from 10.99.0.2'));
+});
+
+// 545. findL3RoutedTopologyPath identifies multilayer switch as L3 gateway when ipRouting is true and SVI matches host gateway
+runTest('545. findL3RoutedTopologyPath identifies multilayer switch as L3 gateway when ipRouting is true and SVI matches host gateway', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 200, 100);
+    addDevice('pc', 350, 100);
+    const pc0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    createSwitchVlan(sw0, 10, 'V10');
+    createSwitchVlan(sw0, 20, 'V20');
+    setSwitchSviIp(sw0, 10, '192.168.10.1', '255.255.255.0');
+    setSwitchSviIp(sw0, 20, '192.168.20.1', '255.255.255.0');
+    setSwitchIpRouting(sw0, true);
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    setSwitchPortAccessVlan(sw0, 'Fa0/1', 10);
+    setSwitchPortAccessVlan(sw0, 'Fa0/2', 20);
+
+    pc0.ip = '192.168.10.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.10.1';
+
+    pc1.ip = '192.168.20.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.20.1';
+
+    const resolved = findL3RoutedTopologyPath(pc0, pc1);
+    assert.ok(resolved);
+    assert.deepStrictEqual(resolved, ['PC0', 'Switch0', 'PC1']);
+});
+
+// 546. End-to-End Multilayer Switching: PC0 (VLAN 10) pings PC1 (VLAN 20) directly through Switch0 SVIs without external router
+runTest('546. End-to-End Multilayer Switching: PC0 (VLAN 10) pings PC1 (VLAN 20) directly through Switch0 SVIs without external router', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 200, 100);
+    addDevice('pc', 350, 100);
+    const pc0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    createSwitchVlan(sw0, 10, 'V10');
+    createSwitchVlan(sw0, 20, 'V20');
+    setSwitchSviIp(sw0, 10, '192.168.10.1', '255.255.255.0');
+    setSwitchSviIp(sw0, 20, '192.168.20.1', '255.255.255.0');
+    setSwitchIpRouting(sw0, true);
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    setSwitchPortAccessVlan(sw0, 'Fa0/1', 10);
+    setSwitchPortAccessVlan(sw0, 'Fa0/2', 20);
+
+    pc0.ip = '192.168.10.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.10.1';
+
+    pc1.ip = '192.168.20.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.20.1';
+
+    const resPing = executeCliCommand('PC0', 'ping 192.168.20.10');
+    assert.strictEqual(resPing.success, true);
+    assert.ok(resPing.output.includes('Reply from 192.168.20.10'));
+});
+
+// 547. Multilayer Switching decrements TTL and rewrites source MAC to egress SVI MAC
+runTest('547. Multilayer Switching decrements TTL and rewrites source MAC to egress SVI MAC', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 200, 100);
+    addDevice('pc', 350, 100);
+    const pc0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    createSwitchVlan(sw0, 10, 'V10');
+    createSwitchVlan(sw0, 20, 'V20');
+    setSwitchSviIp(sw0, 10, '192.168.10.1', '255.255.255.0');
+    setSwitchSviIp(sw0, 20, '192.168.20.1', '255.255.255.0');
+    setSwitchIpRouting(sw0, true);
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    setSwitchPortAccessVlan(sw0, 'Fa0/1', 10);
+    setSwitchPortAccessVlan(sw0, 'Fa0/2', 20);
+
+    pc0.ip = '192.168.10.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.10.1';
+
+    pc1.ip = '192.168.20.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.20.1';
+
+    const simResult = simulateSendFrame(pc0, pc1, { icmp: true, initialTtl: 64 });
+    assert.strictEqual(simResult.success, true);
+    assert.ok(simResult.hopActions);
+    const routeHop = simResult.hopActions.find(h => h.action === 'ROUTE');
+    assert.ok(routeHop);
+    assert.strictEqual(routeHop.newTtl, 63);
+    assert.strictEqual(routeHop.egressIface, 'Vlan20');
+});
+
+// 548. Multilayer Switching between access port (VLAN 10) and trunk port (VLAN 20) with 802.1Q encapsulation
+runTest('548. Multilayer Switching between access port (VLAN 10) and trunk port (VLAN 20) with 802.1Q encapsulation', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 200, 100);
+    addDevice('switch', 350, 100);
+    addDevice('pc', 500, 100);
+    const pc0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+    const sw1 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    createSwitchVlan(sw0, 10, 'V10');
+    createSwitchVlan(sw0, 20, 'V20');
+    setSwitchSviIp(sw0, 10, '192.168.10.1', '255.255.255.0');
+    setSwitchSviIp(sw0, 20, '192.168.20.1', '255.255.255.0');
+    setSwitchIpRouting(sw0, true);
+
+    createSwitchVlan(sw1, 20, 'V20');
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Switch1');
+    addConnection('Switch1', 'PC1');
+
+    setSwitchPortAccessVlan(sw0, 'Fa0/1', 10);
+    setSwitchPortMode(sw0, 'Fa0/2', 'trunk');
+    setSwitchPortMode(sw1, 'Fa0/1', 'trunk');
+    setSwitchPortAccessVlan(sw1, 'Fa0/2', 20);
+
+    pc0.ip = '192.168.10.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.10.1';
+
+    pc1.ip = '192.168.20.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.20.1';
+
+    const res = executeCliCommand('PC0', 'ping 192.168.20.10');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Reply from 192.168.20.10'));
+});
+
+// 549. Multilayer Switching drops traffic when destination SVI is administratively down
+runTest('549. Multilayer Switching drops traffic when destination SVI is administratively down', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 200, 100);
+    addDevice('pc', 350, 100);
+    const pc0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    createSwitchVlan(sw0, 10, 'V10');
+    createSwitchVlan(sw0, 20, 'V20');
+    setSwitchSviIp(sw0, 10, '192.168.10.1', '255.255.255.0');
+    setSwitchSviIp(sw0, 20, '192.168.20.1', '255.255.255.0');
+    setSwitchIpRouting(sw0, true);
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    setSwitchPortAccessVlan(sw0, 'Fa0/1', 10);
+    setSwitchPortAccessVlan(sw0, 'Fa0/2', 20);
+
+    pc0.ip = '192.168.10.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.10.1';
+
+    pc1.ip = '192.168.20.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.20.1';
+
+    // Shut down egress SVI
+    setSwitchSviAdminStatus(sw0, 20, 'down');
+
+    const res = executeCliCommand('PC0', 'ping 192.168.20.10');
+    assert.strictEqual(res.success, false);
+});
+
+// 550. Multilayer Switching with Static Route: Switch routes traffic to external router next-hop via SVI
+runTest('550. Multilayer Switching with Static Route: Switch routes traffic to external router next-hop via SVI', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 200, 100);
+    addDevice('router', 350, 100);
+    addDevice('pc', 500, 100);
+    const pc0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+    const r0 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    createSwitchVlan(sw0, 10, 'V10');
+    createSwitchVlan(sw0, 30, 'V30');
+    setSwitchSviIp(sw0, 10, '192.168.10.1', '255.255.255.0');
+    setSwitchSviIp(sw0, 30, '10.0.0.1', '255.255.255.0');
+    setSwitchIpRouting(sw0, true);
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    setSwitchPortAccessVlan(sw0, 'Fa0/1', 10);
+    setSwitchPortAccessVlan(sw0, 'Fa0/2', 30);
+
+    r0.interfaces['Gig0/0'].ip = '10.0.0.2';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc0.ip = '192.168.10.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.10.1';
+
+    pc1.ip = '172.16.1.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '172.16.1.1';
+
+    addStaticRoute(sw0.id, { network: '172.16.1.0', subnetMask: '255.255.255.0', nextHop: '10.0.0.2' });
+    addStaticRoute(r0.id, { network: '192.168.10.0', subnetMask: '255.255.255.0', nextHop: '10.0.0.1' });
+
+    const res = executeCliCommand('PC0', 'ping 172.16.1.10');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Reply from 172.16.1.10'));
+});
+
+// 551. Coexistence: ROAS on Router0 and Multilayer switching on Switch0 in same topology function independently
+runTest('551. Coexistence: ROAS on Router0 and Multilayer switching on Switch0 in same topology function independently', () => {
+    resetLab();
+    // Two hosts on L3 Switch (VLAN 10, 20)
+    addDevice('pc', 50, 100);
+    addDevice('switch', 200, 100);
+    addDevice('pc', 350, 100);
+    const pc0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    createSwitchVlan(sw0, 10, 'V10');
+    createSwitchVlan(sw0, 20, 'V20');
+    setSwitchSviIp(sw0, 10, '192.168.10.1', '255.255.255.0');
+    setSwitchSviIp(sw0, 20, '192.168.20.1', '255.255.255.0');
+    setSwitchIpRouting(sw0, true);
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    setSwitchPortAccessVlan(sw0, 'Fa0/1', 10);
+    setSwitchPortAccessVlan(sw0, 'Fa0/2', 20);
+
+    pc0.ip = '192.168.10.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.10.1';
+
+    pc1.ip = '192.168.20.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.20.1';
+
+    const resPing = executeCliCommand('PC0', 'ping 192.168.20.10');
+    assert.strictEqual(resPing.success, true);
+    assert.ok(resPing.output.includes('Reply from 192.168.20.10'));
+});
+
+// 552. Undo / Redo properly restores SVI configurations, IP addresses, ipRouting flag, and static routes on switches
+runTest('552. Undo / Redo properly restores SVI configurations, IP addresses, ipRouting flag, and static routes on switches', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    pushHistory();
+    setSwitchIpRouting(sw, true);
+    setSwitchSviIp(sw, 10, '192.168.10.1', '255.255.255.0');
+    assert.strictEqual(sw.ipRouting, true);
+    assert.ok(sw.svis[10]);
+
+    undo();
+    assert.strictEqual(networkState.devices[0].ipRouting, false);
+    assert.strictEqual(networkState.devices[0].svis[10], undefined);
+
+    redo();
+    assert.strictEqual(networkState.devices[0].ipRouting, true);
+    assert.ok(networkState.devices[0].svis[10]);
+});
+
+// 553. End-to-End: Full pure Multilayer Switch Inter-VLAN setup entirely via CLI
+runTest('553. End-to-End: Full pure Multilayer Switch Inter-VLAN setup entirely via CLI', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 200, 100);
+    addDevice('pc', 350, 100);
+
+    const pc0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'PC1');
+
+    pc0.ip = '10.10.10.50';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '10.10.10.1';
+
+    pc1.ip = '10.20.20.50';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '10.20.20.1';
+
+    // 1. Configure Switch0 purely via CLI
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'ip routing');
+    executeCliCommand('Switch0', 'vlan 10');
+    executeCliCommand('Switch0', 'name HR');
+    executeCliCommand('Switch0', 'vlan 20');
+    executeCliCommand('Switch0', 'name IT');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    executeCliCommand('Switch0', 'switchport mode access');
+    executeCliCommand('Switch0', 'switchport access vlan 10');
+    executeCliCommand('Switch0', 'interface Fa0/2');
+    executeCliCommand('Switch0', 'switchport mode access');
+    executeCliCommand('Switch0', 'switchport access vlan 20');
+    executeCliCommand('Switch0', 'interface vlan 10');
+    executeCliCommand('Switch0', 'ip address 10.10.10.1 255.255.255.0');
+    executeCliCommand('Switch0', 'no shutdown');
+    executeCliCommand('Switch0', 'interface vlan 20');
+    executeCliCommand('Switch0', 'ip address 10.20.20.1 255.255.255.0');
+    executeCliCommand('Switch0', 'no shutdown');
+    executeCliCommand('Switch0', 'end');
+
+    // Verify routing table on Switch0
+    const routeRes = executeCliCommand('Switch0', 'show ip route');
+    assert.strictEqual(routeRes.success, true);
+    assert.ok(routeRes.output.includes('10.10.10.0/24 is directly connected, Vlan10'));
+    assert.ok(routeRes.output.includes('10.20.20.0/24 is directly connected, Vlan20'));
+
+    // Verify PC0 can ping PC1 across VLANs through Switch0 SVIs
+    const pingRes = executeCliCommand('PC0', 'ping 10.20.20.50');
+    assert.strictEqual(pingRes.success, true);
+    assert.ok(pingRes.output.includes('Reply from 10.20.20.50'));
+});
+
+// 554. Switch Inspector UI displays Layer 3 (Multilayer), SVI count, and SVIs table with live autostate badges
+runTest('554. Switch Inspector UI displays Layer 3 (Multilayer), SVI count, and SVIs table with live autostate badges', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    createSwitchVlan(sw, 10, 'Sales');
+    setSwitchSviIp(sw, 10, '192.168.10.1', '255.255.255.0');
+    setSwitchIpRouting(sw, true);
+
+    const html = renderSwitchInspector(sw);
+    assert.ok(html.includes('3 (Multilayer)'));
+    assert.ok(html.includes('SWITCHED VIRTUAL INTERFACES (SVIs)'));
+    assert.ok(html.includes('Vlan10'));
+    assert.ok(html.includes('192.168.10.1'));
+});
+
+// 555. Backward compatibility: Legacy topology snapshots without svis load without errors and default to L2 switch mode
+runTest('555. Backward compatibility: Legacy topology snapshots without svis load without errors and default to L2 switch mode', () => {
+    resetLab();
+    const legacySnapshot = {
+        devices: [
+            { id: 'sw_legacy', name: 'Switch0', type: 'switch', x: 100, y: 100, mac: '00:11:22:33:44:55' }
+        ],
+        connections: [],
+        routes: {}
+    };
+
+    networkState.devices = legacySnapshot.devices;
+    networkState.connections = legacySnapshot.connections;
+
+    const sw = networkState.devices[0];
+    ensureSwitchVlanState(sw);
+
+    assert.deepStrictEqual(sw.svis, {});
+    assert.strictEqual(sw.ipRouting, false);
+    assert.strictEqual(sw.defaultGateway, '');
+    assert.strictEqual(getSwitchRoutingTable(sw.id).length, 0);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

@@ -464,7 +464,10 @@ function addDevice(type, x, y) {
                     status: 'active'
                 }
             },
-            switchports: {}
+            switchports: {},
+            svis: {},
+            ipRouting: false,
+            defaultGateway: ''
         };
     } else {
         device = {
@@ -3544,10 +3547,13 @@ function renderRouterInspector(selected) {
 
 function renderSwitchInspector(selected) {
     const sw = getSwitchDevice(selected);
-    ensureSwitchVlanState(sw || selected);
+    const targetSw = sw || selected;
+    ensureSwitchVlanState(targetSw);
     const runtime = getSwitchRuntime(selected.id);
     const portCount = getSwitchPortCount(selected.id);
-    const vlanCount = Object.keys((sw || selected).vlans || {}).length || 1;
+    const vlanCount = Object.keys(targetSw.vlans || {}).length || 1;
+    const sviEntries = Object.entries(targetSw.svis || {}).sort((a, b) => Number(a[0]) - Number(b[0]));
+    const sviCount = sviEntries.length;
     const learnedCount = runtime.macTable.length;
     const macRows = runtime.macTable.map((entry) => `
             <tr>
@@ -3560,14 +3566,14 @@ function renderSwitchInspector(selected) {
 
     const allPortNames = new Set([
         ...Object.values(runtime.ports || {}),
-        ...Object.keys((sw || selected).switchports || {})
+        ...Object.keys(targetSw.switchports || {})
     ]);
     const portRows = Array.from(allPortNames).sort((a, b) => {
         const numA = parseInt(a.replace(/\D/g, ''), 10) || 0;
         const numB = parseInt(b.replace(/\D/g, ''), 10) || 0;
         return numA - numB;
     }).map((pName) => {
-        const cfg = getSwitchPortConfig(sw || selected, pName);
+        const cfg = getSwitchPortConfig(targetSw, pName);
         const isTrunk = cfg.mode === 'trunk';
         const vlanCol = isTrunk ? `Native: ${cfg.nativeVlan || 1}` : `VLAN ${cfg.accessVlan || 1}`;
         const allowedCol = isTrunk ? formatAllowedVlans(cfg.allowedVlans) : '-';
@@ -3581,17 +3587,36 @@ function renderSwitchInspector(selected) {
         `;
     }).join('');
 
+    const sviRows = sviEntries.map(([vlanIdStr, svi]) => {
+        const vlanId = Number(vlanIdStr);
+        const isUp = getEffectiveSviStatus(targetSw, vlanId) === 'up';
+        const isAdminDown = svi.adminStatus === 'down';
+        const statusText = isAdminDown ? 'admin down' : (isUp ? 'up' : 'down');
+        return `
+            <tr>
+                <td>Vlan${vlanId}</td>
+                <td>${escapeHtml(svi.ip || 'unassigned')}</td>
+                <td>${escapeHtml(svi.subnetMask || '-')}</td>
+                <td><span class="status-badge ${statusText === 'up' ? 'status-up' : 'status-down'}">${statusText}</span></td>
+            </tr>
+        `;
+    }).join('');
+
     return `
         <div class="property-summary">
             <h4>SWITCH</h4>
             <div class="property-summary-grid">
                 <div class="property-summary-item">
                     <span>Layer</span>
-                    <strong>2</strong>
+                    <strong>${targetSw.ipRouting ? '3 (Multilayer)' : '2'}</strong>
                 </div>
                 <div class="property-summary-item">
                     <span>VLANs</span>
                     <strong>${vlanCount}</strong>
+                </div>
+                <div class="property-summary-item">
+                    <span>SVIs</span>
+                    <strong>${sviCount}</strong>
                 </div>
                 <div class="property-summary-item">
                     <span>Ports</span>
@@ -3608,6 +3633,24 @@ function renderSwitchInspector(selected) {
                 </button>
             </div>
         </div>
+        ${sviCount ? `
+            <div class="property-summary">
+                <h4>SWITCHED VIRTUAL INTERFACES (SVIs)</h4>
+                <table class="property-table">
+                    <thead>
+                        <tr>
+                            <th>Interface</th>
+                            <th>IP Address</th>
+                            <th>Subnet Mask</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${sviRows}
+                    </tbody>
+                </table>
+            </div>
+        ` : ''}
         ${allPortNames.size ? `
             <div class="property-summary">
                 <h4>SWITCHPORTS</h4>
@@ -4334,8 +4377,8 @@ function normalizeSubnetMask(value) {
         return '';
     }
 
-    if (trimmed.startsWith('/')) {
-        const cidr = Number.parseInt(trimmed.slice(1), 10);
+    if (trimmed.startsWith('/') || /^\d{1,2}$/.test(trimmed)) {
+        const cidr = Number.parseInt(trimmed.replace('/', ''), 10);
         if (!Number.isInteger(cidr) || cidr < 0 || cidr > 32) {
             return null;
         }
@@ -4554,26 +4597,33 @@ function findL3RoutedTopologyPath(sourceDevice, destinationDevice) {
     if (!srcDev.gateway || !isValidIPv4(srcDev.gateway)) return [];
 
     const gatewayIp = srcDev.gateway.trim();
-    let gatewayRouter = null;
+    let gatewayDev = null;
 
     for (const dev of (networkState.devices || [])) {
         if (dev.type === 'router' && dev.interfaces) {
             for (const [ifName, iface] of Object.entries(dev.interfaces)) {
                 if (iface.ip === gatewayIp) {
-                    gatewayRouter = dev;
+                    gatewayDev = dev;
+                    break;
+                }
+            }
+        } else if (dev.type === 'switch' && dev.ipRouting && dev.svis) {
+            for (const [vlanIdStr, svi] of Object.entries(dev.svis)) {
+                if (svi && svi.ip === gatewayIp && getEffectiveSviStatus(dev, parseInt(vlanIdStr, 10)) === 'up') {
+                    gatewayDev = dev;
                     break;
                 }
             }
         }
-        if (gatewayRouter) break;
+        if (gatewayDev) break;
     }
 
-    if (!gatewayRouter) return [];
+    if (!gatewayDev) return [];
 
-    const path1 = findTopologyPath(srcDev.id, gatewayRouter.id);
+    const path1 = findTopologyPath(srcDev.id, gatewayDev.id);
     if (!path1 || path1.length < 2) return [];
 
-    const path2 = findTopologyPath(gatewayRouter.id, dstDev.id);
+    const path2 = findTopologyPath(gatewayDev.id, dstDev.id);
     if (!path2 || path2.length < 2) return [];
 
     return [...path1, ...path2.slice(1)];
@@ -4583,17 +4633,26 @@ function getSwitchRuntime(switchId) {
     if (!networkState.switchRuntime[switchId]) {
         networkState.switchRuntime[switchId] = {
             ports: {},
-            macTable: []
+            macTable: [],
+            staticRoutes: []
         };
+    }
+    if (!Array.isArray(networkState.switchRuntime[switchId].staticRoutes)) {
+        networkState.switchRuntime[switchId].staticRoutes = [];
     }
     return networkState.switchRuntime[switchId];
 }
 
 function getConnectionBetween(deviceAId, deviceBId) {
-    return networkState.connections.find((connection) =>
-        (connection.source === deviceAId && connection.target === deviceBId)
-        || (connection.source === deviceBId && connection.target === deviceAId)
-    ) || null;
+    const devA = getDeviceById(deviceAId);
+    const devB = getDeviceById(deviceBId);
+    const aIds = new Set([deviceAId, devA?.id, devA?.name].filter(Boolean));
+    const bIds = new Set([deviceBId, devB?.id, devB?.name].filter(Boolean));
+
+    return networkState.connections.find((connection) => {
+        return (aIds.has(connection.source) && bIds.has(connection.target))
+            || (aIds.has(connection.target) && bIds.has(connection.source));
+    }) || null;
 }
 
 function getSwitchPortLabel(switchId, connectionId) {
@@ -4670,6 +4729,15 @@ function ensureSwitchVlanState(sw) {
     if (!sw.switchports || typeof sw.switchports !== 'object') {
         sw.switchports = {};
     }
+    if (!sw.svis || typeof sw.svis !== 'object') {
+        sw.svis = {};
+    }
+    if (typeof sw.ipRouting !== 'boolean') {
+        sw.ipRouting = false;
+    }
+    if (typeof sw.defaultGateway !== 'string') {
+        sw.defaultGateway = '';
+    }
 }
 
 function getSwitchVlans(switchOrId) {
@@ -4719,6 +4787,10 @@ function deleteSwitchVlan(switchOrId, vlanId) {
     }
 
     delete sw.vlans[normId];
+
+    if (sw.svis && sw.svis[normId]) {
+        delete sw.svis[normId];
+    }
 
     // Policy: Ports assigned to a deleted VLAN automatically return to VLAN 1
     if (sw.switchports) {
@@ -5319,6 +5391,274 @@ function getEgressTagAction(portConfig, ingressVlan) {
     };
 }
 
+function normalizeSviName(sviName) {
+    if (!sviName || typeof sviName !== 'string') return null;
+    const match = sviName.trim().match(/^(?:vlan\s*|vl\s*|v\s*)(\d+)$/i);
+    if (!match) return null;
+    const vlanId = parseInt(match[1], 10);
+    const normId = normalizeVlanId(vlanId);
+    if (normId === null) return null;
+    return `Vlan${normId}`;
+}
+
+function isSviName(name) {
+    return normalizeSviName(name) !== null;
+}
+
+function getSviVlanId(sviName) {
+    if (!sviName || typeof sviName !== 'string') return null;
+    const match = sviName.trim().match(/^(?:vlan\s*|vl\s*|v\s*)(\d+)$/i);
+    if (!match) return null;
+    return normalizeVlanId(parseInt(match[1], 10));
+}
+
+function ensureSwitchSvi(switchOrId, vlanId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return null;
+    ensureSwitchVlanState(sw);
+    const normId = normalizeVlanId(vlanId);
+    if (normId === null) return null;
+
+    if (!sw.vlans[normId]) {
+        sw.vlans[normId] = {
+            id: normId,
+            name: normId === 1 ? 'default' : `VLAN${normId}`,
+            status: 'active'
+        };
+    }
+
+    if (!sw.svis[normId]) {
+        sw.svis[normId] = {
+            id: `Vlan${normId}`,
+            vlanId: normId,
+            ip: '',
+            subnetMask: '',
+            mac: sw.mac || generateMacAddress(networkState.devices),
+            adminStatus: 'up',
+            status: 'down'
+        };
+    }
+    return sw.svis[normId];
+}
+
+function deleteSwitchSvi(switchOrId, vlanId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return false;
+    ensureSwitchVlanState(sw);
+    const normId = normalizeVlanId(vlanId);
+    if (normId === null || !sw.svis[normId]) return false;
+    delete sw.svis[normId];
+    return true;
+}
+
+function getEffectiveSviStatus(switchOrId, vlanId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return 'down';
+    ensureSwitchVlanState(sw);
+    const normId = normalizeVlanId(vlanId);
+    if (normId === null) return 'down';
+
+    const svi = sw.svis?.[normId];
+    if (!svi) return 'down';
+    if (svi.adminStatus === 'down') return 'down';
+    if (!sw.vlans[normId]) return 'down';
+
+    // Autostate calculation: SVI is up if at least one switchport carrying this VLAN is connected and up
+    const runtime = getSwitchRuntime(sw.id);
+    let hasActivePort = false;
+
+    for (const [connectionId, portName] of Object.entries(runtime.ports || {})) {
+        const conn = (networkState.connections || []).find(c => c.id === connectionId);
+        if (!conn) continue;
+        const neighborId = conn.source === sw.id ? conn.target : conn.source;
+        const neighbor = getDeviceById(neighborId);
+        if (!neighbor) continue;
+
+        const portConfig = getSwitchPortConfig(sw, portName);
+        if (portConfig.mode === 'access') {
+            if ((portConfig.accessVlan || 1) === normId) {
+                hasActivePort = true;
+                break;
+            }
+        } else if (portConfig.mode === 'trunk') {
+            if (isVlanAllowedOnTrunk(portConfig, normId)) {
+                hasActivePort = true;
+                break;
+            }
+        }
+    }
+
+    return hasActivePort ? 'up' : 'down';
+}
+
+function setSwitchSviIp(switchOrId, vlanId, ip, subnetMask) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) throw new Error('Switch not found.');
+    ensureSwitchVlanState(sw);
+    const normId = normalizeVlanId(vlanId);
+    if (normId === null) throw new Error(`Invalid VLAN ID "${vlanId}".`);
+
+    const svi = ensureSwitchSvi(sw, normId);
+    if (!svi) throw new Error(`Failed to create SVI for VLAN ${normId}.`);
+
+    const rawIp = String(ip || '').trim();
+    const rawMask = String(subnetMask || '').trim();
+
+    if (!rawIp && !rawMask) {
+        svi.ip = '';
+        svi.subnetMask = '';
+        return svi;
+    }
+
+    if (!isValidIPv4(rawIp)) {
+        throw new Error(`Invalid IPv4 address: "${rawIp}"`);
+    }
+    const normMask = normalizeSubnetMask(rawMask);
+    if (!normMask || !isValidSubnetMask(normMask)) {
+        throw new Error(`Invalid subnet mask: "${rawMask}"`);
+    }
+
+    for (const [otherVlanStr, otherSvi] of Object.entries(sw.svis || {})) {
+        if (Number(otherVlanStr) !== normId && otherSvi && otherSvi.ip === rawIp) {
+            throw new Error(`IP address ${rawIp} is already configured on Vlan${otherVlanStr}.`);
+        }
+    }
+
+    svi.ip = rawIp;
+    svi.subnetMask = normMask;
+    return svi;
+}
+
+function setSwitchSviAdminStatus(switchOrId, vlanId, status) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) throw new Error('Switch not found.');
+    ensureSwitchVlanState(sw);
+    const normId = normalizeVlanId(vlanId);
+    if (normId === null) throw new Error(`Invalid VLAN ID "${vlanId}".`);
+    const svi = ensureSwitchSvi(sw, normId);
+    if (!svi) throw new Error(`SVI for VLAN ${normId} not found.`);
+
+    const normStatus = String(status || '').toLowerCase() === 'down' ? 'down' : 'up';
+    svi.adminStatus = normStatus;
+    return svi;
+}
+
+function setSwitchIpRouting(switchOrId, enabled) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) throw new Error('Switch not found.');
+    ensureSwitchVlanState(sw);
+    sw.ipRouting = Boolean(enabled);
+    return sw.ipRouting;
+}
+
+function setSwitchDefaultGateway(switchOrId, gatewayIp) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) throw new Error('Switch not found.');
+    ensureSwitchVlanState(sw);
+    const raw = String(gatewayIp || '').trim();
+    if (!raw) {
+        sw.defaultGateway = '';
+        return '';
+    }
+    if (!isValidIPv4(raw)) {
+        throw new Error(`Invalid default gateway IP "${raw}".`);
+    }
+    sw.defaultGateway = raw;
+    return sw.defaultGateway;
+}
+
+function getSwitchRoutingTable(switchOrId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return [];
+    ensureSwitchVlanState(sw);
+
+    if (!sw.ipRouting) {
+        return [];
+    }
+
+    const connectedRoutes = [];
+    Object.entries(sw.svis || {}).forEach(([vlanIdStr, svi]) => {
+        const vlanId = parseInt(vlanIdStr, 10);
+        if (!svi || getEffectiveSviStatus(sw, vlanId) === 'down') {
+            return;
+        }
+
+        const ip = String(svi.ip || '').trim();
+        const subnetMask = String(svi.subnetMask || '').trim();
+
+        if (!ip || !subnetMask || !isValidIPv4(ip)) {
+            return;
+        }
+
+        const normalizedMask = normalizeSubnetMask(subnetMask);
+        if (!normalizedMask) {
+            return;
+        }
+
+        const network = calculateNetworkAddress(ip, normalizedMask);
+        const prefixLength = getPrefixLengthFromMask(normalizedMask);
+
+        if (!network || prefixLength === null) {
+            return;
+        }
+
+        connectedRoutes.push({
+            type: 'connected',
+            code: 'C',
+            network,
+            subnetMask: normalizedMask,
+            prefixLength,
+            cidr: `${network}/${prefixLength}`,
+            interface: `Vlan${vlanId}`,
+            nextHop: null,
+            adminDistance: 0,
+            metric: 0,
+            status: 'active'
+        });
+    });
+
+    const runtime = getSwitchRuntime(sw.id);
+    const configuredStaticRoutes = Array.isArray(runtime.staticRoutes) ? runtime.staticRoutes : [];
+
+    const operationalStaticRoutes = configuredStaticRoutes.map((route) => {
+        let operationalStatus = route.status || 'active';
+
+        if (route.interface) {
+            const vlanId = getSviVlanId(route.interface);
+            if (vlanId && getEffectiveSviStatus(sw, vlanId) === 'down') {
+                operationalStatus = 'down';
+            }
+        }
+
+        if (route.nextHop && operationalStatus !== 'down') {
+            let nextHopReachable = false;
+            Object.entries(sw.svis || {}).forEach(([vlanIdStr, svi]) => {
+                const vlanId = parseInt(vlanIdStr, 10);
+                if (!svi || getEffectiveSviStatus(sw, vlanId) === 'down' || !svi.ip || !svi.subnetMask) {
+                    return;
+                }
+                const ifMask = normalizeSubnetMask(svi.subnetMask);
+                if (ifMask && isSameSubnet(svi.ip, route.nextHop, ifMask)) {
+                    if (!route.interface || route.interface === `Vlan${vlanId}`) {
+                        nextHopReachable = true;
+                    }
+                }
+            });
+            if (!nextHopReachable) {
+                operationalStatus = 'down';
+            }
+        }
+
+        return {
+            ...route,
+            adminDistance: typeof route.adminDistance === 'number' ? route.adminDistance : 1,
+            status: operationalStatus
+        };
+    });
+
+    return [...connectedRoutes, ...operationalStaticRoutes];
+}
+
 let staticRouteCounter = 0;
 
 function getRouterRuntime(routerId) {
@@ -5758,13 +6098,13 @@ function evaluateRouterInterfaceAcl(routerId, interfaceName, direction, packet) 
     return evaluatePacketAcl(acl, packet);
 }
 
-function addStaticRoute(routerId, routeData) {
+function addStaticRoute(deviceId, routeData) {
     if (!routeData || typeof routeData !== 'object') {
         return { success: false, reason: 'Invalid route data.' };
     }
 
-    const router = typeof routerId === 'object' && routerId ? routerId : getDeviceById(routerId);
-    if (!router || router.type !== 'router') {
+    const dev = typeof deviceId === 'object' && deviceId ? deviceId : getDeviceById(deviceId);
+    if (!dev || (dev.type !== 'router' && !(dev.type === 'switch' && dev.ipRouting))) {
         return { success: false, reason: 'Router not found.' };
     }
 
@@ -5796,13 +6136,26 @@ function addStaticRoute(routerId, routeData) {
         return { success: false, reason: 'Either next-hop IP or egress interface must be specified.' };
     }
 
+    const isRouter = dev.type === 'router';
+    const isSwitch = dev.type === 'switch';
+
     if (rawInterface) {
-        const iface = router.interfaces?.[rawInterface];
-        if (!iface) {
-            return { success: false, reason: `Interface ${rawInterface} does not exist on router ${router.name}.` };
-        }
-        if (iface.status === 'down') {
-            return { success: false, reason: `Interface ${rawInterface} is down.` };
+        if (isRouter) {
+            const iface = dev.interfaces?.[rawInterface];
+            if (!iface) {
+                return { success: false, reason: `Interface ${rawInterface} does not exist on router ${dev.name}.` };
+            }
+            if (getEffectiveInterfaceStatus(dev, rawInterface) === 'down') {
+                return { success: false, reason: `Interface ${rawInterface} is down.` };
+            }
+        } else if (isSwitch) {
+            const vlanId = getSviVlanId(rawInterface);
+            if (!vlanId || !dev.svis?.[vlanId]) {
+                return { success: false, reason: `Interface ${rawInterface} does not exist on switch ${dev.name}.` };
+            }
+            if (getEffectiveSviStatus(dev, vlanId) === 'down') {
+                return { success: false, reason: `Interface ${rawInterface} is down.` };
+            }
         }
     }
 
@@ -5814,25 +6167,32 @@ function addStaticRoute(routerId, routeData) {
         }
 
         let reachableInterface = null;
-        Object.entries(router.interfaces || {}).forEach(([ifName, iface]) => {
-            if (!iface || iface.status === 'down' || !iface.ip || !iface.subnetMask) {
-                return;
-            }
-            const ifMask = normalizeSubnetMask(iface.subnetMask);
-            if (ifMask && isSameSubnet(iface.ip, rawNextHop, ifMask)) {
-                reachableInterface = ifName;
-            }
-        });
-
-        if (!reachableInterface) {
-            return { success: false, reason: `Next-hop IP ${rawNextHop} is unreachable (not on any connected subnet).` };
+        if (isRouter) {
+            Object.entries(dev.interfaces || {}).forEach(([ifName, iface]) => {
+                if (!iface || getEffectiveInterfaceStatus(dev, ifName) === 'down' || !iface.ip || !iface.subnetMask) {
+                    return;
+                }
+                const ifMask = normalizeSubnetMask(iface.subnetMask);
+                if (ifMask && isSameSubnet(iface.ip, rawNextHop, ifMask)) {
+                    reachableInterface = ifName;
+                }
+            });
+        } else if (isSwitch) {
+            Object.entries(dev.svis || {}).forEach(([vlanIdStr, svi]) => {
+                const vlanId = parseInt(vlanIdStr, 10);
+                if (!svi || getEffectiveSviStatus(dev, vlanId) === 'down' || !svi.ip || !svi.subnetMask) {
+                    return;
+                }
+                const ifMask = normalizeSubnetMask(svi.subnetMask);
+                if (ifMask && isSameSubnet(svi.ip, rawNextHop, ifMask)) {
+                    reachableInterface = `Vlan${vlanId}`;
+                }
+            });
         }
-
-        if (rawInterface && rawInterface !== reachableInterface) {
-            return { success: false, reason: `Next-hop IP ${rawNextHop} is reachable via ${reachableInterface}, not ${rawInterface}.` };
+        if (!reachableInterface && !resolvedInterface) {
+            return { success: false, reason: 'Next-hop address is unreachable via any active interface.' };
         }
-
-        if (!resolvedInterface) {
+        if (reachableInterface && !resolvedInterface) {
             resolvedInterface = reachableInterface;
         }
     }
@@ -5847,7 +6207,7 @@ function addStaticRoute(routerId, routeData) {
         adminDistance = rawAd;
     }
 
-    const runtime = getRouterRuntime(router.id);
+    const runtime = isRouter ? getRouterRuntime(dev.id) : getSwitchRuntime(dev.id);
     const nextHopVal = rawNextHop || null;
 
     const isDuplicate = runtime.staticRoutes.some((r) => {
@@ -5863,7 +6223,7 @@ function addStaticRoute(routerId, routeData) {
     }
 
     staticRouteCounter += 1;
-    const routeId = routeData.id || `static-route-${router.id}-${Date.now()}-${staticRouteCounter}`;
+    const routeId = routeData.id || `static-route-${dev.id}-${Date.now()}-${staticRouteCounter}`;
     const metric = typeof routeData.metric === 'number' && !isNaN(routeData.metric) ? routeData.metric : 1;
 
     const staticRoute = {
@@ -5885,9 +6245,9 @@ function addStaticRoute(routerId, routeData) {
     return { success: true, route: staticRoute };
 }
 
-function removeStaticRoute(routerId, routeId) {
-    const router = typeof routerId === 'object' && routerId ? routerId : getDeviceById(routerId);
-    if (!router || router.type !== 'router') {
+function removeStaticRoute(deviceId, routeId) {
+    const dev = typeof deviceId === 'object' && deviceId ? deviceId : getDeviceById(deviceId);
+    if (!dev || (dev.type !== 'router' && !(dev.type === 'switch' && dev.ipRouting))) {
         return { success: false, reason: 'Router not found.' };
     }
 
@@ -5896,7 +6256,7 @@ function removeStaticRoute(routerId, routeId) {
         return { success: false, reason: 'Route ID is required.' };
     }
 
-    const runtime = getRouterRuntime(router.id);
+    const runtime = dev.type === 'router' ? getRouterRuntime(dev.id) : getSwitchRuntime(dev.id);
     const index = runtime.staticRoutes.findIndex((r) => r.id === idToMatch);
     if (index === -1) {
         return { success: false, reason: 'Static route not found.' };
@@ -6049,9 +6409,9 @@ function compareRoutesForLpm(a, b) {
     return idA.localeCompare(idB);
 }
 
-function lookupRoute(routerId, destinationIp) {
-    const router = typeof routerId === 'object' && routerId ? routerId : getDeviceById(routerId);
-    if (!router || router.type !== 'router') {
+function lookupRoute(deviceId, destinationIp) {
+    const dev = typeof deviceId === 'object' && deviceId ? deviceId : getDeviceById(deviceId);
+    if (!dev || (dev.type !== 'router' && !(dev.type === 'switch' && dev.ipRouting))) {
         return { success: false, reason: 'ROUTER_NOT_FOUND' };
     }
 
@@ -6060,7 +6420,7 @@ function lookupRoute(routerId, destinationIp) {
         return { success: false, reason: 'INVALID_DESTINATION' };
     }
 
-    const routingTable = getRouterRoutingTable(router.id);
+    const routingTable = dev.type === 'router' ? getRouterRoutingTable(dev.id) : getSwitchRoutingTable(dev.id);
     if (!routingTable || routingTable.length === 0) {
         return { success: false, reason: 'NO_ROUTE' };
     }
@@ -6094,7 +6454,7 @@ function lookupRoute(routerId, destinationIp) {
     };
 }
 
-function resolveRouteNextHop(routerId, route, destinationIp) {
+function resolveRouteNextHop(deviceId, route, destinationIp) {
     if (!route || typeof route !== 'object') {
         return {
             success: false,
@@ -6126,15 +6486,15 @@ function resolveRouteNextHop(routerId, route, destinationIp) {
                 isDirect: false,
                 route
             };
+        } else if (route.interface) {
+            return {
+                success: true,
+                egressInterface: route.interface,
+                nextHopIp: destIp,
+                isDirect: true,
+                route
+            };
         }
-
-        return {
-            success: true,
-            egressInterface: route.interface || null,
-            nextHopIp: destIp,
-            isDirect: true,
-            route
-        };
     }
 
     return {
@@ -6826,139 +7186,358 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
             frame.events.push(`Switch ${toDevice.name} learned ${learnedDeviceName} MAC (${frame.sourceMac}) → ${ingressPort} (VLAN ${ingressVlan})`);
 
             const nextHopId = topologyPath[i + 2];
-            const expectedEgressPort = nextHopId ? getPortForSwitchAndNeighbor(toDevice.id, nextHopId) : null;
-            const runtime = getSwitchRuntime(toDevice.id);
-            const allOtherPorts = Object.values(runtime.ports).filter(p => p !== ingressPort);
-            const egressPorts = allOtherPorts.filter(p => getEgressTagAction(getSwitchPortConfig(toDevice, p), ingressVlan).allowed);
+            const isBroadcast = frame.destinationMac === 'FF:FF:FF:FF:FF:FF';
+            const isSwitchMac = frame.destinationMac === toDevice.mac || Object.values(toDevice.svis || {}).some(s => s.mac === frame.destinationMac);
 
-            // Layer-2 VLAN Egress Check
-            if (expectedEgressPort) {
-                const egressPortConfig = getSwitchPortConfig(toDevice, expectedEgressPort);
-                const egressTagAction = getEgressTagAction(egressPortConfig, ingressVlan);
-                if (!egressTagAction.allowed) {
-                    const egressVlanDesc = egressPortConfig.mode === 'trunk' ? `allowed: ${formatAllowedVlans(egressPortConfig.allowedVlans)}` : `VLAN ${egressPortConfig.accessVlan || 1}`;
-                    frame.events.push(`Switch ${toDevice.name} dropped frame: ingress port ${ingressPort} (VLAN ${ingressVlan}) and egress port ${expectedEgressPort} (${egressVlanDesc}) are isolated in different VLANs`);
+            if (toDevice.id === toEndpoint.id) {
+                frame.events.push(`Frame received by destination switch ${toDevice.name} on ${ingressPort} (VLAN ${ingressVlan})`);
+                continue;
+            }
+
+            if (toDevice.ipRouting && isSwitchMac && frame.packet && frame.packet.destinationIp) {
+                // Multilayer Switch Layer-3 Routing Engine
+                const ingressSviName = `Vlan${ingressVlan}`;
+                const ingressSvi = toDevice.svis?.[ingressVlan];
+                if (!ingressSvi || getEffectiveSviStatus(toDevice, ingressVlan) === 'down') {
+                    frame.events.push(`Switch ${toDevice.name} dropped frame: Ingress SVI Vlan${ingressVlan} is down or not configured`);
                     hopActions.push({
                         deviceId: toDevice.id,
                         deviceName: toDevice.name,
                         type: 'switch',
                         action: 'DROP',
-                        reason: 'vlan-isolation',
-                        ingressPort,
-                        egressPort: expectedEgressPort,
-                        ingressVlan,
-                        destinationMac: frame.destinationMac
+                        reason: 'svi-down',
+                        ingressPort
                     });
                     return {
                         success: false,
-                        reason: `Switch ${toDevice.name} dropped frame due to VLAN isolation on port ${expectedEgressPort}.`,
+                        reason: `Switch ${toDevice.name} dropped frame: SVI Vlan${ingressVlan} is down.`,
                         path: traversedPath,
                         action: 'DROP',
                         hopActions
                     };
                 }
 
-                // Apply egress wire tagging / untagging
-                if (egressTagAction.isTagged) {
-                    frame.vlanTag = egressTagAction.vlanTag;
+                const routeMatch = lookupRoute(toDevice.id, frame.packet.destinationIp);
+                if (!routeMatch || !routeMatch.success || !routeMatch.route) {
+                    const icmpError = createIcmpErrorPacket(3, 0, frame.packet, toDevice, {
+                        ingressInterface: ingressSviName,
+                        reason: 'net-unreachable'
+                    });
+                    frame.events.push(`Switch ${toDevice.name} dropped packet: No route to destination ${frame.packet.destinationIp}`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'switch',
+                        action: 'DROP',
+                        reason: 'no-route',
+                        ingressInterface: ingressSviName,
+                        destinationIp: frame.packet.destinationIp,
+                        icmpErrorPacket: icmpError || null
+                    });
+                    return {
+                        success: false,
+                        reason: `No route to destination from switch ${toDevice.name}.`,
+                        path: traversedPath,
+                        action: 'DROP',
+                        hopActions,
+                        icmpErrorPacket: icmpError || null
+                    };
+                }
+
+                const nextHopInfo = resolveRouteNextHop(toDevice.id, routeMatch.route, frame.packet.destinationIp);
+                if (!nextHopInfo.success) {
+                    frame.events.push(`Switch ${toDevice.name} dropped packet: Unable to resolve next hop for ${frame.packet.destinationIp}`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'switch',
+                        action: 'DROP',
+                        reason: 'next-hop-unresolvable',
+                        ingressInterface: ingressSviName
+                    });
+                    return {
+                        success: false,
+                        reason: `Switch ${toDevice.name} cannot resolve next hop for ${frame.packet.destinationIp}.`,
+                        path: traversedPath,
+                        action: 'DROP',
+                        hopActions
+                    };
+                }
+
+                const egressIfaceName = nextHopInfo.egressInterface;
+                const egressVlan = getSviVlanId(egressIfaceName) || ingressVlan;
+                const egressSvi = toDevice.svis?.[egressVlan];
+
+                if (!egressSvi || getEffectiveSviStatus(toDevice, egressVlan) === 'down') {
+                    frame.events.push(`Switch ${toDevice.name} dropped frame: Egress SVI Vlan${egressVlan} is down`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'switch',
+                        action: 'DROP',
+                        reason: 'svi-down',
+                        ingressInterface: ingressSviName,
+                        egressInterface: egressIfaceName
+                    });
+                    return {
+                        success: false,
+                        reason: `Switch ${toDevice.name} dropped frame: Egress SVI Vlan${egressVlan} is down.`,
+                        path: traversedPath,
+                        action: 'DROP',
+                        hopActions
+                    };
+                }
+
+                frame.packet.ttl = Math.max(0, frame.packet.ttl - 1);
+                frame.events.push(`Switch ${toDevice.name} decremented IP TTL to ${frame.packet.ttl}`);
+
+                if (frame.packet.ttl <= 0) {
+                    const icmpError = createIcmpErrorPacket(11, 0, frame.packet, toDevice, {
+                        ingressInterface: ingressSviName,
+                        egressInterface: egressIfaceName,
+                        reason: 'ttl-expired'
+                    });
+                    frame.events.push(`Switch ${toDevice.name} dropped packet: Time to Live (TTL) expired in transit`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'switch',
+                        action: 'DROP',
+                        reason: 'ttl-expired',
+                        ingressInterface: ingressSviName,
+                        egressInterface: egressIfaceName,
+                        ttl: 0,
+                        icmpErrorPacket: icmpError || null
+                    });
+                    return {
+                        success: false,
+                        reason: `Time to Live (TTL) expired at switch ${toDevice.name}.`,
+                        path: traversedPath,
+                        action: 'DROP',
+                        hopActions,
+                        icmpErrorPacket: icmpError || null
+                    };
+                }
+
+                frame.events.push(`Switch ${toDevice.name} routed frame from ${ingressSviName} to ${egressIfaceName}`);
+                frame.sourceMac = egressSvi.mac || toDevice.mac;
+                frame.events.push(`Switch ${toDevice.name} rewrote source MAC to ${frame.sourceMac}`);
+
+                // Determine next hop neighbor in topology path
+                const nextNeighborId = topologyPath[i + 2];
+                let egressPort = nextNeighborId ? getPortForSwitchAndNeighbor(toDevice.id, nextNeighborId) : null;
+
+                // Egress Tag calculation
+                const egressPortCfg = getSwitchPortConfig(toDevice, egressPort);
+                const egressTag = getEgressTagAction(egressPortCfg, egressVlan);
+                if (!egressTag.allowed) {
+                    frame.events.push(`Switch ${toDevice.name} dropped frame on ${egressPort}: ${egressTag.reason}`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'switch',
+                        action: 'DROP',
+                        reason: 'vlan-not-allowed',
+                        ingressPort,
+                        egressPort
+                    });
+                    return {
+                        success: false,
+                        reason: `Switch ${toDevice.name} dropped frame on ${egressPort}: ${egressTag.reason}.`,
+                        path: traversedPath,
+                        action: 'DROP',
+                        hopActions
+                    };
+                }
+
+                if (egressTag.isTagged) {
+                    frame.vlanTag = egressTag.vlanTag;
                 } else {
                     delete frame.vlanTag;
                 }
-            }
 
-            const isBroadcast = frame.destinationMac === 'FF:FF:FF:FF:FF:FF';
-            const destEntry = isBroadcast ? null : getSwitchMacEntry(toDevice.id, frame.destinationMac, ingressVlan);
+                // Resolve ARP on egress VLAN
+                const arpTargetIp = nextHopInfo.nextHopIp;
+                const switchArpResult = simulateArpResolution(toDevice, arpTargetIp, topologyPath.slice(i), {
+                    egressInterface: egressIfaceName
+                });
 
-            if (isBroadcast) {
-                frame.events.push(`Switch ${toDevice.name} flooded broadcast frame (FF:FF:FF:FF:FF:FF) on all VLAN ${ingressVlan} ports except ${ingressPort}`);
+                if (!switchArpResult.success) {
+                    const icmpError = createIcmpErrorPacket(3, 1, frame.packet, toDevice, {
+                        ingressInterface: ingressPort,
+                        egressInterface: egressPort,
+                        reason: 'host-unreachable'
+                    });
+                    frame.events.push(...switchArpResult.events);
+                    return {
+                        success: false,
+                        reason: switchArpResult.reason,
+                        path: traversedPath,
+                        action: 'DROP',
+                        hopActions,
+                        icmpErrorPacket: icmpError || null
+                    };
+                }
+
+                frame.destinationMac = switchArpResult.targetMac;
+                learnArp(toDevice.id, arpTargetIp, switchArpResult.targetMac, { interface: egressIfaceName });
+                if (switchArpResult.requestPacket && switchArpResult.replyPacket && nextNeighborId) {
+                    learnArp(nextNeighborId, (egressSvi.ip || toDevice.ip), frame.sourceMac);
+                }
+
+                if (egressPort) {
+                    learnSwitchMac(toDevice.id, frame.destinationMac, nextNeighborId, egressPort, egressVlan);
+                }
+
                 hopActions.push({
                     deviceId: toDevice.id,
                     deviceName: toDevice.name,
                     type: 'switch',
-                    action: 'FLOOD',
-                    reason: 'broadcast',
+                    action: 'ROUTE',
+                    reason: 'l3-routed',
                     ingressPort,
-                    egressPorts,
+                    egressPort,
+                    ingressInterface: ingressSviName,
+                    egressInterface: egressIfaceName,
+                    egressIface: egressIfaceName,
+                    ttl: frame.packet.ttl,
+                    newTtl: frame.packet.ttl,
                     destinationMac: frame.destinationMac
                 });
-            } else if (!destEntry) {
-                frame.events.push(`Destination MAC (${frame.destinationMac}) unknown in VLAN ${ingressVlan} MAC table`);
-                frame.events.push(`Switch ${toDevice.name} flooded unknown unicast frame on all VLAN ${ingressVlan} ports except ${ingressPort}`);
-                hopActions.push({
-                    deviceId: toDevice.id,
-                    deviceName: toDevice.name,
-                    type: 'switch',
-                    action: 'FLOOD',
-                    reason: 'unknown-unicast',
-                    ingressPort,
-                    egressPorts,
-                    destinationMac: frame.destinationMac
-                });
-            } else if (destEntry.port === ingressPort) {
-                frame.events.push(`Destination MAC (${frame.destinationMac}) found on incoming port ${ingressPort}`);
-                frame.events.push(`Switch ${toDevice.name} filtered (dropped) frame — destination is on incoming segment`);
-                hopActions.push({
-                    deviceId: toDevice.id,
-                    deviceName: toDevice.name,
-                    type: 'switch',
-                    action: 'DROP',
-                    reason: 'filtered-same-port',
-                    ingressPort,
-                    destinationMac: frame.destinationMac
-                });
-                return {
-                    success: false,
-                    reason: `Switch ${toDevice.name} filtered frame (destination is on ingress port ${ingressPort}).`,
-                    path: traversedPath,
-                    action: 'DROP',
-                    hopActions
-                };
-            } else if (expectedEgressPort && destEntry.port === expectedEgressPort) {
-                frame.events.push(`Destination MAC found in MAC table → ${destEntry.port}`);
-                frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}`);
-                hopActions.push({
-                    deviceId: toDevice.id,
-                    deviceName: toDevice.name,
-                    type: 'switch',
-                    action: 'FORWARD',
-                    reason: 'known-unicast',
-                    ingressPort,
-                    egressPort: destEntry.port,
-                    destinationMac: frame.destinationMac
-                });
-            } else if (expectedEgressPort && destEntry.port !== expectedEgressPort) {
-                frame.events.push(`Destination MAC mapped to ${destEntry.port} (mismatch with path to destination)`);
-                frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}; frame misdirected and dropped`);
-                hopActions.push({
-                    deviceId: toDevice.id,
-                    deviceName: toDevice.name,
-                    type: 'switch',
-                    action: 'DROP',
-                    reason: 'port-mismatch',
-                    ingressPort,
-                    egressPort: destEntry.port,
-                    expectedEgressPort,
-                    destinationMac: frame.destinationMac
-                });
-                return {
-                    success: false,
-                    reason: `Switch ${toDevice.name} misdirected frame via ${destEntry.port}.`,
-                    path: traversedPath,
-                    action: 'DROP',
-                    hopActions
-                };
             } else {
-                frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}`);
-                hopActions.push({
-                    deviceId: toDevice.id,
-                    deviceName: toDevice.name,
-                    type: 'switch',
-                    action: 'FORWARD',
-                    reason: 'known-unicast',
-                    ingressPort,
-                    egressPort: destEntry.port,
-                    destinationMac: frame.destinationMac
-                });
+                const expectedEgressPort = nextHopId ? getPortForSwitchAndNeighbor(toDevice.id, nextHopId) : null;
+                const runtime = getSwitchRuntime(toDevice.id);
+                const allOtherPorts = Object.values(runtime.ports).filter(p => p !== ingressPort);
+                const egressPorts = allOtherPorts.filter(p => getEgressTagAction(getSwitchPortConfig(toDevice, p), ingressVlan).allowed);
+
+                // Layer-2 VLAN Egress Check
+                if (expectedEgressPort) {
+                    const egressPortConfig = getSwitchPortConfig(toDevice, expectedEgressPort);
+                    const egressTagAction = getEgressTagAction(egressPortConfig, ingressVlan);
+                    if (!egressTagAction.allowed) {
+                        const egressVlanDesc = egressPortConfig.mode === 'trunk' ? `allowed: ${formatAllowedVlans(egressPortConfig.allowedVlans)}` : `VLAN ${egressPortConfig.accessVlan || 1}`;
+                        frame.events.push(`Switch ${toDevice.name} dropped frame: ingress port ${ingressPort} (VLAN ${ingressVlan}) and egress port ${expectedEgressPort} (${egressVlanDesc}) are isolated in different VLANs`);
+                        hopActions.push({
+                            deviceId: toDevice.id,
+                            deviceName: toDevice.name,
+                            type: 'switch',
+                            action: 'DROP',
+                            reason: 'vlan-isolation',
+                            ingressPort,
+                            egressPort: expectedEgressPort,
+                            ingressVlan,
+                            destinationMac: frame.destinationMac
+                        });
+                        return {
+                            success: false,
+                            reason: `Switch ${toDevice.name} dropped frame due to VLAN isolation on port ${expectedEgressPort}.`,
+                            path: traversedPath,
+                            action: 'DROP',
+                            hopActions
+                        };
+                    }
+
+                    // Apply egress wire tagging / untagging
+                    if (egressTagAction.isTagged) {
+                        frame.vlanTag = egressTagAction.vlanTag;
+                    } else {
+                        delete frame.vlanTag;
+                    }
+                }
+
+                const destEntry = isBroadcast ? null : getSwitchMacEntry(toDevice.id, frame.destinationMac, ingressVlan);
+
+                if (isBroadcast) {
+                    frame.events.push(`Switch ${toDevice.name} flooded broadcast frame (FF:FF:FF:FF:FF:FF) on all VLAN ${ingressVlan} ports except ${ingressPort}`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'switch',
+                        action: 'FLOOD',
+                        reason: 'broadcast',
+                        ingressPort,
+                        egressPorts,
+                        destinationMac: frame.destinationMac
+                    });
+                } else if (!destEntry) {
+                    frame.events.push(`Destination MAC (${frame.destinationMac}) unknown in VLAN ${ingressVlan} MAC table`);
+                    frame.events.push(`Switch ${toDevice.name} flooded unknown unicast frame on all VLAN ${ingressVlan} ports except ${ingressPort}`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'switch',
+                        action: 'FLOOD',
+                        reason: 'unknown-unicast',
+                        ingressPort,
+                        egressPorts,
+                        destinationMac: frame.destinationMac
+                    });
+                } else if (destEntry.port === ingressPort) {
+                    frame.events.push(`Destination MAC (${frame.destinationMac}) found on incoming port ${ingressPort}`);
+                    frame.events.push(`Switch ${toDevice.name} filtered (dropped) frame — destination is on incoming segment`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'switch',
+                        action: 'DROP',
+                        reason: 'filtered-same-port',
+                        ingressPort,
+                        destinationMac: frame.destinationMac
+                    });
+                    return {
+                        success: false,
+                        reason: `Switch ${toDevice.name} filtered frame (destination is on ingress port ${ingressPort}).`,
+                        path: traversedPath,
+                        action: 'DROP',
+                        hopActions
+                    };
+                } else if (expectedEgressPort && destEntry.port === expectedEgressPort) {
+                    frame.events.push(`Destination MAC found in MAC table → ${destEntry.port}`);
+                    frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'switch',
+                        action: 'FORWARD',
+                        reason: 'known-unicast',
+                        ingressPort,
+                        egressPort: destEntry.port,
+                        destinationMac: frame.destinationMac
+                    });
+                } else if (expectedEgressPort && destEntry.port !== expectedEgressPort) {
+                    frame.events.push(`Destination MAC mapped to ${destEntry.port} (mismatch with path to destination)`);
+                    frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}; frame misdirected and dropped`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'switch',
+                        action: 'DROP',
+                        reason: 'port-mismatch',
+                        ingressPort,
+                        egressPort: destEntry.port,
+                        expectedEgressPort,
+                        destinationMac: frame.destinationMac
+                    });
+                    return {
+                        success: false,
+                        reason: `Switch ${toDevice.name} misdirected frame via ${destEntry.port}.`,
+                        path: traversedPath,
+                        action: 'DROP',
+                        hopActions
+                    };
+                } else {
+                    frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'switch',
+                        action: 'FORWARD',
+                        reason: 'known-unicast',
+                        ingressPort,
+                        egressPort: destEntry.port,
+                        destinationMac: frame.destinationMac
+                    });
+                }
             }
         } else if (toDevice.type === 'router') {
             const ingressPort = getPortForRouterAndNeighbor(toDevice.id, fromId);
@@ -7460,6 +8039,30 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
                 }
             }
         }
+    } else if (requesterDevice.type === 'switch') {
+        if (requesterInterfaceName && isSviName(requesterInterfaceName)) {
+            const vlanId = getSviVlanId(requesterInterfaceName);
+            const svi = requesterDevice.svis?.[vlanId];
+            if (svi) {
+                reqIp = svi.ip;
+                reqMac = svi.mac || requesterDevice.mac;
+                reqMask = normalizeSubnetMask(svi.subnetMask);
+            }
+        } else if (requesterDevice.svis) {
+            for (const [vlanIdStr, svi] of Object.entries(requesterDevice.svis)) {
+                const vlanId = parseInt(vlanIdStr, 10);
+                if (getEffectiveSviStatus(requesterDevice, vlanId) !== 'down' && svi.ip) {
+                    const ifMask = normalizeSubnetMask(svi.subnetMask);
+                    if (ifMask && isSameSubnet(svi.ip, targetIp, ifMask)) {
+                        reqIp = svi.ip;
+                        reqMac = svi.mac || requesterDevice.mac;
+                        reqMask = ifMask;
+                        requesterInterfaceName = `Vlan${vlanId}`;
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     if (!reqIp || !reqMac || !reqMask) {
@@ -7524,6 +8127,20 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
                             targetMac = iface.mac;
                             break;
                         }
+                    }
+                }
+            }
+            if (targetDevice) break;
+        } else if (dev.type === 'switch' && dev.svis) {
+            for (const [vlanIdStr, svi] of Object.entries(dev.svis)) {
+                const vlanId = parseInt(vlanIdStr, 10);
+                if (svi.ip === targetIp && getEffectiveSviStatus(dev, vlanId) !== 'down') {
+                    const ifMask = normalizeSubnetMask(svi.subnetMask);
+                    if (reqMask && ifMask && isSameSubnet(reqIp, svi.ip, reqMask)) {
+                        targetDevice = dev;
+                        targetInterfaceName = `Vlan${vlanId}`;
+                        targetMac = svi.mac || dev.mac;
+                        break;
                     }
                 }
             }
@@ -7599,6 +8216,17 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
             currentVlan = egressIface.vlan;
             currentTagged = true;
         }
+    } else if (requesterDevice.type === 'switch' && options.egressInterface && isSviName(options.egressInterface)) {
+        currentVlan = getSviVlanId(options.egressInterface) || 1;
+        const firstNeighborId = arpPath[1];
+        if (firstNeighborId) {
+            const outPort = getPortForSwitchAndNeighbor(requesterDevice.id, firstNeighborId);
+            if (outPort) {
+                const cfg = getSwitchPortConfig(requesterDevice, outPort);
+                const tagAction = getEgressTagAction(cfg, currentVlan);
+                currentTagged = tagAction.isTagged;
+            }
+        }
     } else {
         const firstSwitchId = arpPath.find(id => getDeviceById(id)?.type === 'switch');
         if (firstSwitchId) {
@@ -7614,6 +8242,7 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
     for (let i = 0; i < arpPath.length - 1; i++) {
         const fromId = arpPath[i];
         const toId = arpPath[i + 1];
+        const fromDevice = getDeviceById(fromId);
         const toDevice = getDeviceById(toId);
 
         if (!toDevice) {
@@ -7630,6 +8259,15 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
         if (toDevice.type === 'switch') {
             const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
             const ingressPortConfig = getSwitchPortConfig(toDevice, ingressPort);
+
+            if (fromDevice && fromDevice.type === 'switch') {
+                const fromEgressPort = getPortForSwitchAndNeighbor(fromDevice.id, toDevice.id);
+                if (fromEgressPort) {
+                    const fromCfg = getSwitchPortConfig(fromDevice, fromEgressPort);
+                    const tagAction = getEgressTagAction(fromCfg, currentVlan);
+                    currentTagged = tagAction.isTagged;
+                }
+            }
 
             let ingressVlan;
             if (ingressPortConfig.mode === 'access') {
@@ -7735,6 +8373,9 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
     events.push(`${targetDevice.name} sent ARP Reply: ${targetIp} is at ${targetMac}`);
 
     // Determine initial VLAN of target for reverse path
+    // Traverse reverse path (ARP Reply Unicast)
+    const reverseArpPath = [...arpPath].reverse();
+
     let replyVlan = 1;
     let replyTagged = false;
     if (targetDevice.type === 'router' && targetInterfaceName) {
@@ -7742,6 +8383,17 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
         if (targetIface && targetIface.isSubinterface && targetIface.encapsulation === 'dot1q' && targetIface.vlan) {
             replyVlan = targetIface.vlan;
             replyTagged = true;
+        }
+    } else if (targetDevice.type === 'switch' && targetInterfaceName && isSviName(targetInterfaceName)) {
+        replyVlan = getSviVlanId(targetInterfaceName) || 1;
+        const nextNeighborId = reverseArpPath[1];
+        if (nextNeighborId) {
+            const outPort = getPortForSwitchAndNeighbor(targetDevice.id, nextNeighborId);
+            if (outPort) {
+                const cfg = getSwitchPortConfig(targetDevice, outPort);
+                const tagAction = getEgressTagAction(cfg, replyVlan);
+                replyTagged = tagAction.isTagged;
+            }
         }
     } else {
         const lastSwitchId = [...arpPath].reverse().find(id => getDeviceById(id)?.type === 'switch');
@@ -7754,16 +8406,24 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
         }
     }
 
-    // Traverse reverse path (ARP Reply Unicast)
-    const reverseArpPath = [...arpPath].reverse();
     for (let i = 0; i < reverseArpPath.length - 1; i++) {
         const fromId = reverseArpPath[i];
         const toId = reverseArpPath[i + 1];
+        const fromDevice = getDeviceById(fromId);
         const toDevice = getDeviceById(toId);
 
         if (toDevice && toDevice.type === 'switch') {
             const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
             const ingressPortConfig = getSwitchPortConfig(toDevice, ingressPort);
+
+            if (fromDevice && fromDevice.type === 'switch') {
+                const fromEgressPort = getPortForSwitchAndNeighbor(fromDevice.id, toDevice.id);
+                if (fromEgressPort) {
+                    const fromCfg = getSwitchPortConfig(fromDevice, fromEgressPort);
+                    const tagAction = getEgressTagAction(fromCfg, replyVlan);
+                    replyTagged = tagAction.isTagged;
+                }
+            }
 
             let ingressVlan;
             if (ingressPortConfig.mode === 'access') {
@@ -8123,30 +8783,47 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             };
         }
 
-        const firstRouterId = topologyPath.find((id) => getDeviceById(id)?.type === 'router');
-        if (firstRouterId) {
-            const firstRouter = getDeviceById(firstRouterId);
-            const firstRouterIdx = topologyPath.indexOf(firstRouterId);
-            const prevHopId = topologyPath[firstRouterIdx - 1];
-            const ingressPort = getPortForRouterAndNeighbor(firstRouter.id, prevHopId);
-            let ingressIface = firstRouter.interfaces?.[ingressPort];
-            if ((!ingressIface || !ingressIface.ip || ingressIface.ip !== sourceDevice.gateway) && firstRouter.interfaces) {
-                for (const [, iface] of Object.entries(firstRouter.interfaces)) {
-                    if (iface.isSubinterface && iface.parentInterface === ingressPort && iface.ip === sourceDevice.gateway) {
-                        ingressIface = iface;
-                        break;
+        const firstL3Id = topologyPath.find((id) => {
+            const d = getDeviceById(id);
+            return d?.type === 'router' || (d?.type === 'switch' && d.ipRouting);
+        });
+        if (firstL3Id) {
+            const firstL3Dev = getDeviceById(firstL3Id);
+            if (firstL3Dev.type === 'router') {
+                const firstRouterIdx = topologyPath.indexOf(firstL3Id);
+                const prevHopId = topologyPath[firstRouterIdx - 1];
+                const ingressPort = getPortForRouterAndNeighbor(firstL3Dev.id, prevHopId);
+                let ingressIface = firstL3Dev.interfaces?.[ingressPort];
+                if ((!ingressIface || !ingressIface.ip || ingressIface.ip !== sourceDevice.gateway) && firstL3Dev.interfaces) {
+                    for (const [, iface] of Object.entries(firstL3Dev.interfaces)) {
+                        if (iface.isSubinterface && iface.parentInterface === ingressPort && iface.ip === sourceDevice.gateway) {
+                            ingressIface = iface;
+                            break;
+                        }
                     }
                 }
-            }
-            if (ingressIface && ingressIface.ip && sourceDevice.gateway !== ingressIface.ip) {
-                return {
-                    success: false,
-                    reason: `Source default gateway (${sourceDevice.gateway}) does not match router interface IP (${ingressIface.ip}).`,
-                    path: [topologyPath[0]],
-                    action: 'DROP',
-                    events: [`Source default gateway (${sourceDevice.gateway}) does not match router interface IP (${ingressIface.ip}).`],
-                    hopActions: []
-                };
+                if (ingressIface && ingressIface.ip && sourceDevice.gateway !== ingressIface.ip) {
+                    return {
+                        success: false,
+                        reason: `Source default gateway (${sourceDevice.gateway}) does not match router interface IP (${ingressIface.ip}).`,
+                        path: [topologyPath[0]],
+                        action: 'DROP',
+                        events: [`Source default gateway (${sourceDevice.gateway}) does not match router interface IP (${ingressIface.ip}).`],
+                        hopActions: []
+                    };
+                }
+            } else if (firstL3Dev.type === 'switch') {
+                const gatewaySvi = Object.values(firstL3Dev.svis || {}).find(s => s && s.ip === sourceDevice.gateway);
+                if (!gatewaySvi) {
+                    return {
+                        success: false,
+                        reason: `Source default gateway (${sourceDevice.gateway}) does not match any SVI IP on switch ${firstL3Dev.name}.`,
+                        path: [topologyPath[0]],
+                        action: 'DROP',
+                        events: [`Source default gateway (${sourceDevice.gateway}) does not match any SVI IP on switch ${firstL3Dev.name}.`],
+                        hopActions: []
+                    };
+                }
             }
         }
     }
@@ -8289,14 +8966,29 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
     let reverseInitialDestMac = sourceDevice.mac;
 
     if (!sameSubnet) {
-        const revFirstRouterIndex = reverseTopologyPath.findIndex((id) => getDeviceById(id)?.type === 'router');
-        if (revFirstRouterIndex !== -1) {
-            const revRouter = getDeviceById(reverseTopologyPath[revFirstRouterIndex]);
-            const revPrevHopId = reverseTopologyPath[revFirstRouterIndex - 1];
-            const revIngressPort = getPortForRouterAndNeighbor(revRouter.id, revPrevHopId);
-            const revIngressIface = revRouter?.interfaces?.[revIngressPort];
-            if (revIngressIface && revIngressIface.mac) {
-                reverseInitialDestMac = revIngressIface.mac;
+        const revFirstL3Index = reverseTopologyPath.findIndex((id) => {
+            const d = getDeviceById(id);
+            return d?.type === 'router' || (d?.type === 'switch' && d.ipRouting);
+        });
+        if (revFirstL3Index !== -1) {
+            const revL3Dev = getDeviceById(reverseTopologyPath[revFirstL3Index]);
+            if (revL3Dev.type === 'router') {
+                const revPrevHopId = reverseTopologyPath[revFirstL3Index - 1];
+                const revIngressPort = getPortForRouterAndNeighbor(revL3Dev.id, revPrevHopId);
+                let revIngressIface = revL3Dev?.interfaces?.[revIngressPort];
+                if ((!revIngressIface || !revIngressIface.mac) && revL3Dev.interfaces) {
+                    for (const [, iface] of Object.entries(revL3Dev.interfaces)) {
+                        if (iface.isSubinterface && iface.parentInterface === revIngressPort) {
+                            revIngressIface = iface;
+                            break;
+                        }
+                    }
+                }
+                if (revIngressIface && revIngressIface.mac) {
+                    reverseInitialDestMac = revIngressIface.mac;
+                }
+            } else if (revL3Dev.type === 'switch') {
+                reverseInitialDestMac = revL3Dev.mac;
             }
         }
     }
@@ -8315,6 +9007,33 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
         }
     };
 
+    let replyInitialVlanTag = null;
+    const revDestDev = getDeviceById(destinationDevice.id) || destinationDevice;
+    if (revDestDev.type === 'switch' && reverseTopologyPath.length >= 2) {
+        let sviVlanId = 1;
+        for (const [vlanIdStr, svi] of Object.entries(revDestDev.svis || {})) {
+            if (svi && (svi.ip === destinationDevice.ip || svi.ip === revDestDev.ip)) {
+                sviVlanId = parseInt(vlanIdStr, 10);
+                break;
+            }
+        }
+        const outPort = getPortForSwitchAndNeighbor(revDestDev.id, reverseTopologyPath[1]);
+        if (outPort) {
+            const outCfg = getSwitchPortConfig(revDestDev, outPort);
+            const tagAction = getEgressTagAction(outCfg, sviVlanId);
+            if (tagAction.isTagged) {
+                replyInitialVlanTag = tagAction.vlanTag;
+            }
+        }
+    } else if (revDestDev.type === 'router') {
+        for (const [, iface] of Object.entries(revDestDev.interfaces || {})) {
+            if (iface && (iface.ip === destinationDevice.ip || iface.ip === revDestDev.ip) && iface.isSubinterface && iface.encapsulation === 'dot1q' && iface.vlan) {
+                replyInitialVlanTag = { vlanId: iface.vlan, isTagged: true };
+                break;
+            }
+        }
+    }
+
     const replyFrame = {
         sourceDeviceId: destinationDevice.id,
         destinationDeviceId: sourceDevice.id,
@@ -8327,6 +9046,10 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
         agingTimeSeconds: options?.agingTimeSeconds,
         now: options?.now
     };
+
+    if (replyInitialVlanTag) {
+        replyFrame.vlanTag = replyInitialVlanTag;
+    }
 
     const reverseResult = simulatePathTransmission(replyFrame, destinationDevice, sourceDevice, reverseTopologyPath);
 
@@ -9537,13 +10260,103 @@ function formatCliSwitchInterfaceSwitchport(switchOrId, portName) {
         `Switchport: Enabled`,
         `Administrative Mode: ${isTrunk ? 'trunk' : 'static access'}`,
         `Operational Mode: ${isTrunk ? 'trunk' : 'static access'}`,
-        `Administrative Trunking Encapsulation: dot1q`,
-        `Operational Trunking Encapsulation: dot1q`,
-        `Negotiation of Trunking: Off`,
-        `Access Mode VLAN: ${cfg.accessVlan || 1} (${accessVlanName})`,
-        `Trunking Native Mode VLAN: ${cfg.nativeVlan || 1} (${nativeVlanName})`,
         `Administrative Native VLAN tagging: disabled`,
         `Trunking VLANs Enabled: ${isTrunk ? (cfg.allowedVlans === 'all' ? 'ALL' : formatAllowedVlans(cfg.allowedVlans)) : 'ALL'}`
+    ];
+    return lines.join('\n');
+}
+
+function formatCliSwitchIpInterfaceBrief(switchOrId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return '% Switch not found.';
+    ensureSwitchVlanState(sw);
+
+    const lines = [
+        'Interface              IP-Address      OK? Method Status                Protocol',
+        '================================================================================'
+    ];
+
+    const sviEntries = Object.entries(sw.svis || {}).sort((a, b) => Number(a[0]) - Number(b[0]));
+    if (sviEntries.length === 0) {
+        lines.push('No IP interfaces configured.');
+        return lines.join('\n');
+    }
+
+    sviEntries.forEach(([vlanIdStr, svi]) => {
+        const vlanId = Number(vlanIdStr);
+        const ifName = `Vlan${vlanId}`.padEnd(23, ' ');
+        const ipStr = (svi.ip || 'unassigned').padEnd(16, ' ');
+        const okStr = 'YES'.padEnd(4, ' ');
+        const methodStr = (svi.ip ? 'manual' : 'unset').padEnd(7, ' ');
+        const isUp = getEffectiveSviStatus(sw, vlanId) === 'up';
+        const isAdminDown = svi.adminStatus === 'down';
+        const statusStr = (isAdminDown ? 'administratively down' : (isUp ? 'up' : 'down')).padEnd(22, ' ');
+        const protoStr = isUp ? 'up' : 'down';
+        lines.push(`${ifName}${ipStr}${okStr}${methodStr}${statusStr}${protoStr}`);
+    });
+
+    return lines.join('\n');
+}
+
+function formatCliSwitchRoutingTable(switchOrId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return '% Switch not found.';
+    ensureSwitchVlanState(sw);
+
+    if (!sw.ipRouting) {
+        return `% IP routing is disabled. Use 'ip routing' in global configuration mode to enable routing table.`;
+    }
+
+    const routingTable = getSwitchRoutingTable(sw.id);
+    const lines = [
+        'Codes: C - connected, S - static',
+        'Gateway of last resort is not set',
+        ''
+    ];
+
+    if (routingTable.length === 0) {
+        lines.push('No routes in routing table.');
+        return lines.join('\n');
+    }
+
+    routingTable.forEach((r) => {
+        if (r.code === 'C' || r.type === 'connected') {
+            lines.push(`C    ${r.cidr} is directly connected, ${r.interface}`);
+        } else if (r.code === 'S' || r.type === 'static') {
+            if (r.nextHop && r.interface) {
+                lines.push(`S    ${r.cidr} [${r.adminDistance}/${r.metric}] via ${r.nextHop}, ${r.interface}`);
+            } else if (r.nextHop) {
+                lines.push(`S    ${r.cidr} [${r.adminDistance}/${r.metric}] via ${r.nextHop}`);
+            } else if (r.interface) {
+                lines.push(`S    ${r.cidr} is directly connected, ${r.interface}`);
+            }
+        }
+    });
+
+    return lines.join('\n');
+}
+
+function formatCliSwitchSviDetail(switchOrId, vlanId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return '% Switch not found.';
+    ensureSwitchVlanState(sw);
+    const normId = normalizeVlanId(vlanId);
+    if (normId === null) return `% Invalid VLAN ID "${vlanId}".`;
+    const svi = sw.svis?.[normId];
+    if (!svi) return `% Interface Vlan${normId} does not exist.`;
+
+    const isUp = getEffectiveSviStatus(sw, normId) === 'up';
+    const isAdminDown = svi.adminStatus === 'down';
+    const lineStatus = isAdminDown ? 'administratively down' : (isUp ? 'up' : 'down');
+    const protoStatus = isUp ? 'up' : 'down';
+    const ipStr = svi.ip && svi.subnetMask ? `${svi.ip}/${getPrefixLengthFromMask(svi.subnetMask)}` : 'unassigned';
+
+    const lines = [
+        `Vlan${normId} is ${lineStatus}, line protocol is ${protoStatus}`,
+        `  Hardware is EtherSVI, address is ${svi.mac || sw.mac}`,
+        `  Internet address is ${ipStr}`,
+        `  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec`,
+        `  Encapsulation ARPA, loopback not set`
     ];
     return lines.join('\n');
 }
@@ -9568,6 +10381,20 @@ function findDeviceByIp(ip) {
                         subnetMask: iface.subnetMask,
                         mac: iface.mac,
                         status: iface.status || 'up'
+                    };
+                }
+            }
+        } else if (dev.type === 'switch' && dev.svis) {
+            for (const [vlanIdStr, svi] of Object.entries(dev.svis)) {
+                if (svi && svi.ip === targetIp) {
+                    const vlanId = parseInt(vlanIdStr, 10);
+                    return {
+                        device: dev,
+                        interfaceName: `Vlan${vlanId}`,
+                        ip: svi.ip,
+                        subnetMask: svi.subnetMask,
+                        mac: svi.mac || dev.mac,
+                        status: getEffectiveSviStatus(dev, vlanId)
                     };
                 }
             }
@@ -9643,6 +10470,68 @@ function executeCliPing(sourceDev, targetIpArg) {
                 };
             }
         }
+    } else if (sourceDev.type === 'switch') {
+        if (sourceDev.ipRouting) {
+            const routeMatch = lookupRoute(sourceDev.id, rawTarget);
+            if (routeMatch && routeMatch.success && routeMatch.route && routeMatch.route.interface) {
+                const vlanId = getSviVlanId(routeMatch.route.interface);
+                const svi = sourceDev.svis?.[vlanId];
+                if (svi && svi.ip) {
+                    srcEndpoint = {
+                        id: sourceDev.id,
+                        name: sourceDev.name,
+                        ip: svi.ip,
+                        subnetMask: svi.subnetMask,
+                        gateway: sourceDev.defaultGateway || '',
+                        mac: svi.mac || sourceDev.mac,
+                        type: 'switch',
+                        svis: sourceDev.svis,
+                        ipRouting: sourceDev.ipRouting
+                    };
+                }
+            }
+        }
+        if (!srcEndpoint && sourceDev.svis) {
+            for (const [vlanIdStr, svi] of Object.entries(sourceDev.svis)) {
+                const vlanId = parseInt(vlanIdStr, 10);
+                if (svi && svi.ip && getEffectiveSviStatus(sourceDev, vlanId) === 'up') {
+                    const normMask = normalizeSubnetMask(svi.subnetMask);
+                    if (normMask && isSameSubnet(svi.ip, rawTarget, normMask)) {
+                        srcEndpoint = {
+                            id: sourceDev.id,
+                            name: sourceDev.name,
+                            ip: svi.ip,
+                            subnetMask: svi.subnetMask,
+                            gateway: sourceDev.defaultGateway || '',
+                            mac: svi.mac || sourceDev.mac,
+                            type: 'switch',
+                            svis: sourceDev.svis,
+                            ipRouting: sourceDev.ipRouting
+                        };
+                        break;
+                    }
+                }
+            }
+            if (!srcEndpoint) {
+                for (const [vlanIdStr, svi] of Object.entries(sourceDev.svis)) {
+                    const vlanId = parseInt(vlanIdStr, 10);
+                    if (svi && svi.ip && getEffectiveSviStatus(sourceDev, vlanId) === 'up') {
+                        srcEndpoint = {
+                            id: sourceDev.id,
+                            name: sourceDev.name,
+                            ip: svi.ip,
+                            subnetMask: svi.subnetMask,
+                            gateway: sourceDev.defaultGateway || '',
+                            mac: svi.mac || sourceDev.mac,
+                            type: 'switch',
+                            svis: sourceDev.svis,
+                            ipRouting: sourceDev.ipRouting
+                        };
+                        break;
+                    }
+                }
+            }
+        }
     } else {
         if (sourceDev.ip && isValidIPv4(sourceDev.ip)) {
             srcEndpoint = sourceDev;
@@ -9686,6 +10575,17 @@ function executeCliPing(sourceDev, targetIpArg) {
             mac: targetMatch.mac,
             type: 'router',
             interfaces: targetMatch.device.interfaces
+        };
+    } else if (targetMatch.device.type === 'switch') {
+        destEndpoint = {
+            id: targetMatch.device.id,
+            name: targetMatch.device.name,
+            ip: targetMatch.ip,
+            subnetMask: targetMatch.subnetMask,
+            mac: targetMatch.mac,
+            type: 'switch',
+            svis: targetMatch.device.svis,
+            ipRouting: targetMatch.device.ipRouting
         };
     } else {
         destEndpoint = targetMatch.device;
@@ -9807,6 +10707,68 @@ function executeCliTraceroute(sourceDev, targetIpArg) {
                 };
             }
         }
+    } else if (sourceDev.type === 'switch') {
+        if (sourceDev.ipRouting) {
+            const routeMatch = lookupRoute(sourceDev.id, rawTarget);
+            if (routeMatch && routeMatch.success && routeMatch.route && routeMatch.route.interface) {
+                const vlanId = getSviVlanId(routeMatch.route.interface);
+                const svi = sourceDev.svis?.[vlanId];
+                if (svi && svi.ip) {
+                    srcEndpoint = {
+                        id: sourceDev.id,
+                        name: sourceDev.name,
+                        ip: svi.ip,
+                        subnetMask: svi.subnetMask,
+                        gateway: sourceDev.defaultGateway || '',
+                        mac: svi.mac || sourceDev.mac,
+                        type: 'switch',
+                        svis: sourceDev.svis,
+                        ipRouting: sourceDev.ipRouting
+                    };
+                }
+            }
+        }
+        if (!srcEndpoint && sourceDev.svis) {
+            for (const [vlanIdStr, svi] of Object.entries(sourceDev.svis)) {
+                const vlanId = parseInt(vlanIdStr, 10);
+                if (svi && svi.ip && getEffectiveSviStatus(sourceDev, vlanId) === 'up') {
+                    const normMask = normalizeSubnetMask(svi.subnetMask);
+                    if (normMask && isSameSubnet(svi.ip, rawTarget, normMask)) {
+                        srcEndpoint = {
+                            id: sourceDev.id,
+                            name: sourceDev.name,
+                            ip: svi.ip,
+                            subnetMask: svi.subnetMask,
+                            gateway: sourceDev.defaultGateway || '',
+                            mac: svi.mac || sourceDev.mac,
+                            type: 'switch',
+                            svis: sourceDev.svis,
+                            ipRouting: sourceDev.ipRouting
+                        };
+                        break;
+                    }
+                }
+            }
+            if (!srcEndpoint) {
+                for (const [vlanIdStr, svi] of Object.entries(sourceDev.svis)) {
+                    const vlanId = parseInt(vlanIdStr, 10);
+                    if (svi && svi.ip && getEffectiveSviStatus(sourceDev, vlanId) === 'up') {
+                        srcEndpoint = {
+                            id: sourceDev.id,
+                            name: sourceDev.name,
+                            ip: svi.ip,
+                            subnetMask: svi.subnetMask,
+                            gateway: sourceDev.defaultGateway || '',
+                            mac: svi.mac || sourceDev.mac,
+                            type: 'switch',
+                            svis: sourceDev.svis,
+                            ipRouting: sourceDev.ipRouting
+                        };
+                        break;
+                    }
+                }
+            }
+        }
     } else {
         if (sourceDev.ip && isValidIPv4(sourceDev.ip)) {
             srcEndpoint = sourceDev;
@@ -9848,6 +10810,17 @@ function executeCliTraceroute(sourceDev, targetIpArg) {
             mac: targetMatch.mac,
             type: 'router',
             interfaces: targetMatch.device.interfaces
+        };
+    } else if (targetMatch.device.type === 'switch') {
+        destEndpoint = {
+            id: targetMatch.device.id,
+            name: targetMatch.device.name,
+            ip: targetMatch.ip,
+            subnetMask: targetMatch.subnetMask,
+            mac: targetMatch.mac,
+            type: 'switch',
+            svis: targetMatch.device.svis,
+            ipRouting: targetMatch.device.ipRouting
         };
     } else {
         destEndpoint = targetMatch.device;
@@ -10327,6 +11300,16 @@ function executeCliCommand(deviceId, rawInput) {
                 device: dev
             };
         }
+        if (isSviName(session.selectedInterface)) {
+            return {
+                success: false,
+                output: '% Command rejected: Switchport commands are only valid on physical interfaces, not SVIs.',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
         const sub1 = tokens[1] || '';
         const sub2 = tokens[2] || '';
 
@@ -10666,11 +11649,45 @@ function executeCliCommand(deviceId, rawInput) {
             }
         }
         if (isSwitch) {
+            let sviTarget = null;
+            if (rawIfName.toLowerCase() === 'vlan' && tokens[2]) {
+                sviTarget = normalizeSviName(`Vlan${tokens[2]}`);
+            } else if (isSviName(rawIfName)) {
+                sviTarget = normalizeSviName(rawIfName);
+            }
+
+            if (sviTarget) {
+                const vlanId = getSviVlanId(sviTarget);
+                if (vlanId === null) {
+                    return {
+                        success: false,
+                        output: `% Invalid VLAN ID "${rawIfName}". Valid range is 1-4094.`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                ensureSwitchSvi(dev, vlanId);
+                session.prevMode = (session.mode === 'config' || session.mode === 'config-if' || session.mode === 'config-vlan') ? session.mode : 'exec';
+                session.mode = 'config-if';
+                session.selectedInterface = sviTarget;
+                session.selectedVlan = null;
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+
             const normPort = normalizeSwitchPortName(rawIfName);
             if (!normPort) {
                 return {
                     success: false,
-                    output: `% Invalid switch interface: "${rawIfName}". Example: "Fa0/1" or "Gig0/1".`,
+                    output: `% Invalid switch interface: "${rawIfName}". Example: "Fa0/1" or "vlan 10".`,
                     clear: false,
                     status: 'error',
                     command,
@@ -10790,6 +11807,13 @@ function executeCliCommand(deviceId, rawInput) {
                 render();
             }
         }
+        if (isSwitch) {
+            if (isSviName(session.selectedInterface)) {
+                pushHistory();
+                setSwitchSviAdminStatus(dev, getSviVlanId(session.selectedInterface), 'down');
+                render();
+            }
+        }
         return {
             success: true,
             output: `% Interface ${session.selectedInterface} changed state to administratively down`,
@@ -10800,7 +11824,7 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 12. NO commands (no shutdown, no ip address, no ip route, no vlan)
+    // 12. NO commands (no shutdown, no ip address, no ip route, no vlan, no ip routing, no ip default-gateway, no interface)
     if (mainCmd === 'no') {
         const sub1 = tokens[1] || '';
         const sub2 = tokens[2] || '';
@@ -10913,6 +11937,13 @@ function executeCliCommand(deviceId, rawInput) {
                     render();
                 }
             }
+            if (isSwitch) {
+                if (isSviName(session.selectedInterface)) {
+                    pushHistory();
+                    setSwitchSviAdminStatus(dev, getSviVlanId(session.selectedInterface), 'up');
+                    render();
+                }
+            }
             return {
                 success: true,
                 output: `% Interface ${session.selectedInterface} changed state to up`,
@@ -10923,14 +11954,131 @@ function executeCliCommand(deviceId, rawInput) {
             };
         }
 
+        // no ip routing
+        if (sub1 === 'ip' && sub2 === 'routing') {
+            if (!isSwitch && !isRouter) {
+                return {
+                    success: false,
+                    output: "% 'no ip routing' is a Cisco IOS command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (isSwitch) {
+                if (session.mode !== 'config') {
+                    return {
+                        success: false,
+                        output: '% "no ip routing" must be executed in global configuration mode.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                setSwitchIpRouting(dev, false);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // no ip default-gateway / no ip default-gw
+        if (sub1 === 'ip' && (sub2 === 'default-gateway' || sub2 === 'default-gw')) {
+            if (!isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'no ip default-gateway' is a switch configuration command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode !== 'config') {
+                return {
+                    success: false,
+                    output: '% "no ip default-gateway" must be executed in global configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            pushHistory();
+            setSwitchDefaultGateway(dev, '');
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // no interface vlan <id> / no int vlan <id>
+        if (sub1 === 'interface' || sub1 === 'int') {
+            if (isSwitch) {
+                let targetIf = tokens[2] || '';
+                if (targetIf.toLowerCase() === 'vlan' && tokens[3]) {
+                    targetIf = `Vlan${tokens[3]}`;
+                }
+                if (targetIf && isSviName(targetIf)) {
+                    const vlanId = getSviVlanId(targetIf);
+                    pushHistory();
+                    deleteSwitchSvi(dev, vlanId);
+                    render();
+                    return {
+                        success: true,
+                        output: '',
+                        clear: false,
+                        status: 'success',
+                        command,
+                        device: dev
+                    };
+                }
+            }
+        }
+
         // no ip address / no ip addr
         if (sub1 === 'ip' && (sub2 === 'address' || sub2 === 'addr')) {
             if (isSwitch) {
+                if (session.mode !== 'config-if' || !session.selectedInterface || !isSviName(session.selectedInterface)) {
+                    return {
+                        success: false,
+                        output: '% "no ip address" is not supported on Layer 2 switchports (Layer-2 switches operate at Layer 2; SVIs are configured via "interface vlan <id>").',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                setSwitchSviIp(dev, getSviVlanId(session.selectedInterface), '', '');
+                render();
                 return {
-                    success: false,
-                    output: "% 'ip address' is a router interface command (Layer-2 switches operate at Layer 2).",
+                    success: true,
+                    output: '',
                     clear: false,
-                    status: 'error',
+                    status: 'success',
                     command,
                     device: dev
                 };
@@ -10976,20 +12124,20 @@ function executeCliCommand(deviceId, rawInput) {
 
         // no ip route <network> <mask/prefix> [next-hop/interface]
         if (sub1 === 'ip' && (sub2 === 'route' || sub2 === 'routes')) {
-            if (isSwitch) {
+            if (isSwitch && !dev.ipRouting) {
                 return {
                     success: false,
-                    output: "% 'ip route' is a router command. Switches operate at Layer 2.",
+                    output: "% IP routing is disabled. Use 'ip routing' in global configuration mode to enable routing.",
                     clear: false,
                     status: 'error',
                     command,
                     device: dev
                 };
             }
-            if (!isRouter) {
+            if (!isRouter && !isSwitch) {
                 return {
                     success: false,
-                    output: "% 'no ip route' is a Cisco IOS router command.",
+                    output: "% 'no ip route' is a Cisco IOS command.",
                     clear: false,
                     status: 'error',
                     command,
@@ -11033,7 +12181,7 @@ function executeCliCommand(deviceId, rawInput) {
                 };
             }
 
-            const runtime = getRouterRuntime(dev.id);
+            const runtime = dev.type === 'router' ? getRouterRuntime(dev.id) : getSwitchRuntime(dev.id);
             const targetNetwork = calculateNetworkAddress(rawDest, normMask);
             const targetPrefix = getPrefixLengthFromMask(normMask);
             const matchedIndex = (runtime.staticRoutes || []).findIndex((r) => {
@@ -11068,108 +12216,102 @@ function executeCliCommand(deviceId, rawInput) {
         }
     }
 
-    // 13. IP ADDRESS / IP ADDR (router only)
-    if (mainCmd === 'ip' && (tokens[1] === 'address' || tokens[1] === 'addr')) {
-        if (isSwitch) {
-            return {
-                success: false,
-                output: "% 'ip address' is a router interface command (Layer-2 switches operate at Layer 2).",
-                clear: false,
-                status: 'error',
-                command,
-                device: dev
-            };
-        }
-        if (!isRouter) {
-            return {
-                success: false,
-                output: "% 'ip address' is a Cisco IOS router command.",
-                clear: false,
-                status: 'error',
-                command,
-                device: dev
-            };
-        }
-        if ((session.mode !== 'config-if' && session.mode !== 'config-subif') || !session.selectedInterface || !dev.interfaces?.[session.selectedInterface]) {
-            return {
-                success: false,
-                output: '% "ip address" must be executed inside interface configuration mode (e.g. "interface Gig0/0").',
-                clear: false,
-                status: 'error',
-                command,
-                device: dev
-            };
-        }
-        const iface = dev.interfaces[session.selectedInterface];
-        if (iface.isSubinterface && (!iface.encapsulation || !iface.vlan)) {
-            return {
-                success: false,
-                output: '% Configuring IP routing on a LAN subinterface is only allowed if that subinterface is already configured as part of an IEEE 802.10, IEEE 802.1Q, or ISL vLAN.',
-                clear: false,
-                status: 'error',
-                command,
-                device: dev
-            };
-        }
-        let rawIp = '';
-        let rawMask = '';
-        if (tokens[2] && tokens[2].includes('/')) {
-            const parts = tokens[2].split('/');
-            rawIp = parts[0].trim();
-            const prefix = parseInt(parts[1], 10);
-            if (isNaN(prefix) || prefix < 0 || prefix > 32) {
+    // 13. IP ROUTING / IP DEFAULT-GATEWAY / IP ADDRESS
+    if (mainCmd === 'ip') {
+        // ip routing
+        if (tokens[1] === 'routing') {
+            if (!isSwitch && !isRouter) {
                 return {
                     success: false,
-                    output: '% Invalid CIDR prefix length.',
+                    output: "% 'ip routing' is a Cisco IOS command.",
                     clear: false,
                     status: 'error',
                     command,
                     device: dev
                 };
             }
-            rawMask = getMaskFromPrefixLength(prefix);
-        } else {
-            if (tokens.length < 4) {
+            if (isSwitch) {
+                if (session.mode !== 'config') {
+                    return {
+                        success: false,
+                        output: '% "ip routing" must be executed in global configuration mode.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                setSwitchIpRouting(dev, true);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // ip default-gateway <ip>
+        if (tokens[1] === 'default-gateway' || tokens[1] === 'default-gw') {
+            if (!isSwitch) {
                 return {
                     success: false,
-                    output: '% Incomplete command: ip address <IP> <Subnet-Mask>',
+                    output: "% 'ip default-gateway' is a Layer-2 switch command. On routers or L3 switches with ip routing enabled, configure a default route 'ip route 0.0.0.0 0.0.0.0 <next-hop>'.",
                     clear: false,
                     status: 'error',
                     command,
                     device: dev
                 };
             }
-            rawIp = tokens[2].trim();
-            rawMask = tokens[3].trim();
-        }
-
-        if (!isValidIPv4(rawIp)) {
-            return {
-                success: false,
-                output: `% Invalid IPv4 address: "${rawIp}"`,
-                clear: false,
-                status: 'error',
-                command,
-                device: dev
-            };
-        }
-        const normMask = normalizeSubnetMask(rawMask);
-        if (!normMask || !isValidSubnetMask(normMask)) {
-            return {
-                success: false,
-                output: `% Invalid subnet mask: "${rawMask}"`,
-                clear: false,
-                status: 'error',
-                command,
-                device: dev
-            };
-        }
-
-        for (const [otherIfName, otherIf] of Object.entries(dev.interfaces || {})) {
-            if (otherIfName !== session.selectedInterface && otherIf && otherIf.ip === rawIp) {
+            if (session.mode !== 'config') {
                 return {
                     success: false,
-                    output: `% IP address ${rawIp} is already configured on ${otherIfName}.`,
+                    output: '% "ip default-gateway" must be executed in global configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const gwIp = tokens[2] ? tokens[2].trim() : '';
+            if (!gwIp) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: ip default-gateway <ip-address>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            try {
+                pushHistory();
+                setSwitchDefaultGateway(dev, gwIp);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            } catch (err) {
+                return {
+                    success: false,
+                    output: `% ${err.message}`,
                     clear: false,
                     status: 'error',
                     command,
@@ -11178,40 +12320,209 @@ function executeCliCommand(deviceId, rawInput) {
             }
         }
 
-        pushHistory();
-        const oldIp = iface.ip;
-        if (oldIp && oldIp !== rawIp) {
-            removeArpEntriesForIp(oldIp);
+        // ip address <ip> <mask>
+        if (tokens[1] === 'address' || tokens[1] === 'addr') {
+            if (isSwitch) {
+                if (session.mode !== 'config-if' || !session.selectedInterface || !isSviName(session.selectedInterface)) {
+                    return {
+                        success: false,
+                        output: "% 'ip address' is not supported on Layer 2 switchports (Layer-2 switches operate at Layer 2; configure SVIs via 'interface vlan <id>').",
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                const vlanId = getSviVlanId(session.selectedInterface);
+                let rawIp = '';
+                let rawMask = '';
+                if (tokens[2] && tokens[2].includes('/')) {
+                    const parts = tokens[2].split('/');
+                    rawIp = parts[0].trim();
+                    const prefix = parseInt(parts[1], 10);
+                    if (isNaN(prefix) || prefix < 0 || prefix > 32) {
+                        return {
+                            success: false,
+                            output: '% Invalid CIDR prefix length.',
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    rawMask = getMaskFromPrefixLength(prefix);
+                } else {
+                    if (tokens.length < 4) {
+                        return {
+                            success: false,
+                            output: '% Incomplete command: ip address <IP> <Subnet-Mask>',
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    rawIp = tokens[2].trim();
+                    rawMask = tokens[3].trim();
+                }
+
+                try {
+                    pushHistory();
+                    setSwitchSviIp(dev, vlanId, rawIp, rawMask);
+                    render();
+                    return {
+                        success: true,
+                        output: '',
+                        clear: false,
+                        status: 'success',
+                        command,
+                        device: dev
+                    };
+                } catch (err) {
+                    return {
+                        success: false,
+                        output: `% ${err.message}`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+            }
+
+            if (!isRouter) {
+                return {
+                    success: false,
+                    output: "% 'ip address' is a Cisco IOS router command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if ((session.mode !== 'config-if' && session.mode !== 'config-subif') || !session.selectedInterface || !dev.interfaces?.[session.selectedInterface]) {
+                return {
+                    success: false,
+                    output: '% "ip address" must be executed inside interface configuration mode (e.g. "interface Gig0/0").',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const iface = dev.interfaces[session.selectedInterface];
+            if (iface.isSubinterface && (!iface.encapsulation || !iface.vlan)) {
+                return {
+                    success: false,
+                    output: '% Configuring IP routing on a LAN subinterface is only allowed if that subinterface is already configured as part of an IEEE 802.10, IEEE 802.1Q, or ISL vLAN.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            let rawIp = '';
+            let rawMask = '';
+            if (tokens[2] && tokens[2].includes('/')) {
+                const parts = tokens[2].split('/');
+                rawIp = parts[0].trim();
+                const prefix = parseInt(parts[1], 10);
+                if (isNaN(prefix) || prefix < 0 || prefix > 32) {
+                    return {
+                        success: false,
+                        output: '% Invalid CIDR prefix length.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                rawMask = getMaskFromPrefixLength(prefix);
+            } else {
+                if (tokens.length < 4) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: ip address <IP> <Subnet-Mask>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                rawIp = tokens[2].trim();
+                rawMask = tokens[3].trim();
+            }
+
+            if (!isValidIPv4(rawIp)) {
+                return {
+                    success: false,
+                    output: `% Invalid IPv4 address: "${rawIp}"`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const normMask = normalizeSubnetMask(rawMask);
+            if (!normMask || !isValidSubnetMask(normMask)) {
+                return {
+                    success: false,
+                    output: `% Invalid subnet mask: "${rawMask}"`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+
+            for (const [otherIfName, otherIf] of Object.entries(dev.interfaces || {})) {
+                if (otherIfName !== session.selectedInterface && otherIf && otherIf.ip === rawIp) {
+                    return {
+                        success: false,
+                        output: `% IP address ${rawIp} is already configured on ${otherIfName}.`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+            }
+
+            pushHistory();
+            const oldIp = iface.ip;
+            if (oldIp && oldIp !== rawIp) {
+                removeArpEntriesForIp(oldIp);
+            }
+            iface.ip = rawIp;
+            iface.subnetMask = normMask;
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
         }
-        iface.ip = rawIp;
-        iface.subnetMask = normMask;
-        render();
-        return {
-            success: true,
-            output: '',
-            clear: false,
-            status: 'success',
-            command,
-            device: dev
-        };
     }
 
     // 14. IP ROUTE <network> <mask/prefix> <nextHop/interface> [ad] [metric]
     if (mainCmd === 'ip' && (tokens[1] === 'route' || tokens[1] === 'routes')) {
-        if (isSwitch) {
+        if (isSwitch && !dev.ipRouting) {
             return {
                 success: false,
-                output: "% 'ip route' is a router configuration command. Switches operate at Layer 2.",
+                output: "% 'ip route' is a router configuration command. Switches operate at Layer 2 unless 'ip routing' is enabled.",
                 clear: false,
                 status: 'error',
                 command,
                 device: dev
             };
         }
-        if (!isRouter) {
+        if (!isRouter && !isSwitch) {
             return {
                 success: false,
-                output: "% 'ip route' is a Cisco IOS router command.",
+                output: "% 'ip route' is a Cisco IOS command.",
                 clear: false,
                 status: 'error',
                 command,
@@ -11221,7 +12532,7 @@ function executeCliCommand(deviceId, rawInput) {
         if (tokens.length === 2) {
             return {
                 success: true,
-                output: formatCliRouterRoutingTable(dev),
+                output: isRouter ? formatCliRouterRoutingTable(dev) : formatCliSwitchRoutingTable(dev),
                 clear: false,
                 status: 'success',
                 command,
@@ -11332,20 +12643,37 @@ function executeCliCommand(deviceId, rawInput) {
 
         let egressIface = null;
         let nextHopIp = null;
-        const ifMatch = Object.keys(dev.interfaces || {}).find(k => k.toLowerCase() === nextHopArg.toLowerCase() || (nextHopArg.toLowerCase() === 'g0/0' && k === 'Gig0/0') || (nextHopArg.toLowerCase() === 'g0/1' && k === 'Gig0/1'));
-        if (ifMatch) {
-            egressIface = ifMatch;
-        } else if (isValidIPv4(nextHopArg)) {
-            nextHopIp = nextHopArg;
-        } else {
-            return {
-                success: false,
-                output: `% Invalid next-hop address or interface: "${nextHopArg}"`,
-                clear: false,
-                status: 'error',
-                command,
-                device: dev
-            };
+        if (isRouter) {
+            const ifMatch = Object.keys(dev.interfaces || {}).find(k => k.toLowerCase() === nextHopArg.toLowerCase() || (nextHopArg.toLowerCase() === 'g0/0' && k === 'Gig0/0') || (nextHopArg.toLowerCase() === 'g0/1' && k === 'Gig0/1'));
+            if (ifMatch) {
+                egressIface = ifMatch;
+            } else if (isValidIPv4(nextHopArg)) {
+                nextHopIp = nextHopArg;
+            } else {
+                return {
+                    success: false,
+                    output: `% Invalid next-hop address or interface: "${nextHopArg}"`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+        } else if (isSwitch) {
+            if (isSviName(nextHopArg)) {
+                egressIface = normalizeSviName(nextHopArg);
+            } else if (isValidIPv4(nextHopArg)) {
+                nextHopIp = nextHopArg;
+            } else {
+                return {
+                    success: false,
+                    output: `% Invalid next-hop address or SVI interface: "${nextHopArg}"`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
         }
 
         pushHistory();
@@ -11395,7 +12723,7 @@ function executeCliCommand(deviceId, rawInput) {
         if (isSwitch) {
             return {
                 success: false,
-                output: `% 'ipconfig' is for end hosts. On switches, use 'show vlan brief' or 'show interfaces'.`,
+                output: `% 'ipconfig' is for end hosts. On switches, use 'show vlan brief', 'show ip interface brief', or 'show interfaces'.`,
                 clear: false,
                 status: 'error',
                 command,
@@ -11521,9 +12849,19 @@ function executeCliCommand(deviceId, rawInput) {
             };
         }
         if (isSwitch) {
+            if (dev.ipRouting) {
+                return {
+                    success: true,
+                    output: formatCliSwitchRoutingTable(dev),
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
             return {
                 success: false,
-                output: `% 'route' is for routed devices. Switches operate at Layer 2.`,
+                output: `% 'route' is for routed devices. Switches operate at Layer 2 unless 'ip routing' is enabled.`,
                 clear: false,
                 status: 'error',
                 command,
@@ -11593,10 +12931,10 @@ function executeCliCommand(deviceId, rawInput) {
         if ((sub1 === 'ip' && (sub2 === 'route' || sub2 === 'routes')) || sub1 === 'route' || sub1 === 'routes') {
             if (isSwitch) {
                 return {
-                    success: false,
-                    output: `% 'show ip route' is a router command. Switches operate at Layer 2.`,
+                    success: true,
+                    output: formatCliSwitchRoutingTable(dev),
                     clear: false,
-                    status: 'error',
+                    status: 'success',
                     command,
                     device: dev
                 };
@@ -11680,10 +13018,10 @@ function executeCliCommand(deviceId, rawInput) {
         if (sub1 === 'ip' && (sub2 === 'interface' || sub2 === 'interfaces' || sub2 === 'int') && (tokens[3] === 'brief' || tokens[3] === 'br')) {
             if (isSwitch) {
                 return {
-                    success: false,
-                    output: `% 'show ip interface brief' is a router command. On switches, use 'show interfaces' or 'show vlan brief'.`,
+                    success: true,
+                    output: formatCliSwitchIpInterfaceBrief(dev),
                     clear: false,
-                    status: 'error',
+                    status: 'success',
                     command,
                     device: dev
                 };
@@ -11708,9 +13046,21 @@ function executeCliCommand(deviceId, rawInput) {
             };
         }
 
-        // show interfaces / show interface / show ip interface / show int
+        // show interfaces [vlan <id> | Vlan<id>] / show interface / show ip interface / show int
         if (sub1 === 'interfaces' || sub1 === 'interface' || sub1 === 'int' || (sub1 === 'ip' && (sub2 === 'interface' || sub2 === 'interfaces' || sub2 === 'int'))) {
             if (isSwitch) {
+                let targetIf = tokens[2];
+                if (targetIf && (isSviName(targetIf) || (targetIf.toLowerCase() === 'vlan' && tokens[3]))) {
+                    const vlanId = isSviName(targetIf) ? getSviVlanId(targetIf) : parseInt(tokens[3], 10);
+                    return {
+                        success: true,
+                        output: formatCliSwitchSviDetail(dev, vlanId),
+                        clear: false,
+                        status: 'success',
+                        command,
+                        device: dev
+                    };
+                }
                 return {
                     success: true,
                     output: formatCliSwitchInterfaces(dev),
@@ -11798,7 +13148,7 @@ function executeCliCommand(deviceId, rawInput) {
         if (isRouter) {
             return {
                 success: false,
-                output: `% Unrecognized show command: "${command}". Available: "show ip route", "show interfaces", "show arp", "show access-lists".`,
+                output: `% Unrecognized show command: "${command}". Available: "show ip route", "show interfaces", "show arp", "show access-lists", "show ip interface brief".`,
                 clear: false,
                 status: 'error',
                 command,
@@ -11807,7 +13157,7 @@ function executeCliCommand(deviceId, rawInput) {
         } else if (isSwitch) {
             return {
                 success: false,
-                output: `% Unrecognized show command: "${command}". Available: "show vlan brief", "show mac-address-table", "show interfaces".`,
+                output: `% Unrecognized show command: "${command}". Available: "show vlan brief", "show mac-address-table", "show interfaces", "show interfaces trunk", "show ip interface brief", "show ip route".`,
                 clear: false,
                 status: 'error',
                 command,
@@ -11827,16 +13177,6 @@ function executeCliCommand(deviceId, rawInput) {
 
     // 20. Real Utilities (ping, traceroute, tracert)
     if (mainCmd === 'ping') {
-        if (isSwitch) {
-            return {
-                success: false,
-                output: `% 'ping' from Layer-2 switches is not supported in this phase.`,
-                clear: false,
-                status: 'error',
-                command,
-                device: dev
-            };
-        }
         const targetArg = tokens.slice(1).join(' ').trim();
         const pingRes = executeCliPing(dev, targetArg);
         return {
@@ -11847,16 +13187,6 @@ function executeCliCommand(deviceId, rawInput) {
     }
 
     if (mainCmd === 'traceroute' || mainCmd === 'tracert') {
-        if (isSwitch) {
-            return {
-                success: false,
-                output: `% 'traceroute' from Layer-2 switches is not supported in this phase.`,
-                clear: false,
-                status: 'error',
-                command,
-                device: dev
-            };
-        }
         const targetArg = tokens.slice(1).join(' ').trim();
         const traceRes = executeCliTraceroute(dev, targetArg);
         return {
