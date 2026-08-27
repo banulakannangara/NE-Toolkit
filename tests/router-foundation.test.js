@@ -13910,6 +13910,634 @@ runTest('477. End-to-End: Full CLI configuration of dual switches with access po
     assert.strictEqual(pingCross.success, false);
 });
 
+// ==========================================
+// V5.12 Phase 3: Router-on-a-Stick (ROAS) Tests (478+)
+// ==========================================
+
+function setupRoasLab() {
+    resetLab();
+    addDevice('router', 250, 80);  // Router0
+    addDevice('switch', 250, 200); // Switch0
+    addDevice('pc', 100, 320);     // PC0
+    addDevice('pc', 400, 320);     // PC1
+
+    const r0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+    const pc0 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    pc0.ip = '192.168.10.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.10.1';
+    pc0.mac = '00:00:00:00:00:10';
+
+    pc1.ip = '192.168.20.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.20.1';
+    pc1.mac = '00:00:00:00:00:20';
+
+    addConnection(r0.id, sw0.id);
+    addConnection(sw0.id, pc0.id);
+    addConnection(sw0.id, pc1.id);
+
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'vlan 10');
+    executeCliCommand('Switch0', 'name Sales');
+    executeCliCommand('Switch0', 'vlan 20');
+    executeCliCommand('Switch0', 'name Engineering');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    executeCliCommand('Switch0', 'switchport mode trunk');
+    executeCliCommand('Switch0', 'switchport trunk allowed vlan 10,20');
+    executeCliCommand('Switch0', 'interface Fa0/2');
+    executeCliCommand('Switch0', 'switchport mode access');
+    executeCliCommand('Switch0', 'switchport access vlan 10');
+    executeCliCommand('Switch0', 'interface Fa0/3');
+    executeCliCommand('Switch0', 'switchport mode access');
+    executeCliCommand('Switch0', 'switchport access vlan 20');
+    executeCliCommand('Switch0', 'end');
+
+    executeCliCommand('Router0', 'configure terminal');
+    executeCliCommand('Router0', 'interface Gig0/0');
+    executeCliCommand('Router0', 'no shutdown');
+    executeCliCommand('Router0', 'interface Gig0/0.10');
+    executeCliCommand('Router0', 'encapsulation dot1q 10');
+    executeCliCommand('Router0', 'ip address 192.168.10.1 255.255.255.0');
+    executeCliCommand('Router0', 'interface Gig0/0.20');
+    executeCliCommand('Router0', 'encapsulation dot1q 20');
+    executeCliCommand('Router0', 'ip address 192.168.20.1 255.255.255.0');
+    executeCliCommand('Router0', 'end');
+
+    return { r0, sw0, pc0, pc1 };
+}
+
+runTest('478. normalizeRouterInterfaceName supports physical interfaces and subinterfaces', () => {
+    assert.strictEqual(normalizeRouterInterfaceName('Gig0/0'), 'Gig0/0');
+    assert.strictEqual(normalizeRouterInterfaceName('g0/0'), 'Gig0/0');
+    assert.strictEqual(normalizeRouterInterfaceName('GigabitEthernet0/0'), 'Gig0/0');
+    assert.strictEqual(normalizeRouterInterfaceName('Gig0/0.10'), 'Gig0/0.10');
+    assert.strictEqual(normalizeRouterInterfaceName('g0/0.10'), 'Gig0/0.10');
+    assert.strictEqual(normalizeRouterInterfaceName('GigabitEthernet0/0.20'), 'Gig0/0.20');
+    assert.strictEqual(normalizeRouterInterfaceName('Gig0/1.100'), 'Gig0/1.100');
+    assert.strictEqual(normalizeRouterInterfaceName('invalid'), null);
+    assert.strictEqual(normalizeRouterInterfaceName('Gig0/0.abc'), null);
+    assert.strictEqual(normalizeRouterInterfaceName('Gig0/0.-5'), null);
+});
+
+runTest('479. isSubinterfaceName, getParentInterfaceName, and getSubinterfaceId parse subinterfaces correctly', () => {
+    assert.strictEqual(isSubinterfaceName('Gig0/0.10'), true);
+    assert.strictEqual(isSubinterfaceName('Gig0/0'), false);
+    assert.strictEqual(getParentInterfaceName('Gig0/0.10'), 'Gig0/0');
+    assert.strictEqual(getParentInterfaceName('Gig0/0'), 'Gig0/0');
+    assert.strictEqual(getSubinterfaceId('Gig0/0.10'), 10);
+    assert.strictEqual(getSubinterfaceId('Gig0/0.200'), 200);
+    assert.strictEqual(getSubinterfaceId('Gig0/0'), null);
+});
+
+runTest('480. ensureRouterSubinterface creates subinterface inheriting parent MAC and initial attributes', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    const router = networkState.devices[0];
+    const parentIface = router.interfaces['Gig0/0'];
+    assert.ok(parentIface);
+
+    const subif = ensureRouterSubinterface(router, 'Gig0/0.10');
+    assert.ok(subif);
+    assert.strictEqual(subif.isSubinterface, true);
+    assert.strictEqual(subif.parentInterface, 'Gig0/0');
+    assert.strictEqual(subif.subId, 10);
+    assert.strictEqual(subif.mac, parentIface.mac);
+    assert.strictEqual(subif.encapsulation, null);
+    assert.strictEqual(subif.vlan, null);
+    assert.strictEqual(subif.status, 'up');
+    assert.strictEqual(router.interfaces['Gig0/0.10'], subif);
+});
+
+runTest('481. ensureRouterSubinterface preserves existing subinterface configuration on re-entry', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    const router = networkState.devices[0];
+    const subif = ensureRouterSubinterface(router, 'Gig0/0.10');
+    subif.encapsulation = 'dot1q';
+    subif.vlan = 10;
+    subif.ip = '192.168.10.1';
+    subif.subnetMask = '255.255.255.0';
+
+    const subifReentry = ensureRouterSubinterface(router, 'Gig0/0.10');
+    assert.strictEqual(subifReentry, subif);
+    assert.strictEqual(subifReentry.encapsulation, 'dot1q');
+    assert.strictEqual(subifReentry.vlan, 10);
+    assert.strictEqual(subifReentry.ip, '192.168.10.1');
+});
+
+runTest('482. ensureRouterSubinterface returns null if parent physical interface does not exist', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    const router = networkState.devices[0];
+    assert.strictEqual(ensureRouterSubinterface(router, 'Gig0/9.10'), null);
+});
+
+runTest('483. setRouterSubinterfaceEncapsulation configures dot1q and VLAN ID on subinterface', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    const router = networkState.devices[0];
+    ensureRouterSubinterface(router, 'Gig0/0.10');
+
+    const result = setRouterSubinterfaceEncapsulation(router, 'Gig0/0.10', 10);
+    assert.strictEqual(result.encapsulation, 'dot1q');
+    assert.strictEqual(result.vlan, 10);
+    assert.strictEqual(router.interfaces['Gig0/0.10'].encapsulation, 'dot1q');
+    assert.strictEqual(router.interfaces['Gig0/0.10'].vlan, 10);
+});
+
+runTest('484. setRouterSubinterfaceEncapsulation rejects invalid VLAN IDs (out of 1-4094 range)', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    const router = networkState.devices[0];
+    ensureRouterSubinterface(router, 'Gig0/0.10');
+
+    assert.throws(() => {
+        setRouterSubinterfaceEncapsulation(router, 'Gig0/0.10', 0);
+    }, /Invalid VLAN ID/);
+
+    assert.throws(() => {
+        setRouterSubinterfaceEncapsulation(router, 'Gig0/0.10', 4095);
+    }, /Invalid VLAN ID/);
+
+    assert.throws(() => {
+        setRouterSubinterfaceEncapsulation(router, 'Gig0/0.10', 'invalid');
+    }, /Invalid VLAN ID/);
+});
+
+runTest('485. setRouterSubinterfaceEncapsulation rejects duplicate VLAN ID on sibling subinterfaces of same parent', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    const router = networkState.devices[0];
+    ensureRouterSubinterface(router, 'Gig0/0.10');
+    ensureRouterSubinterface(router, 'Gig0/0.20');
+
+    setRouterSubinterfaceEncapsulation(router, 'Gig0/0.10', 10);
+
+    assert.throws(() => {
+        setRouterSubinterfaceEncapsulation(router, 'Gig0/0.20', 10);
+    }, (err) => err.message.includes('already configured'));
+});
+
+runTest('486. setRouterSubinterfaceEncapsulation allows re-configuring same VLAN on same subinterface', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    const router = networkState.devices[0];
+    ensureRouterSubinterface(router, 'Gig0/0.10');
+    setRouterSubinterfaceEncapsulation(router, 'Gig0/0.10', 10);
+
+    assert.doesNotThrow(() => {
+        setRouterSubinterfaceEncapsulation(router, 'Gig0/0.10', 10);
+    });
+});
+
+runTest('487. getEffectiveInterfaceStatus reflects physical parent status and subinterface status', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    const router = networkState.devices[0];
+    const subif = ensureRouterSubinterface(router, 'Gig0/0.10');
+
+    // Both parent and subif up
+    router.interfaces['Gig0/0'].status = 'up';
+    subif.status = 'up';
+    assert.strictEqual(getEffectiveInterfaceStatus(router, 'Gig0/0.10'), 'up');
+
+    // Subif administratively down
+    subif.status = 'down';
+    assert.strictEqual(getEffectiveInterfaceStatus(router, 'Gig0/0.10'), 'down');
+
+    // Subif up but parent physical interface administratively down
+    subif.status = 'up';
+    router.interfaces['Gig0/0'].status = 'down';
+    assert.strictEqual(getEffectiveInterfaceStatus(router, 'Gig0/0.10'), 'down');
+});
+
+runTest('488. getRouterRoutingTable generates connected route for subinterface with dot1q encapsulation and valid IP', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    const router = networkState.devices[0];
+    const subif = ensureRouterSubinterface(router, 'Gig0/0.10');
+    subif.encapsulation = 'dot1q';
+    subif.vlan = 10;
+    subif.ip = '192.168.10.1';
+    subif.subnetMask = '255.255.255.0';
+
+    const routes = getRouterRoutingTable(router.id);
+    const subifRoute = routes.find(r => r.interface === 'Gig0/0.10');
+    assert.ok(subifRoute, 'Connected route for Gig0/0.10 must exist');
+    assert.strictEqual(subifRoute.network, '192.168.10.0');
+    assert.strictEqual(subifRoute.prefixLength, 24);
+    assert.strictEqual(subifRoute.type, 'connected');
+    assert.strictEqual(subifRoute.status, 'active');
+});
+
+runTest('489. getRouterRoutingTable does NOT generate connected route for subinterface without dot1q encapsulation', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    const router = networkState.devices[0];
+    const subif = ensureRouterSubinterface(router, 'Gig0/0.10');
+    subif.encapsulation = null;
+    subif.vlan = null;
+    subif.ip = '192.168.10.1';
+    subif.subnetMask = '255.255.255.0';
+
+    const routes = getRouterRoutingTable(router.id);
+    const subifRoute = routes.find(r => r.interface === 'Gig0/0.10');
+    assert.strictEqual(subifRoute, undefined, 'Subinterface without encapsulation must not have active route');
+});
+
+runTest('490. getRouterRoutingTable marks subinterface connected route down when parent interface is shut down', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    const router = networkState.devices[0];
+    const subif = ensureRouterSubinterface(router, 'Gig0/0.10');
+    subif.encapsulation = 'dot1q';
+    subif.vlan = 10;
+    subif.ip = '192.168.10.1';
+    subif.subnetMask = '255.255.255.0';
+
+    router.interfaces['Gig0/0'].status = 'down';
+
+    const routes = getRouterRoutingTable(router.id);
+    const subifRoute = routes.find(r => r.interface === 'Gig0/0.10');
+    assert.strictEqual(subifRoute, undefined, 'Connected route for subinterface whose parent is down must not be in active routing table');
+});
+
+runTest('491. Router CLI interface <name>.<subId> enters config-subif mode with prompt Router(config-subif)#', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    executeCliCommand('Router0', 'configure terminal');
+
+    const res = executeCliCommand('Router0', 'interface Gig0/0.10');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getDeviceCliPrompt('Router0'), 'Router0(config-subif)#');
+});
+
+runTest('492. Router CLI exit in config-subif returns to config mode, end returns to exec mode', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    executeCliCommand('Router0', 'configure terminal');
+    executeCliCommand('Router0', 'interface Gig0/0.10');
+    assert.strictEqual(getDeviceCliPrompt('Router0'), 'Router0(config-subif)#');
+
+    executeCliCommand('Router0', 'exit');
+    assert.strictEqual(getDeviceCliPrompt('Router0'), 'Router0(config)#');
+
+    executeCliCommand('Router0', 'interface Gig0/0.20');
+    assert.strictEqual(getDeviceCliPrompt('Router0'), 'Router0(config-subif)#');
+
+    executeCliCommand('Router0', 'end');
+    assert.strictEqual(getDeviceCliPrompt('Router0'), 'Router0#');
+});
+
+runTest('493. Router CLI encapsulation dot1q <vlan> configures encapsulation on subinterface', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    executeCliCommand('Router0', 'configure terminal');
+    executeCliCommand('Router0', 'interface Gig0/0.10');
+
+    const res = executeCliCommand('Router0', 'encapsulation dot1q 10');
+    assert.strictEqual(res.success, true);
+
+    const router = networkState.devices[0];
+    assert.strictEqual(router.interfaces['Gig0/0.10'].encapsulation, 'dot1q');
+    assert.strictEqual(router.interfaces['Gig0/0.10'].vlan, 10);
+});
+
+runTest('494. Router CLI encapsulation command rejected outside subinterface config mode', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    executeCliCommand('Router0', 'configure terminal');
+    executeCliCommand('Router0', 'interface Gig0/0');
+
+    const res = executeCliCommand('Router0', 'encapsulation dot1q 10');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Can only configure dot1q encapsulation on subinterfaces'));
+});
+
+runTest('495. Router CLI ip address on subinterface rejected before encapsulation is configured', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    executeCliCommand('Router0', 'configure terminal');
+    executeCliCommand('Router0', 'interface Gig0/0.10');
+
+    const res = executeCliCommand('Router0', 'ip address 192.168.10.1 255.255.255.0');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Configuring IP routing on a LAN subinterface is only allowed if that subinterface is already configured as part of an IEEE 802.10, IEEE 802.1Q, or ISL vLAN.'));
+});
+
+runTest('496. Router CLI ip address on subinterface succeeds after encapsulation dot1q is configured', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    executeCliCommand('Router0', 'configure terminal');
+    executeCliCommand('Router0', 'interface Gig0/0.10');
+    executeCliCommand('Router0', 'encapsulation dot1q 10');
+
+    const res = executeCliCommand('Router0', 'ip address 192.168.10.1 255.255.255.0');
+    assert.strictEqual(res.success, true);
+
+    const router = networkState.devices[0];
+    assert.strictEqual(router.interfaces['Gig0/0.10'].ip, '192.168.10.1');
+    assert.strictEqual(router.interfaces['Gig0/0.10'].subnetMask, '255.255.255.0');
+});
+
+runTest('497. Router CLI subinterface shutdown and no shutdown commands toggle subinterface state', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    executeCliCommand('Router0', 'configure terminal');
+    executeCliCommand('Router0', 'interface Gig0/0.10');
+
+    const shutRes = executeCliCommand('Router0', 'shutdown');
+    assert.strictEqual(shutRes.success, true);
+    assert.strictEqual(networkState.devices[0].interfaces['Gig0/0.10'].status, 'down');
+
+    const noShutRes = executeCliCommand('Router0', 'no shutdown');
+    assert.strictEqual(noShutRes.success, true);
+    assert.strictEqual(networkState.devices[0].interfaces['Gig0/0.10'].status, 'up');
+});
+
+runTest('498. Router CLI no ip address removes IP from subinterface', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    executeCliCommand('Router0', 'configure terminal');
+    executeCliCommand('Router0', 'interface Gig0/0.10');
+    executeCliCommand('Router0', 'encapsulation dot1q 10');
+    executeCliCommand('Router0', 'ip address 192.168.10.1 255.255.255.0');
+
+    const res = executeCliCommand('Router0', 'no ip address');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(networkState.devices[0].interfaces['Gig0/0.10'].ip, '');
+});
+
+runTest('499. Router CLI show ip interface brief formats table with physical interfaces and subinterfaces', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    executeCliCommand('Router0', 'configure terminal');
+    executeCliCommand('Router0', 'interface Gig0/0.10');
+    executeCliCommand('Router0', 'encapsulation dot1q 10');
+    executeCliCommand('Router0', 'ip address 192.168.10.1 255.255.255.0');
+    executeCliCommand('Router0', 'end');
+
+    const res = executeCliCommand('Router0', 'show ip interface brief');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Interface                  IP-Address      OK? Method Status                Protocol'));
+    assert.ok(res.output.includes('Gig0/0.10                  192.168.10.1    YES manual up                    up'));
+});
+
+runTest('500. Router CLI show interfaces renders subinterface encapsulation and inherited hardware address', () => {
+    resetLab();
+    addDevice('router', 200, 200);
+    executeCliCommand('Router0', 'configure terminal');
+    executeCliCommand('Router0', 'interface Gig0/0.10');
+    executeCliCommand('Router0', 'encapsulation dot1q 10');
+    executeCliCommand('Router0', 'ip address 192.168.10.1 255.255.255.0');
+    executeCliCommand('Router0', 'end');
+
+    const res = executeCliCommand('Router0', 'show interfaces');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Gig0/0.10 is up, line protocol is up'));
+    assert.ok(res.output.includes('Hardware is GigabitEthernet (subinterface)'));
+    assert.ok(res.output.includes('Encapsulation 802.1Q (dot1q), VLAN 10'));
+    assert.ok(res.output.includes('Internet address is 192.168.10.1/24'));
+});
+
+runTest('501. findL3RoutedTopologyPath resolves path PC0 -> Switch0 -> Router0 -> Switch0 -> PC1 across subnets', () => {
+    setupRoasLab();
+    const pc0 = getDeviceById('PC0');
+    const pc1 = getDeviceById('PC1');
+
+    const path = findL3RoutedTopologyPath(pc0, pc1);
+    assert.deepStrictEqual(path, ['PC0', 'Switch0', 'Router0', 'Switch0', 'PC1']);
+});
+
+runTest('502. ROAS Ingress: Router receives tagged frame and de-encapsulates tag on matching dot1q subinterface', () => {
+    const { r0, sw0, pc0, pc1 } = setupRoasLab();
+    const subif10 = r0.interfaces['Gig0/0.10'];
+    assert.ok(subif10);
+
+    const frame = {
+        events: [],
+        sourceMac: pc0.mac,
+        destinationMac: subif10.mac,
+        sourceIp: pc0.ip,
+        destinationIp: pc1.ip,
+        packet: {
+            sourceIp: pc0.ip,
+            destinationIp: pc1.ip,
+            protocol: 'ICMP',
+            ttl: 64
+        },
+        payload: 'ICMP Echo Request'
+    };
+
+    const topologyPath = ['PC0', 'Switch0', 'Router0', 'Switch0', 'PC1'];
+    const result = simulatePathTransmission(frame, pc0, pc1, topologyPath);
+    assert.strictEqual(result.success, true);
+    assert.ok(frame.events.some(e => e.includes('Router Router0 de-encapsulated 802.1Q tag')));
+});
+
+runTest('503. ROAS Egress: Router encapsulates outgoing routed frame with 802.1Q tag of egress subinterface', () => {
+    const { r0, sw0, pc0, pc1 } = setupRoasLab();
+    const subif10 = r0.interfaces['Gig0/0.10'];
+
+    const frame = {
+        events: [],
+        sourceMac: pc0.mac,
+        destinationMac: subif10.mac,
+        sourceIp: pc0.ip,
+        destinationIp: pc1.ip,
+        packet: {
+            sourceIp: pc0.ip,
+            destinationIp: pc1.ip,
+            protocol: 'ICMP',
+            ttl: 64
+        },
+        payload: 'ICMP Echo Request'
+    };
+
+    const topologyPath = ['PC0', 'Switch0', 'Router0', 'Switch0', 'PC1'];
+    const result = simulatePathTransmission(frame, pc0, pc1, topologyPath);
+    assert.strictEqual(result.success, true);
+    assert.ok(frame.events.some(e => e.includes('Router Router0 encapsulated 802.1Q tag') || e.includes('Router Router0 encapsulated frame with 802.1Q tag')));
+});
+
+runTest('504. ROAS Ingress Drop: Tagged frame arriving on router with unmatched VLAN ID is dropped', () => {
+    const { r0, sw0, pc0, pc1 } = setupRoasLab();
+    const subif10 = r0.interfaces['Gig0/0.10'];
+
+    const frame = {
+        events: [],
+        sourceMac: pc0.mac,
+        destinationMac: subif10.mac,
+        sourceIp: pc0.ip,
+        destinationIp: pc1.ip,
+        packet: {
+            sourceIp: pc0.ip,
+            destinationIp: pc1.ip,
+            protocol: 'ICMP',
+            ttl: 64
+        },
+        payload: 'ICMP Echo Request',
+        vlanTag: { vlanId: 99, isTagged: true, tpid: '0x8100' }
+    };
+
+    const topologyPath = ['PC0', 'Switch0', 'Router0', 'Switch0', 'PC1'];
+    const result = simulatePathTransmission(frame, pc0, pc1, topologyPath);
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.action, 'DROP');
+});
+
+runTest('505. ROAS Ingress Drop: Frame arriving on router when physical parent interface is down is dropped', () => {
+    const { r0, sw0, pc0, pc1 } = setupRoasLab();
+    r0.interfaces['Gig0/0'].status = 'down';
+
+    const frame = {
+        events: [],
+        sourceMac: pc0.mac,
+        destinationMac: r0.interfaces['Gig0/0.10'].mac,
+        sourceIp: pc0.ip,
+        destinationIp: pc1.ip,
+        packet: {
+            sourceIp: pc0.ip,
+            destinationIp: pc1.ip,
+            protocol: 'ICMP',
+            ttl: 64
+        },
+        payload: 'ICMP Echo Request',
+        vlanTag: { vlanId: 10, isTagged: true, tpid: '0x8100' }
+    };
+
+    const topologyPath = ['PC0', 'Switch0', 'Router0', 'Switch0', 'PC1'];
+    const result = simulatePathTransmission(frame, pc0, pc1, topologyPath);
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.action, 'DROP');
+});
+
+runTest('506. ROAS Ingress Drop: Frame arriving on router when specific subinterface is down is dropped', () => {
+    const { r0, sw0, pc0, pc1 } = setupRoasLab();
+    r0.interfaces['Gig0/0.10'].status = 'down';
+
+    const frame = {
+        events: [],
+        sourceMac: pc0.mac,
+        destinationMac: r0.interfaces['Gig0/0.10'].mac,
+        sourceIp: pc0.ip,
+        destinationIp: pc1.ip,
+        packet: {
+            sourceIp: pc0.ip,
+            destinationIp: pc1.ip,
+            protocol: 'ICMP',
+            ttl: 64
+        },
+        payload: 'ICMP Echo Request',
+        vlanTag: { vlanId: 10, isTagged: true, tpid: '0x8100' }
+    };
+
+    const topologyPath = ['PC0', 'Switch0', 'Router0', 'Switch0', 'PC1'];
+    const result = simulatePathTransmission(frame, pc0, pc1, topologyPath);
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.action, 'DROP');
+});
+
+runTest('507. ROAS ARP Resolution: Host in VLAN 10 resolves router default gateway on subinterface Gig0/0.10', () => {
+    const { r0, sw0, pc0, pc1 } = setupRoasLab();
+
+    const arpRes = simulateArpResolution(pc0, '192.168.10.1');
+    assert.strictEqual(arpRes.success, true);
+    assert.strictEqual(arpRes.targetMac, r0.interfaces['Gig0/0.10'].mac);
+});
+
+runTest('508. Full Inter-VLAN Communication: PC0 (VLAN 10) pings PC1 (VLAN 20) successfully via ROAS', () => {
+    setupRoasLab();
+
+    const pingRes = executeCliCommand('PC0', 'ping 192.168.20.10');
+    assert.strictEqual(pingRes.success, true);
+    assert.ok(pingRes.output.includes('Reply from 192.168.20.10'));
+});
+
+runTest('509. Full Inter-VLAN Communication: Reverse ping from PC1 (VLAN 20) to PC0 (VLAN 10) succeeds', () => {
+    setupRoasLab();
+
+    const pingRes = executeCliCommand('PC1', 'ping 192.168.10.10');
+    assert.strictEqual(pingRes.success, true);
+    assert.ok(pingRes.output.includes('Reply from 192.168.10.10'));
+});
+
+runTest('510. End-to-End: Full ROAS configuration entirely from scratch via CLI on Router, Switch, and PCs', () => {
+    resetLab();
+
+    // Add devices
+    addDevice('router', 250, 80);  // Router0
+    addDevice('switch', 250, 200); // Switch0
+    addDevice('pc', 100, 320);     // PC0
+    addDevice('pc', 400, 320);     // PC1
+
+    const r0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+    const pc0 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    // Add connections
+    addConnection(r0.id, sw0.id);   // Router0 Gig0/0 <-> Switch0 Fa0/1
+    addConnection(sw0.id, pc0.id);  // Switch0 Fa0/2 <-> PC0
+    addConnection(sw0.id, pc1.id);  // Switch0 Fa0/3 <-> PC1
+
+    // Configure PC0
+    pc0.ip = '192.168.10.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.10.1';
+    pc0.mac = '00:00:00:00:00:10';
+
+    // Configure PC1
+    pc1.ip = '192.168.20.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.20.1';
+    pc1.mac = '00:00:00:00:00:20';
+
+    // 1. Configure Switch0 via CLI
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'vlan 10');
+    executeCliCommand('Switch0', 'name Sales');
+    executeCliCommand('Switch0', 'vlan 20');
+    executeCliCommand('Switch0', 'name Engineering');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    executeCliCommand('Switch0', 'switchport mode trunk');
+    executeCliCommand('Switch0', 'switchport trunk allowed vlan 10,20');
+    executeCliCommand('Switch0', 'interface Fa0/2');
+    executeCliCommand('Switch0', 'switchport mode access');
+    executeCliCommand('Switch0', 'switchport access vlan 10');
+    executeCliCommand('Switch0', 'interface Fa0/3');
+    executeCliCommand('Switch0', 'switchport mode access');
+    executeCliCommand('Switch0', 'switchport access vlan 20');
+    executeCliCommand('Switch0', 'end');
+
+    // 2. Configure Router0 via CLI
+    executeCliCommand('Router0', 'configure terminal');
+    executeCliCommand('Router0', 'interface Gig0/0');
+    executeCliCommand('Router0', 'no shutdown');
+    executeCliCommand('Router0', 'interface Gig0/0.10');
+    executeCliCommand('Router0', 'encapsulation dot1q 10');
+    executeCliCommand('Router0', 'ip address 192.168.10.1 255.255.255.0');
+    executeCliCommand('Router0', 'interface Gig0/0.20');
+    executeCliCommand('Router0', 'encapsulation dot1q 20');
+    executeCliCommand('Router0', 'ip address 192.168.20.1 255.255.255.0');
+    executeCliCommand('Router0', 'end');
+
+    // Verify routing table on Router0
+    const routeRes = executeCliCommand('Router0', 'show ip route');
+    assert.strictEqual(routeRes.success, true);
+    assert.ok(routeRes.output.includes('192.168.10.0/24 is directly connected, Gig0/0.10'));
+    assert.ok(routeRes.output.includes('192.168.20.0/24 is directly connected, Gig0/0.20'));
+
+    // Verify PC0 can ping PC1 across VLANs via Router-on-a-Stick
+    const pingTest = executeCliCommand('PC0', 'ping 192.168.20.10');
+    assert.strictEqual(pingTest.success, true);
+    assert.ok(pingTest.output.includes('Reply from 192.168.20.10'));
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

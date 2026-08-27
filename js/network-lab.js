@@ -4546,6 +4546,39 @@ function findTopologyPath(sourceId, targetId) {
     return path;
 }
 
+function findL3RoutedTopologyPath(sourceDevice, destinationDevice) {
+    if (!sourceDevice || !destinationDevice) return [];
+    const srcDev = typeof sourceDevice === 'object' ? sourceDevice : getDeviceById(sourceDevice);
+    const dstDev = typeof destinationDevice === 'object' ? destinationDevice : getDeviceById(destinationDevice);
+    if (!srcDev || !dstDev) return [];
+    if (!srcDev.gateway || !isValidIPv4(srcDev.gateway)) return [];
+
+    const gatewayIp = srcDev.gateway.trim();
+    let gatewayRouter = null;
+
+    for (const dev of (networkState.devices || [])) {
+        if (dev.type === 'router' && dev.interfaces) {
+            for (const [ifName, iface] of Object.entries(dev.interfaces)) {
+                if (iface.ip === gatewayIp) {
+                    gatewayRouter = dev;
+                    break;
+                }
+            }
+        }
+        if (gatewayRouter) break;
+    }
+
+    if (!gatewayRouter) return [];
+
+    const path1 = findTopologyPath(srcDev.id, gatewayRouter.id);
+    if (!path1 || path1.length < 2) return [];
+
+    const path2 = findTopologyPath(gatewayRouter.id, dstDev.id);
+    if (!path2 || path2.length < 2) return [];
+
+    return [...path1, ...path2.slice(1)];
+}
+
 function getSwitchRuntime(switchId) {
     if (!networkState.switchRuntime[switchId]) {
         networkState.switchRuntime[switchId] = {
@@ -4740,6 +4773,152 @@ function normalizeSwitchPortName(portName) {
         return null;
     }
     return null;
+}
+
+function normalizeRouterInterfaceName(name) {
+    if (!name || typeof name !== 'string') return null;
+    const trimmed = name.trim();
+    const subMatch = trimmed.match(/^(?:gigabitethernet|gig|g)\s*0?\/(\d+)\.(\d+)$/i);
+    if (subMatch) {
+        const slot = parseInt(subMatch[1], 10);
+        const subId = parseInt(subMatch[2], 10);
+        if (slot >= 0 && slot <= 8 && subId >= 1 && subId <= 4094) {
+            return `Gig0/${slot}.${subId}`;
+        }
+        return null;
+    }
+    const faSubMatch = trimmed.match(/^(?:fastethernet|fa|f)\s*0?\/(\d+)\.(\d+)$/i);
+    if (faSubMatch) {
+        const slot = parseInt(faSubMatch[1], 10);
+        const subId = parseInt(faSubMatch[2], 10);
+        if (slot >= 0 && slot <= 48 && subId >= 1 && subId <= 4094) {
+            return `Fa0/${slot}.${subId}`;
+        }
+        return null;
+    }
+    const gigMatch = trimmed.match(/^(?:gigabitethernet|gig|g)\s*0?\/(\d+)$/i);
+    if (gigMatch) {
+        const slot = parseInt(gigMatch[1], 10);
+        if (slot >= 0 && slot <= 8) {
+            return `Gig0/${slot}`;
+        }
+        return null;
+    }
+    const faMatch = trimmed.match(/^(?:fastethernet|fa|f)\s*0?\/(\d+)$/i);
+    if (faMatch) {
+        const slot = parseInt(faMatch[1], 10);
+        if (slot >= 0 && slot <= 48) {
+            return `Fa0/${slot}`;
+        }
+        return null;
+    }
+    return null;
+}
+
+function isSubinterfaceName(name) {
+    return typeof name === 'string' && name.includes('.');
+}
+
+function getParentInterfaceName(subinterfaceName) {
+    if (!subinterfaceName || typeof subinterfaceName !== 'string') return null;
+    const parts = subinterfaceName.split('.');
+    return parts[0] || null;
+}
+
+function getSubinterfaceId(subinterfaceName) {
+    if (!subinterfaceName || typeof subinterfaceName !== 'string') return null;
+    const parts = subinterfaceName.split('.');
+    if (parts.length < 2) return null;
+    const id = parseInt(parts[1], 10);
+    return isNaN(id) ? null : id;
+}
+
+function ensureRouterSubinterface(routerOrId, subinterfaceName) {
+    const r = typeof routerOrId === 'string' ? getDeviceById(routerOrId) : routerOrId;
+    if (!r || r.type !== 'router') return null;
+    const normName = normalizeRouterInterfaceName(subinterfaceName);
+    if (!normName || !isSubinterfaceName(normName)) return null;
+
+    const parentName = getParentInterfaceName(normName);
+    if (!r.interfaces || !r.interfaces[parentName]) {
+        return null;
+    }
+
+    const parentIface = r.interfaces[parentName];
+    if (!r.interfaces[normName]) {
+        const subId = getSubinterfaceId(normName);
+        r.interfaces[normName] = {
+            name: normName,
+            ip: '',
+            subnetMask: '',
+            status: 'up',
+            mac: parentIface.mac || r.mac || '00:00:00:00:00:00',
+            isSubinterface: true,
+            parentInterface: parentName,
+            subId: subId,
+            encapsulation: null,
+            vlan: null
+        };
+    } else {
+        if (!r.interfaces[normName].mac) {
+            r.interfaces[normName].mac = parentIface.mac || r.mac || '00:00:00:00:00:00';
+        }
+        r.interfaces[normName].isSubinterface = true;
+        r.interfaces[normName].parentInterface = parentName;
+    }
+
+    return r.interfaces[normName];
+}
+
+function getEffectiveInterfaceStatus(routerOrId, interfaceName) {
+    const r = typeof routerOrId === 'string' ? getDeviceById(routerOrId) : routerOrId;
+    if (!r || !r.interfaces) return 'down';
+    const iface = r.interfaces[interfaceName];
+    if (!iface) return 'down';
+
+    if (iface.isSubinterface) {
+        const parentName = iface.parentInterface || getParentInterfaceName(interfaceName);
+        const parentIface = r.interfaces[parentName];
+        if (!parentIface || parentIface.status === 'down') {
+            return 'down';
+        }
+        return iface.status === 'down' ? 'down' : 'up';
+    }
+
+    return iface.status === 'down' ? 'down' : 'up';
+}
+
+function setRouterSubinterfaceEncapsulation(routerOrId, subinterfaceName, vlanId) {
+    const r = typeof routerOrId === 'string' ? getDeviceById(routerOrId) : routerOrId;
+    if (!r || r.type !== 'router') {
+        throw new Error('Device is not a router.');
+    }
+    const normName = normalizeRouterInterfaceName(subinterfaceName);
+    if (!normName || !isSubinterfaceName(normName)) {
+        throw new Error(`Invalid subinterface name "${subinterfaceName}".`);
+    }
+    const normVlan = normalizeVlanId(vlanId);
+    if (normVlan === null) {
+        throw new Error(`Invalid VLAN ID "${vlanId}". Valid range is 1-4094.`);
+    }
+
+    const subif = ensureRouterSubinterface(r, normName);
+    if (!subif) {
+        throw new Error(`Parent interface for "${normName}" does not exist.`);
+    }
+
+    const parentName = subif.parentInterface;
+    for (const [otherName, otherIf] of Object.entries(r.interfaces || {})) {
+        if (otherName !== normName && otherIf && otherIf.isSubinterface && otherIf.parentInterface === parentName) {
+            if (otherIf.encapsulation === 'dot1q' && otherIf.vlan === normVlan) {
+                throw new Error(`VLAN ${normVlan} is already configured on subinterface ${otherName}.`);
+            }
+        }
+    }
+
+    subif.encapsulation = 'dot1q';
+    subif.vlan = normVlan;
+    return subif;
 }
 
 function getSwitchPortConfig(switchOrId, portName) {
@@ -5752,7 +5931,11 @@ function getRouterRoutingTable(routerId) {
 
     const connectedRoutes = [];
     Object.entries(router.interfaces).forEach(([ifName, iface]) => {
-        if (!iface || iface.status === 'down') {
+        if (!iface || getEffectiveInterfaceStatus(router, ifName) === 'down') {
+            return;
+        }
+
+        if (iface.isSubinterface && (!iface.encapsulation || !iface.vlan)) {
             return;
         }
 
@@ -5799,7 +5982,7 @@ function getRouterRoutingTable(routerId) {
         // Check if egress interface is administratively down
         if (route.interface) {
             const iface = router.interfaces?.[route.interface];
-            if (!iface || iface.status === 'down') {
+            if (!iface || getEffectiveInterfaceStatus(router, route.interface) === 'down') {
                 operationalStatus = 'down';
             }
         }
@@ -5808,7 +5991,7 @@ function getRouterRoutingTable(routerId) {
         if (route.nextHop && operationalStatus !== 'down') {
             let nextHopReachable = false;
             Object.entries(router.interfaces || {}).forEach(([ifName, iface]) => {
-                if (!iface || iface.status === 'down' || !iface.ip || !iface.subnetMask) {
+                if (!iface || getEffectiveInterfaceStatus(router, ifName) === 'down' || !iface.ip || !iface.subnetMask) {
                     return;
                 }
                 const ifMask = normalizeSubnetMask(iface.subnetMask);
@@ -6778,25 +6961,97 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                 });
             }
         } else if (toDevice.type === 'router') {
+            const ingressPort = getPortForRouterAndNeighbor(toDevice.id, fromId);
+            let activeIngressIfaceName = ingressPort;
+            let activeIngressIface = ingressPort ? toDevice.interfaces?.[ingressPort] : null;
+
+            if (frame.vlanTag && frame.vlanTag.isTagged) {
+                const tagVlan = frame.vlanTag.vlanId;
+                let matchedSubifName = null;
+                if (ingressPort && toDevice.interfaces) {
+                    for (const [ifName, iface] of Object.entries(toDevice.interfaces)) {
+                        if (iface.isSubinterface && iface.parentInterface === ingressPort && iface.encapsulation === 'dot1q' && iface.vlan === tagVlan) {
+                            matchedSubifName = ifName;
+                            break;
+                        }
+                    }
+                }
+                if (!matchedSubifName) {
+                    frame.events.push(`Router ${toDevice.name} dropped tagged frame: No subinterface configured for VLAN ${tagVlan} on ${ingressPort}`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'router',
+                        action: 'DROP',
+                        reason: 'unmatched-vlan-tag',
+                        ingressInterface: ingressPort
+                    });
+                    return {
+                        success: false,
+                        reason: `Router ${toDevice.name} dropped frame: No subinterface matching VLAN tag ${tagVlan} on ${ingressPort}.`,
+                        path: traversedPath,
+                        action: 'DROP',
+                        hopActions
+                    };
+                }
+                activeIngressIfaceName = matchedSubifName;
+                activeIngressIface = toDevice.interfaces[matchedSubifName];
+                if (getEffectiveInterfaceStatus(toDevice, activeIngressIfaceName) === 'down') {
+                    frame.events.push(`Router ${toDevice.name} dropped frame: Subinterface ${activeIngressIfaceName} is down`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'router',
+                        action: 'DROP',
+                        reason: 'interface-down',
+                        ingressInterface: activeIngressIfaceName
+                    });
+                    return {
+                        success: false,
+                        reason: `Router ${toDevice.name} subinterface ${activeIngressIfaceName} is down.`,
+                        path: traversedPath,
+                        action: 'DROP',
+                        hopActions
+                    };
+                }
+                frame.events.push(`Router ${toDevice.name} de-encapsulated 802.1Q tag VLAN ${tagVlan} on ${activeIngressIfaceName}`);
+                delete frame.vlanTag;
+            } else {
+                if (activeIngressIface && getEffectiveInterfaceStatus(toDevice, activeIngressIfaceName) === 'down') {
+                    frame.events.push(`Router ${toDevice.name} dropped frame: Interface ${activeIngressIfaceName} is down`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'router',
+                        action: 'DROP',
+                        reason: 'interface-down',
+                        ingressInterface: activeIngressIfaceName
+                    });
+                    return {
+                        success: false,
+                        reason: `Router ${toDevice.name} interface ${activeIngressIfaceName} is down.`,
+                        path: traversedPath,
+                        action: 'DROP',
+                        hopActions
+                    };
+                }
+            }
+
             if (toDevice.id === toEndpoint.id) {
-                const ingressPort = getPortForRouterAndNeighbor(toDevice.id, fromId);
-                frame.events.push(`Frame received by destination router ${toDevice.name} on ${ingressPort || 'interface'}`);
+                frame.events.push(`Frame received by destination router ${toDevice.name} on ${activeIngressIfaceName || 'interface'}`);
                 continue;
             }
 
-            const ingressPort = getPortForRouterAndNeighbor(toDevice.id, fromId);
-            const ingressIface = ingressPort ? toDevice.interfaces?.[ingressPort] : null;
-
-            frame.events.push(`Frame received by ${toDevice.name} on ${ingressPort}`);
+            frame.events.push(`Frame received by ${toDevice.name} on ${activeIngressIfaceName}`);
 
             // 1. Inbound ACL Evaluation
-            if (ingressPort) {
-                const inAclResult = evaluateRouterInterfaceAcl(toDevice.id, ingressPort, 'in', frame.packet);
+            if (activeIngressIfaceName) {
+                const inAclResult = evaluateRouterInterfaceAcl(toDevice.id, activeIngressIfaceName, 'in', frame.packet);
                 if (inAclResult.matched && inAclResult.action === 'deny') {
                     const ruleSeq = inAclResult.rule?.sequence ?? (inAclResult.isImplicitDeny ? 'implicit' : 'unknown');
                     const logMsg = inAclResult.isImplicitDeny
-                        ? `Router ${toDevice.name} dropped packet on ${ingressPort} (inbound ACL ${inAclResult.aclId}): Implicit deny`
-                        : `Router ${toDevice.name} dropped packet on ${ingressPort} (inbound ACL ${inAclResult.aclId} rule ${ruleSeq}): Denied`;
+                        ? `Router ${toDevice.name} dropped packet on ${activeIngressIfaceName} (inbound ACL ${inAclResult.aclId}): Implicit deny`
+                        : `Router ${toDevice.name} dropped packet on ${activeIngressIfaceName} (inbound ACL ${inAclResult.aclId} rule ${ruleSeq}): Denied`;
                     const returnReason = inAclResult.isImplicitDeny
                         ? `Packet denied by inbound ACL ${inAclResult.aclId} (implicit deny) at router ${toDevice.name}.`
                         : `Packet denied by inbound ACL ${inAclResult.aclId} rule ${ruleSeq} at router ${toDevice.name}.`;
@@ -6805,7 +7060,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                         aclId: inAclResult.aclId,
                         aclName: inAclResult.aclId,
                         direction: 'inbound',
-                        interface: ingressPort,
+                        interface: activeIngressIfaceName,
                         action: 'deny',
                         sequence: inAclResult.rule?.sequence ?? null,
                         isImplicitDeny: inAclResult.isImplicitDeny,
@@ -6816,7 +7071,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     };
 
                     const icmpError = createIcmpErrorPacket(3, 13, frame.packet, toDevice, {
-                        ingressInterface: ingressPort,
+                        ingressInterface: activeIngressIfaceName,
                         reason: 'administratively-prohibited',
                         acl: aclDecision
                     });
@@ -6828,7 +7083,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                         type: 'router',
                         action: 'DROP',
                         reason: 'acl-deny',
-                        ingressInterface: ingressPort,
+                        ingressInterface: activeIngressIfaceName,
                         destinationIp: frame.packet.destinationIp,
                         acl: aclDecision,
                         icmpErrorPacket: icmpError || null
@@ -6843,19 +7098,19 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                         icmpErrorPacket: icmpError || null
                     };
                 } else if (inAclResult.matched && inAclResult.action === 'permit') {
-                    frame.events.push(`Router ${toDevice.name} permitted packet on ${ingressPort} (inbound ACL ${inAclResult.aclId} rule ${inAclResult.rule?.sequence})`);
+                    frame.events.push(`Router ${toDevice.name} permitted packet on ${activeIngressIfaceName} (inbound ACL ${inAclResult.aclId} rule ${inAclResult.rule?.sequence})`);
                     hopActions.push({
                         deviceId: toDevice.id,
                         deviceName: toDevice.name,
                         type: 'router',
                         action: 'ACL_EVALUATE',
                         reason: 'acl-permit',
-                        ingressInterface: ingressPort,
+                        ingressInterface: activeIngressIfaceName,
                         acl: {
                             aclId: inAclResult.aclId,
                             aclName: inAclResult.aclId,
                             direction: 'inbound',
-                            interface: ingressPort,
+                            interface: activeIngressIfaceName,
                             action: 'permit',
                             sequence: inAclResult.rule?.sequence ?? null,
                             isImplicitDeny: false,
@@ -6880,7 +7135,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     : `No route to destination ${frame.packet.destinationIp} at router ${toDevice.name}.`;
 
                 const icmpError = createIcmpErrorPacket(3, isInterfaceDown ? 1 : 0, frame.packet, toDevice, {
-                    ingressInterface: ingressPort,
+                    ingressInterface: activeIngressIfaceName,
                     reason: dropReason
                 });
 
@@ -6891,7 +7146,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     type: 'router',
                     action: 'DROP',
                     reason: dropReason,
-                    ingressInterface: ingressPort,
+                    ingressInterface: activeIngressIfaceName,
                     destinationIp: frame.packet.destinationIp,
                     icmpErrorPacket: icmpError || null
                 });
@@ -6910,7 +7165,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
             const egressPort = nextHopInfo.egressInterface;
             const egressIface = egressPort ? toDevice.interfaces?.[egressPort] : null;
 
-            if (!ingressPort || !egressPort || !ingressIface || !egressIface) {
+            if (!activeIngressIfaceName || !egressPort || !activeIngressIface || !egressIface) {
                 frame.events.push(`Router ${toDevice.name} could not resolve routing interfaces`);
                 hopActions.push({
                     deviceId: toDevice.id,
@@ -6918,7 +7173,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     type: 'router',
                     action: 'DROP',
                     reason: 'interface-error',
-                    ingressInterface: ingressPort,
+                    ingressInterface: activeIngressIfaceName,
                     egressInterface: egressPort
                 });
                 return {
@@ -6930,9 +7185,9 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                 };
             }
 
-            if (egressIface.status === 'down') {
+            if (getEffectiveInterfaceStatus(toDevice, egressPort) === 'down') {
                 const icmpError = createIcmpErrorPacket(3, 1, frame.packet, toDevice, {
-                    ingressInterface: ingressPort,
+                    ingressInterface: activeIngressIfaceName,
                     egressInterface: egressPort,
                     reason: 'interface-down'
                 });
@@ -6944,7 +7199,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     type: 'router',
                     action: 'DROP',
                     reason: 'interface-down',
-                    ingressInterface: ingressPort,
+                    ingressInterface: activeIngressIfaceName,
                     egressInterface: egressPort,
                     icmpErrorPacket: icmpError || null
                 });
@@ -6985,7 +7240,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     };
 
                     const icmpError = createIcmpErrorPacket(3, 13, frame.packet, toDevice, {
-                        ingressInterface: ingressPort,
+                        ingressInterface: activeIngressIfaceName,
                         egressInterface: egressPort,
                         reason: 'administratively-prohibited',
                         acl: aclDecision
@@ -6998,7 +7253,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                         type: 'router',
                         action: 'DROP',
                         reason: 'acl-deny',
-                        ingressInterface: ingressPort,
+                        ingressInterface: activeIngressIfaceName,
                         egressInterface: egressPort,
                         destinationIp: frame.packet.destinationIp,
                         acl: aclDecision,
@@ -7044,7 +7299,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
 
             if (frame.packet.ttl <= 0) {
                 const icmpError = createIcmpErrorPacket(11, 0, frame.packet, toDevice, {
-                    ingressInterface: ingressPort,
+                    ingressInterface: activeIngressIfaceName,
                     egressInterface: egressPort,
                     reason: 'ttl-expired'
                 });
@@ -7056,7 +7311,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     type: 'router',
                     action: 'DROP',
                     reason: 'ttl-expired',
-                    ingressInterface: ingressPort,
+                    ingressInterface: activeIngressIfaceName,
                     egressInterface: egressPort,
                     ttl: 0,
                     icmpErrorPacket: icmpError || null
@@ -7071,9 +7326,21 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                 };
             }
 
-            frame.events.push(`Router ${toDevice.name} routed frame from ${ingressPort} to ${egressPort}`);
+            frame.events.push(`Router ${toDevice.name} routed frame from ${activeIngressIfaceName} to ${egressPort}`);
             frame.sourceMac = egressIface.mac;
             frame.events.push(`Router ${toDevice.name} rewrote source MAC to ${egressIface.mac}`);
+
+            if (egressIface && egressIface.isSubinterface && egressIface.encapsulation === 'dot1q' && egressIface.vlan) {
+                frame.vlanTag = {
+                    vlanId: egressIface.vlan,
+                    tpid: '0x8100',
+                    priority: 0,
+                    isTagged: true
+                };
+                frame.events.push(`Router ${toDevice.name} encapsulated 802.1Q tag VLAN ${egressIface.vlan} on ${egressPort}`);
+            } else {
+                delete frame.vlanTag;
+            }
 
             // Router egress ARP resolution
             let arpTargetIp = nextHopInfo.nextHopIp;
@@ -7249,7 +7516,7 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
         if (dev.type === 'router') {
             if (dev.interfaces) {
                 for (const [ifName, iface] of Object.entries(dev.interfaces)) {
-                    if (iface.ip === targetIp && iface.status === 'up') {
+                    if (iface.ip === targetIp && getEffectiveInterfaceStatus(dev, ifName) !== 'down') {
                         const ifMask = normalizeSubnetMask(iface.subnetMask);
                         if (reqMask && ifMask && isSameSubnet(reqIp, iface.ip, reqMask)) {
                             targetDevice = dev;
@@ -7326,12 +7593,20 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
     // Determine initial VLAN of requester
     let currentVlan = 1;
     let currentTagged = false;
-    const firstSwitchId = arpPath.find(id => getDeviceById(id)?.type === 'switch');
-    if (firstSwitchId) {
-        const firstPort = getPortForSwitchAndNeighbor(firstSwitchId, requesterDevice.id);
-        if (firstPort) {
-            const cfg = getSwitchPortConfig(firstSwitchId, firstPort);
-            currentVlan = cfg.mode === 'trunk' ? (cfg.nativeVlan || 1) : (cfg.accessVlan || 1);
+    if (requesterDevice.type === 'router' && options.egressInterface) {
+        const egressIface = requesterDevice.interfaces?.[options.egressInterface];
+        if (egressIface && egressIface.isSubinterface && egressIface.encapsulation === 'dot1q' && egressIface.vlan) {
+            currentVlan = egressIface.vlan;
+            currentTagged = true;
+        }
+    } else {
+        const firstSwitchId = arpPath.find(id => getDeviceById(id)?.type === 'switch');
+        if (firstSwitchId) {
+            const firstPort = getPortForSwitchAndNeighbor(firstSwitchId, requesterDevice.id);
+            if (firstPort) {
+                const cfg = getSwitchPortConfig(firstSwitchId, firstPort);
+                currentVlan = cfg.mode === 'trunk' ? (cfg.nativeVlan || 1) : (cfg.accessVlan || 1);
+            }
         }
     }
 
@@ -7462,12 +7737,20 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
     // Determine initial VLAN of target for reverse path
     let replyVlan = 1;
     let replyTagged = false;
-    const lastSwitchId = [...arpPath].reverse().find(id => getDeviceById(id)?.type === 'switch');
-    if (lastSwitchId) {
-        const lastPort = getPortForSwitchAndNeighbor(lastSwitchId, targetDevice.id);
-        if (lastPort) {
-            const cfg = getSwitchPortConfig(lastSwitchId, lastPort);
-            replyVlan = cfg.mode === 'trunk' ? (cfg.nativeVlan || 1) : (cfg.accessVlan || 1);
+    if (targetDevice.type === 'router' && targetInterfaceName) {
+        const targetIface = targetDevice.interfaces?.[targetInterfaceName];
+        if (targetIface && targetIface.isSubinterface && targetIface.encapsulation === 'dot1q' && targetIface.vlan) {
+            replyVlan = targetIface.vlan;
+            replyTagged = true;
+        }
+    } else {
+        const lastSwitchId = [...arpPath].reverse().find(id => getDeviceById(id)?.type === 'switch');
+        if (lastSwitchId) {
+            const lastPort = getPortForSwitchAndNeighbor(lastSwitchId, targetDevice.id);
+            if (lastPort) {
+                const cfg = getSwitchPortConfig(lastSwitchId, lastPort);
+                replyVlan = cfg.mode === 'trunk' ? (cfg.nativeVlan || 1) : (cfg.accessVlan || 1);
+            }
         }
     }
 
@@ -7793,7 +8076,19 @@ function routeIcmpErrorReturnPath(icmpErrorPacket, generatorDevice, targetDevice
 }
 
 function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
-    const topologyPath = findTopologyPath(sourceDevice.id, destinationDevice.id);
+    const normalizedMaskA = normalizeSubnetMask(sourceDevice.subnetMask);
+    const normalizedMaskB = normalizeSubnetMask(destinationDevice.subnetMask);
+    const sameSubnet = normalizedMaskA && normalizedMaskB && normalizedMaskA === normalizedMaskB
+        && isSameSubnet(sourceDevice.ip, destinationDevice.ip, normalizedMaskA)
+        && isSameSubnet(sourceDevice.ip, destinationDevice.ip, normalizedMaskB);
+
+    let topologyPath = null;
+    if (sameSubnet) {
+        topologyPath = findTopologyPath(sourceDevice.id, destinationDevice.id);
+    } else {
+        const l3Path = findL3RoutedTopologyPath(sourceDevice, destinationDevice);
+        topologyPath = (l3Path && l3Path.length >= 2) ? l3Path : findTopologyPath(sourceDevice.id, destinationDevice.id);
+    }
 
     if (!topologyPath || topologyPath.length < 2) {
         return {
@@ -7805,12 +8100,6 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             hopActions: []
         };
     }
-
-    const normalizedMaskA = normalizeSubnetMask(sourceDevice.subnetMask);
-    const normalizedMaskB = normalizeSubnetMask(destinationDevice.subnetMask);
-    const sameSubnet = normalizedMaskA && normalizedMaskB && normalizedMaskA === normalizedMaskB
-        && isSameSubnet(sourceDevice.ip, destinationDevice.ip, normalizedMaskA)
-        && isSameSubnet(sourceDevice.ip, destinationDevice.ip, normalizedMaskB);
 
     if (!sameSubnet) {
         if (!sourceDevice.gateway || !isValidIPv4(sourceDevice.gateway)) {
@@ -7840,7 +8129,15 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             const firstRouterIdx = topologyPath.indexOf(firstRouterId);
             const prevHopId = topologyPath[firstRouterIdx - 1];
             const ingressPort = getPortForRouterAndNeighbor(firstRouter.id, prevHopId);
-            const ingressIface = firstRouter.interfaces?.[ingressPort];
+            let ingressIface = firstRouter.interfaces?.[ingressPort];
+            if ((!ingressIface || !ingressIface.ip || ingressIface.ip !== sourceDevice.gateway) && firstRouter.interfaces) {
+                for (const [, iface] of Object.entries(firstRouter.interfaces)) {
+                    if (iface.isSubinterface && iface.parentInterface === ingressPort && iface.ip === sourceDevice.gateway) {
+                        ingressIface = iface;
+                        break;
+                    }
+                }
+            }
             if (ingressIface && ingressIface.ip && sourceDevice.gateway !== ingressIface.ip) {
                 return {
                     success: false,
@@ -8284,7 +8581,8 @@ function analyzeCommunication(sourceDevice, targetDevice) {
     }
 
     // Inter-subnet communication via Router
-    const path = findTopologyPath(sourceDevice.id, targetDevice.id);
+    const l3Path = findL3RoutedTopologyPath(sourceDevice, targetDevice);
+    const path = (l3Path && l3Path.length >= 2) ? l3Path : findTopologyPath(sourceDevice.id, targetDevice.id);
     if (!path.length || path.length < 2) {
         return { possible: false, reason: 'No topology path exists.', path: [] };
     }
@@ -8311,13 +8609,24 @@ function analyzeCommunication(sourceDevice, targetDevice) {
         return { possible: false, reason: `No connected interface found on router ${firstRouter.name} toward ${sourceDevice.name}.`, path };
     }
 
-    const ingressIface = firstRouter.interfaces[ingressPort];
-    if (ingressIface.status === 'down') {
-        return { possible: false, reason: `Router ${firstRouter.name} interface ${ingressPort} is administratively down.`, path };
+    let ingressIface = firstRouter.interfaces[ingressPort];
+    let ingressIfName = ingressPort;
+    if ((!ingressIface || !ingressIface.ip || ingressIface.ip !== sourceDevice.gateway) && firstRouter.interfaces) {
+        for (const [ifName, iface] of Object.entries(firstRouter.interfaces)) {
+            if (iface.isSubinterface && iface.parentInterface === ingressPort && iface.ip === sourceDevice.gateway) {
+                ingressIface = iface;
+                ingressIfName = ifName;
+                break;
+            }
+        }
+    }
+
+    if (getEffectiveInterfaceStatus(firstRouter, ingressIfName) === 'down') {
+        return { possible: false, reason: `Router ${firstRouter.name} interface ${ingressIfName} is administratively down.`, path };
     }
 
     if (!ingressIface.ip || !isValidIPv4(ingressIface.ip)) {
-        return { possible: false, reason: `Router ${firstRouter.name} interface ${ingressPort} has no valid IP configured.`, path };
+        return { possible: false, reason: `Router ${firstRouter.name} interface ${ingressIfName} has no valid IP configured.`, path };
     }
 
     if (!sourceDevice.gateway || !isValidIPv4(sourceDevice.gateway)) {
@@ -8342,17 +8651,28 @@ function analyzeCommunication(sourceDevice, targetDevice) {
         return { possible: false, reason: `No connected interface found on router ${lastRouter.name} toward ${targetDevice.name}.`, path };
     }
 
-    const egressIface = lastRouter.interfaces[egressPort];
-    if (egressIface.status === 'down') {
-        return { possible: false, reason: `Router ${lastRouter.name} interface ${egressPort} is administratively down.`, path };
+    let egressIface = lastRouter.interfaces[egressPort];
+    let egressIfName = egressPort;
+    if ((!egressIface || !egressIface.ip || !isSameSubnet(egressIface.ip, targetDevice.ip, normalizedMaskB)) && lastRouter.interfaces) {
+        for (const [ifName, iface] of Object.entries(lastRouter.interfaces)) {
+            if (iface.isSubinterface && iface.parentInterface === egressPort && iface.ip && isSameSubnet(iface.ip, targetDevice.ip, normalizedMaskB)) {
+                egressIface = iface;
+                egressIfName = ifName;
+                break;
+            }
+        }
+    }
+
+    if (getEffectiveInterfaceStatus(lastRouter, egressIfName) === 'down') {
+        return { possible: false, reason: `Router ${lastRouter.name} interface ${egressIfName} is administratively down.`, path };
     }
 
     if (!egressIface.ip || !isValidIPv4(egressIface.ip)) {
-        return { possible: false, reason: `Router ${lastRouter.name} interface ${egressPort} has no valid IP configured.`, path };
+        return { possible: false, reason: `Router ${lastRouter.name} interface ${egressIfName} has no valid IP configured.`, path };
     }
 
     if (!isSameSubnet(egressIface.ip, targetDevice.ip, normalizedMaskB)) {
-        return { possible: false, reason: `Router ${lastRouter.name} interface ${egressPort} (${egressIface.ip}) is not on the destination subnet.`, path };
+        return { possible: false, reason: `Router ${lastRouter.name} interface ${egressIfName} (${egressIface.ip}) is not on the destination subnet.`, path };
     }
 
     const trimmedDestGateway = targetDevice.gateway ? targetDevice.gateway.trim() : '';
@@ -8643,6 +8963,9 @@ function getDeviceCliPrompt(deviceOrId) {
     const name = dev.name || dev.id;
     if (dev.type === 'router') {
         const session = getDeviceTerminalSession(dev.id);
+        if (session.mode === 'config-subif') {
+            return `${name}(config-subif)#`;
+        }
         if (session.mode === 'config-if') {
             return `${name}(config-if)#`;
         }
@@ -8838,15 +9161,19 @@ function formatCliRouterInterfaces(router) {
 
     const blocks = [];
     Object.entries(router.interfaces).forEach(([ifName, iface]) => {
-        const isDown = iface.status === 'down';
+        const isDown = getEffectiveInterfaceStatus(router, ifName) === 'down';
         const statusText = isDown ? 'administratively down' : 'up';
         const protoText = isDown ? 'down' : 'up';
         const mac = (iface.mac || '00:00:00:00:00:00').toLowerCase();
 
         const lines = [
             `${ifName} is ${statusText}, line protocol is ${protoText}`,
-            `  Hardware is GigabitEthernet, address is ${mac}`
+            `  Hardware is GigabitEthernet${iface.isSubinterface ? ' (subinterface)' : ''}, address is ${mac}`
         ];
+
+        if (iface.isSubinterface && iface.encapsulation && iface.vlan) {
+            lines.push(`  Encapsulation 802.1Q (dot1q), VLAN ${iface.vlan}`);
+        }
 
         if (iface.ip && isValidIPv4(iface.ip)) {
             const normMask = normalizeSubnetMask(iface.subnetMask);
@@ -8858,7 +9185,8 @@ function formatCliRouterInterfaces(router) {
 
         lines.push('  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec');
 
-        const linkInfo = getRouterInterfaceConnectionInfo(router.id, ifName);
+        const parentOrIfName = iface.isSubinterface ? iface.parentInterface : ifName;
+        const linkInfo = getRouterInterfaceConnectionInfo(router.id, parentOrIfName);
         if (linkInfo) {
             lines.push(`  Connected to ${linkInfo.neighborName} (${linkInfo.connectionId})`);
         } else {
@@ -8869,6 +9197,29 @@ function formatCliRouterInterfaces(router) {
     });
 
     return blocks.join('\n\n');
+}
+
+function formatCliRouterIpInterfaceBrief(router) {
+    if (!router.interfaces || Object.keys(router.interfaces).length === 0) {
+        return 'No interfaces configured.';
+    }
+
+    const lines = [
+        'Interface                  IP-Address      OK? Method Status                Protocol'
+    ];
+
+    Object.entries(router.interfaces).forEach(([ifName, iface]) => {
+        const ifCol = ifName.padEnd(27, ' ');
+        const ipCol = (iface.ip || 'unassigned').padEnd(16, ' ');
+        const okCol = 'YES'.padEnd(4, ' ');
+        const methodCol = 'manual'.padEnd(7, ' ');
+        const isDown = getEffectiveInterfaceStatus(router, ifName) === 'down';
+        const statusCol = (isDown ? 'administratively down' : 'up').padEnd(22, ' ');
+        const protoCol = isDown ? 'down' : 'up';
+        lines.push(`${ifCol}${ipCol}${okCol}${methodCol}${statusCol}${protoCol}`);
+    });
+
+    return lines.join('\n');
 }
 
 function formatCliRouterRoutingTable(router) {
@@ -9594,7 +9945,19 @@ function executeCliCommand(deviceId, rawInput) {
     if (mainCmd === 'help' || mainCmd === '?') {
         let helpText = '';
         if (isRouter) {
-            if (session.mode === 'config-if') {
+            if (session.mode === 'config-subif') {
+                helpText = `Commands available in Subinterface Configuration mode on ${dev.name}:
+  encapsulation dot1q <vlan-id> - Configure IEEE 802.1Q encapsulation for this subinterface
+  ip address <IP> <mask/prefix> - Set IPv4 address and subnet mask on this subinterface
+  no ip address                 - Remove IPv4 address from this subinterface
+  shutdown                      - Administratively disable this subinterface
+  no shutdown                   - Administratively enable this subinterface
+  interface <name>              - Switch to another interface/subinterface (alias: int)
+  exit                          - Return to Global Configuration mode
+  end                           - Return to Privileged EXEC mode
+  do <command>                  - Execute an operational command
+  help, ?                       - Show available commands`;
+            } else if (session.mode === 'config-if') {
                 helpText = `Commands available in Interface Configuration mode on ${dev.name}:
   ip address <IP> <mask/prefix> - Set IPv4 address and subnet mask on this interface
   no ip address                 - Remove IPv4 address from this interface
@@ -9617,19 +9980,20 @@ function executeCliCommand(deviceId, rawInput) {
   help, ?                       - Show available commands`;
             } else {
                 helpText = `Commands available on ${dev.name} (Cisco IOS-style):
-  configure terminal - Enter global configuration mode (alias: conf t)
-  hostname <name>   - Set device system name
-  interface <name>  - Enter interface configuration mode (alias: int)
-  show ip route     - Display current IPv4 routing table
-  show interfaces   - Display router interfaces and status (alias: show int)
-  show arp          - Display router ARP table and interface bindings
-  show access-lists - Display configured Access Control Lists (ACLs) and hit counts
-  route             - Display current routing table
-  ifconfig          - Display interface configuration
-  ping <IP>         - Send ICMP Echo requests to test IPv4 reachability
-  traceroute <IP>   - Trace packet hops to a destination IPv4 address (alias: tracert)
-  clear, cls        - Clear the terminal screen
-  help, ?           - Show available commands and usage`;
+  configure terminal     - Enter global configuration mode (alias: conf t)
+  hostname <name>        - Set device system name
+  interface <name>       - Enter interface configuration mode (alias: int)
+  show ip route          - Display current IPv4 routing table
+  show interfaces        - Display router interfaces and status (alias: show int)
+  show ip interface brief- Display summary table of IP interfaces (alias: show ip int brief)
+  show arp               - Display router ARP table and interface bindings
+  show access-lists      - Display configured Access Control Lists (ACLs) and hit counts
+  route                  - Display current routing table
+  ifconfig               - Display interface configuration
+  ping <IP>              - Send ICMP Echo requests to test IPv4 reachability
+  traceroute <IP>        - Trace packet hops to a destination IPv4 address (alias: tracert)
+  clear, cls             - Clear the terminal screen
+  help, ?                - Show available commands and usage`;
             }
         } else if (isSwitch) {
             if (session.mode === 'config-vlan') {
@@ -9642,7 +10006,10 @@ function executeCliCommand(deviceId, rawInput) {
             } else if (session.mode === 'config-if') {
                 helpText = `Commands available in Interface Configuration mode on ${dev.name}:
   switchport mode access        - Set port mode to access
+  switchport mode trunk         - Set port mode to trunk
   switchport access vlan <id>   - Set access VLAN for this port
+  switchport trunk native vlan <id> - Set native VLAN for trunk port
+  switchport trunk allowed vlan [all|add|remove|except|<list>] - Set allowed VLANs on trunk
   interface <name>              - Switch to another interface (alias: int)
   exit                          - Return to Global Configuration mode
   end                           - Return to Privileged EXEC mode
@@ -9660,14 +10027,16 @@ function executeCliCommand(deviceId, rawInput) {
   help, ?                       - Show available commands`;
             } else {
                 helpText = `Commands available on ${dev.name} (Cisco IOS-style Switch):
-  configure terminal - Enter global configuration mode (alias: conf t)
-  hostname <name>   - Set device system name
-  interface <name>  - Enter interface configuration mode (alias: int)
-  show vlan brief   - Display switch VLAN configuration table (alias: show vlan)
-  show mac-address-table - Display MAC address table (alias: show mac)
-  show interfaces   - Display switch interface status (alias: show int)
-  clear, cls        - Clear the terminal screen
-  help, ?           - Show available commands and usage`;
+  configure terminal            - Enter global configuration mode (alias: conf t)
+  hostname <name>               - Set device system name
+  interface <name>              - Enter interface configuration mode (alias: int)
+  show vlan brief               - Display switch VLAN configuration table (alias: show vlan)
+  show mac-address-table        - Display MAC address table (alias: show mac)
+  show interfaces               - Display switch interface status (alias: show int)
+  show interfaces trunk         - Display trunk interface summary table (alias: show int trunk)
+  show interfaces <port> switchport - Display detailed switchport status (alias: show int <port> switchport)
+  clear, cls                    - Clear the terminal screen
+  help, ?                       - Show available commands and usage`;
             }
         } else {
             helpText = `Commands available on ${dev.name}:
@@ -9737,6 +10106,11 @@ function executeCliCommand(deviceId, rawInput) {
         if (session.mode === 'config-vlan') {
             session.mode = 'config';
             session.selectedVlan = null;
+            return { success: true, output: '', clear: false, status: 'info', command, device: dev };
+        }
+        if (session.mode === 'config-subif') {
+            session.mode = 'config';
+            session.selectedInterface = null;
             return { success: true, output: '', clear: false, status: 'info', command, device: dev };
         }
         if (session.mode === 'config-if') {
@@ -10228,21 +10602,9 @@ function executeCliCommand(deviceId, rawInput) {
         }
         const rawIfName = tokens[1];
         if (isRouter) {
-            let matchedIfName = null;
-            const available = Object.keys(dev.interfaces || {});
-            for (const ifName of available) {
-                const lowerIf = ifName.toLowerCase();
-                const lowerRaw = rawIfName.toLowerCase();
-                if (lowerIf === lowerRaw
-                    || (lowerRaw === 'g0/0' && ifName === 'Gig0/0')
-                    || (lowerRaw === 'g0/1' && ifName === 'Gig0/1')
-                    || (lowerRaw === 'gigabitethernet0/0' && ifName === 'Gig0/0')
-                    || (lowerRaw === 'gigabitethernet0/1' && ifName === 'Gig0/1')) {
-                    matchedIfName = ifName;
-                    break;
-                }
-            }
-            if (!matchedIfName) {
+            const normIfName = normalizeRouterInterfaceName(rawIfName);
+            if (!normIfName) {
+                const available = Object.keys(dev.interfaces || {});
                 return {
                     success: false,
                     output: `% Invalid interface: "${rawIfName}". Available interfaces: ${available.join(', ')}`,
@@ -10252,18 +10614,56 @@ function executeCliCommand(deviceId, rawInput) {
                     device: dev
                 };
             }
-            session.prevMode = session.mode === 'config' ? 'config' : 'exec';
-            session.mode = 'config-if';
-            session.selectedInterface = matchedIfName;
-            session.selectedVlan = null;
-            return {
-                success: true,
-                output: '',
-                clear: false,
-                status: 'success',
-                command,
-                device: dev
-            };
+            if (isSubinterfaceName(normIfName)) {
+                const parentName = getParentInterfaceName(normIfName);
+                if (!dev.interfaces || !dev.interfaces[parentName]) {
+                    return {
+                        success: false,
+                        output: `% Parent interface "${parentName}" does not exist on ${dev.name}.`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                ensureRouterSubinterface(dev, normIfName);
+                session.prevMode = (session.mode === 'config' || session.mode === 'config-if' || session.mode === 'config-subif') ? session.mode : 'exec';
+                session.mode = 'config-subif';
+                session.selectedInterface = normIfName;
+                session.selectedVlan = null;
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            } else {
+                if (!dev.interfaces || !dev.interfaces[normIfName]) {
+                    const available = Object.keys(dev.interfaces || {});
+                    return {
+                        success: false,
+                        output: `% Invalid interface: "${rawIfName}". Available interfaces: ${available.join(', ')}`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                session.prevMode = (session.mode === 'config' || session.mode === 'config-if' || session.mode === 'config-subif') ? session.mode : 'exec';
+                session.mode = 'config-if';
+                session.selectedInterface = normIfName;
+                session.selectedVlan = null;
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
         }
         if (isSwitch) {
             const normPort = normalizeSwitchPortName(rawIfName);
@@ -10277,7 +10677,7 @@ function executeCliCommand(deviceId, rawInput) {
                     device: dev
                 };
             }
-            session.prevMode = session.mode === 'config' ? 'config' : 'exec';
+            session.prevMode = (session.mode === 'config' || session.mode === 'config-if' || session.mode === 'config-vlan') ? session.mode : 'exec';
             session.mode = 'config-if';
             session.selectedInterface = normPort;
             session.selectedVlan = null;
@@ -10286,6 +10686,74 @@ function executeCliCommand(deviceId, rawInput) {
                 output: '',
                 clear: false,
                 status: 'success',
+                command,
+                device: dev
+            };
+        }
+    }
+
+    // 10b. ENCAPSULATION DOT1Q <vlan> (router subinterface only)
+    if (mainCmd === 'encapsulation' || mainCmd === 'encap') {
+        if (!isRouter) {
+            return {
+                success: false,
+                output: "% 'encapsulation' is a router subinterface command.",
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (session.mode !== 'config-subif' || !session.selectedInterface || !isSubinterfaceName(session.selectedInterface)) {
+            return {
+                success: false,
+                output: '% Command rejected: Can only configure dot1q encapsulation on subinterfaces.',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        const encapType = (tokens[1] || '').toLowerCase();
+        if (encapType !== 'dot1q' && encapType !== '802.1q') {
+            return {
+                success: false,
+                output: '% Incomplete or unsupported encapsulation. Usage: encapsulation dot1q <vlan-id>',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        const rawVlan = tokens[2];
+        if (!rawVlan) {
+            return {
+                success: false,
+                output: '% Incomplete command: encapsulation dot1q <vlan-id>',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        try {
+            pushHistory();
+            setRouterSubinterfaceEncapsulation(dev, session.selectedInterface, rawVlan);
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        } catch (err) {
+            return {
+                success: false,
+                output: `% ${err.message}`,
+                clear: false,
+                status: 'error',
                 command,
                 device: dev
             };
@@ -10304,7 +10772,7 @@ function executeCliCommand(deviceId, rawInput) {
                 device: dev
             };
         }
-        if (session.mode !== 'config-if' || !session.selectedInterface) {
+        if ((session.mode !== 'config-if' && session.mode !== 'config-subif') || !session.selectedInterface) {
             return {
                 success: false,
                 output: '% "shutdown" must be executed inside interface configuration mode (e.g. "interface Gig0/0" or "interface Fa0/1").',
@@ -10427,7 +10895,7 @@ function executeCliCommand(deviceId, rawInput) {
                     device: dev
                 };
             }
-            if (session.mode !== 'config-if' || !session.selectedInterface) {
+            if ((session.mode !== 'config-if' && session.mode !== 'config-subif') || !session.selectedInterface) {
                 return {
                     success: false,
                     output: '% "no shutdown" must be executed inside interface configuration mode.',
@@ -10477,7 +10945,7 @@ function executeCliCommand(deviceId, rawInput) {
                     device: dev
                 };
             }
-            if (session.mode !== 'config-if' || !session.selectedInterface || !dev.interfaces?.[session.selectedInterface]) {
+            if ((session.mode !== 'config-if' && session.mode !== 'config-subif') || !session.selectedInterface || !dev.interfaces?.[session.selectedInterface]) {
                 return {
                     success: false,
                     output: '% "no ip address" must be executed inside interface configuration mode.',
@@ -10622,7 +11090,7 @@ function executeCliCommand(deviceId, rawInput) {
                 device: dev
             };
         }
-        if (session.mode !== 'config-if' || !session.selectedInterface || !dev.interfaces?.[session.selectedInterface]) {
+        if ((session.mode !== 'config-if' && session.mode !== 'config-subif') || !session.selectedInterface || !dev.interfaces?.[session.selectedInterface]) {
             return {
                 success: false,
                 output: '% "ip address" must be executed inside interface configuration mode (e.g. "interface Gig0/0").',
@@ -10633,6 +11101,16 @@ function executeCliCommand(deviceId, rawInput) {
             };
         }
         const iface = dev.interfaces[session.selectedInterface];
+        if (iface.isSubinterface && (!iface.encapsulation || !iface.vlan)) {
+            return {
+                success: false,
+                output: '% Configuring IP routing on a LAN subinterface is only allowed if that subinterface is already configured as part of an IEEE 802.10, IEEE 802.1Q, or ISL vLAN.',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
         let rawIp = '';
         let rawMask = '';
         if (tokens[2] && tokens[2].includes('/')) {
@@ -11191,6 +11669,38 @@ function executeCliCommand(deviceId, rawInput) {
             return {
                 success: true,
                 output: formatCliSwitchInterfaceSwitchport(dev, portName),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // show ip interface brief / show ip int brief / show ip int br
+        if (sub1 === 'ip' && (sub2 === 'interface' || sub2 === 'interfaces' || sub2 === 'int') && (tokens[3] === 'brief' || tokens[3] === 'br')) {
+            if (isSwitch) {
+                return {
+                    success: false,
+                    output: `% 'show ip interface brief' is a router command. On switches, use 'show interfaces' or 'show vlan brief'.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (!isRouter) {
+                return {
+                    success: false,
+                    output: `% 'show ip interface brief' is a Cisco IOS router command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: formatCliRouterIpInterfaceBrief(dev),
                 clear: false,
                 status: 'success',
                 command,
