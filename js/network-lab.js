@@ -58,6 +58,7 @@ let canvasResizeObserver = null;
 
 function initializeLab() {
     bindEvents();
+    bindTerminalEvents();
     bindCanvasResizeObserver();
     render();
 }
@@ -500,6 +501,10 @@ function clearCanvas() {
     networkState.switchRuntime = {};
     networkState.routerRuntime = {};
     networkState.arpRuntime = {};
+    terminalRuntime.sessions = {};
+    terminalRuntime.activeDeviceId = null;
+    terminalRuntime.isOpen = false;
+    closeDeviceTerminal();
     networkState.typeCounters = {};
     networkState.connectionCounter = 0;
     networkState.connectionTestState = null;
@@ -1939,6 +1944,11 @@ function renderPropertiesPanel() {
                 </div>
                 <div class="property-actions">
                     <button id="applyDeviceConfig" class="toolbar-button" type="button" ${isValid ? '' : 'disabled'}>Apply Changes</button>
+                    ${['pc', 'laptop', 'server'].includes(selected.type) ? `
+                        <button id="openDeviceTerminalBtn" class="terminal-launch-btn" type="button" data-device-id="${escapeHtml(selected.id)}">
+                            <span class="terminal-launch-btn__icon">💻</span> Open Terminal / CLI
+                        </button>
+                    ` : ''}
                 </div>
                 <div class="property-summary" id="deviceSummary">
                     <h4>NETWORK</h4>
@@ -2006,6 +2016,16 @@ function renderPropertiesPanel() {
     if (applyButton) {
         applyButton.addEventListener('click', () => {
             applyDeviceConfiguration();
+        });
+    }
+
+    const openTerminalBtn = panel.querySelector('#openDeviceTerminalBtn') || panel.querySelector('#openRouterTerminalBtn');
+    if (openTerminalBtn) {
+        openTerminalBtn.addEventListener('click', () => {
+            const devId = openTerminalBtn.dataset.deviceId || networkState.selectedDeviceId;
+            if (devId) {
+                openDeviceTerminal(devId);
+            }
         });
     }
 
@@ -3472,6 +3492,9 @@ function renderRouterInspector(selected) {
             ${renderArpTableInspector(selected)}
             <div class="property-actions">
                 <button id="applyDeviceConfig" class="toolbar-button" type="button" ${isValid ? '' : 'disabled'}>Apply Changes</button>
+                <button id="openRouterTerminalBtn" class="terminal-launch-btn" type="button" data-device-id="${escapeHtml(selected.id)}">
+                    <span class="terminal-launch-btn__icon">⚡</span> Open Router Console / CLI
+                </button>
             </div>
             <p class="property-info">Configuration updates are applied only when you click Apply Changes, so invalid data never overwrites the current device state.</p>
         </div>
@@ -7698,6 +7721,687 @@ function cleanDisplayText(value) {
 
 function capitalize(value) {
     return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+// ==========================================================================
+// Interactive Network CLI Foundation (V5.11 Phase 1)
+// ==========================================================================
+
+const terminalRuntime = {
+    activeDeviceId: null,
+    isOpen: false,
+    sessions: {}
+};
+
+function getDeviceTerminalSession(deviceId) {
+    if (!terminalRuntime.sessions[deviceId]) {
+        terminalRuntime.sessions[deviceId] = {
+            history: [],
+            historyIndex: -1,
+            logs: []
+        };
+    }
+    return terminalRuntime.sessions[deviceId];
+}
+
+function isDeviceCliSupported(deviceOrId) {
+    const dev = typeof deviceOrId === 'string' ? getDeviceById(deviceOrId) : deviceOrId;
+    if (!dev) return false;
+    return ['pc', 'laptop', 'server', 'router'].includes(dev.type);
+}
+
+function getDeviceCliPrompt(deviceOrId) {
+    const dev = typeof deviceOrId === 'string' ? getDeviceById(deviceOrId) : deviceOrId;
+    if (!dev) return 'Device>';
+    const name = dev.name || dev.id;
+    if (dev.type === 'router') {
+        return `${name}#`;
+    }
+    return `${name}>`;
+}
+
+function getCliCommandHistory(deviceId) {
+    const session = getDeviceTerminalSession(deviceId);
+    return [...session.history];
+}
+
+function pushCliCommandHistory(deviceId, command) {
+    const trimmed = (command || '').trim();
+    if (!trimmed) return;
+    const session = getDeviceTerminalSession(deviceId);
+    session.history.push(trimmed);
+    if (session.history.length > 50) {
+        session.history.shift();
+    }
+    session.historyIndex = -1;
+}
+
+function clearCliTerminal(deviceId) {
+    if (deviceId) {
+        const session = getDeviceTerminalSession(deviceId);
+        session.logs = [];
+    }
+    const outputEl = document.getElementById('terminalOutput');
+    if (outputEl) {
+        outputEl.innerHTML = '';
+    }
+}
+
+function formatCliIpconfig(device) {
+    const ip = device.ip || '0.0.0.0';
+    const mask = device.subnetMask || '0.0.0.0';
+    const gateway = device.gateway || '0.0.0.0';
+    const mac = device.mac ? device.mac.replace(/:/g, '-').toUpperCase() : '00-00-00-00-00-00';
+
+    return `Windows IP Configuration
+
+Ethernet adapter Local Area Connection:
+
+   Connection-specific DNS Suffix  . :
+   Link-local IPv6 Address . . . . . : fe80::1
+   IPv4 Address. . . . . . . . . . . : ${ip}
+   Subnet Mask . . . . . . . . . . . : ${mask}
+   Default Gateway . . . . . . . . . : ${gateway}
+   Physical Address. . . . . . . . . : ${mac}`;
+}
+
+function formatCliHostArpTable(device) {
+    const entries = getArpTable(device.id);
+    const hostIp = device.ip || '127.0.0.1';
+    const hostMac = device.mac ? device.mac.replace(/:/g, '-').toLowerCase() : '00-00-00-00-00-00';
+
+    if (!entries || entries.length === 0) {
+        return `Interface: ${hostIp} --- ${hostMac}\n  No ARP entries found.`;
+    }
+
+    const lines = [
+        `Interface: ${hostIp} --- ${hostMac}`,
+        '  Internet Address      Physical Address      Type'
+    ];
+
+    entries.forEach((entry) => {
+        const ipCol = entry.ip.padEnd(22, ' ');
+        const macCol = (entry.mac || '').toLowerCase().padEnd(22, ' ');
+        const typeCol = entry.type || 'dynamic';
+        lines.push(`  ${ipCol}${macCol}${typeCol}`);
+    });
+
+    return lines.join('\n');
+}
+
+function formatCliRouterRoutingTable(router) {
+    const routes = getRouterRoutingTable(router.id);
+    const lines = [
+        'Codes: C - connected, S - static, R - RIP, M - mobile, B - BGP',
+        '       D - EIGRP, EX - EIGRP external, O - OSPF, IA - OSPF inter area',
+        '',
+        'Gateway of last resort is not set',
+        ''
+    ];
+
+    if (!routes || routes.length === 0) {
+        lines.push('Routing table is empty.');
+        return lines.join('\n');
+    }
+
+    routes.forEach((route) => {
+        const code = route.code || (route.type === 'connected' ? 'C' : 'S');
+        const net = `${route.network}/${route.prefixLength}`;
+        const iface = route.interface || '—';
+        const ad = typeof route.adminDistance === 'number' ? route.adminDistance : (code === 'C' ? 0 : 1);
+        const metric = typeof route.metric === 'number' ? route.metric : 0;
+        const isDown = route.status === 'down';
+
+        if (code === 'C') {
+            lines.push(`${code.padEnd(5, ' ')}${net} is directly connected, ${iface}`);
+        } else {
+            const statusSuffix = isDown ? ' (inactive - interface down)' : '';
+            const viaText = route.nextHop ? `via ${route.nextHop}` : `is directly connected`;
+            lines.push(`${code.padEnd(5, ' ')}${net} [${ad}/${metric}] ${viaText}, ${iface}${statusSuffix}`);
+        }
+    });
+
+    return lines.join('\n');
+}
+
+function formatCliRouterArpTable(router) {
+    const entries = getArpTable(router.id);
+    if (!entries || entries.length === 0) {
+        return 'No ARP entries found.';
+    }
+
+    const lines = [
+        'Protocol  Address          Age (min)  Hardware Addr   Type   Interface'
+    ];
+
+    entries.forEach((entry) => {
+        const proto = 'Internet'.padEnd(10, ' ');
+        const addr = (entry.ip || '').padEnd(17, ' ');
+        const age = '-'.padEnd(11, ' ');
+        const hw = (entry.mac || '').toLowerCase().padEnd(16, ' ');
+        const type = 'ARPA'.padEnd(7, ' ');
+        const iface = entry.interface || 'Gig0/0';
+        lines.push(`${proto}${addr}${age}${hw}${type}${iface}`);
+    });
+
+    return lines.join('\n');
+}
+
+function formatCliRouterAcls(router) {
+    const acls = getRouterAcls(router.id);
+    const aclList = Object.values(acls || {});
+
+    if (!aclList || aclList.length === 0) {
+        return 'No access lists configured.';
+    }
+
+    const lines = [];
+
+    aclList.forEach((acl) => {
+        const typeLabel = acl.type === 'extended' ? 'Extended' : 'Standard';
+        lines.push(`${typeLabel} IP access list ${acl.id}`);
+
+        if (!acl.rules || acl.rules.length === 0) {
+            lines.push('    (empty)');
+            return;
+        }
+
+        acl.rules.forEach((rule) => {
+            const seq = String(rule.sequence).padStart(4, ' ');
+            const action = rule.action || 'permit';
+            const hits = rule.hits || 0;
+            const matchesText = `(${hits} ${hits === 1 ? 'match' : 'matches'})`;
+
+            let ruleDesc = '';
+            if (acl.type === 'extended') {
+                const proto = (rule.protocol || 'ip').toLowerCase();
+                const src = rule.source?.isAny ? 'any' : rule.source?.isHost ? `host ${rule.source.ip}` : `${rule.source?.ip} ${rule.source?.wildcard || ''}`.trim();
+                const dst = rule.destination?.isAny ? 'any' : rule.destination?.isHost ? `host ${rule.destination.ip}` : `${rule.destination?.ip} ${rule.destination?.wildcard || ''}`.trim();
+                ruleDesc = `${action} ${proto} ${src} ${dst}`;
+            } else {
+                const src = rule.source?.isAny ? 'any' : rule.source?.isHost ? `host ${rule.source.ip}` : `${rule.source?.ip} ${rule.source?.wildcard || ''}`.trim();
+                ruleDesc = `${action} ${src}`;
+            }
+
+            lines.push(`   ${seq} ${ruleDesc} ${matchesText}`);
+        });
+    });
+
+    return lines.join('\n');
+}
+
+function executeCliCommand(deviceId, rawInput) {
+    const dev = getDeviceById(deviceId);
+    if (!dev) {
+        return {
+            success: false,
+            output: `% Error: Device "${deviceId}" not found.`,
+            clear: false,
+            status: 'error',
+            command: rawInput,
+            device: null
+        };
+    }
+
+    if (!isDeviceCliSupported(dev)) {
+        return {
+            success: false,
+            output: `% CLI is not supported on ${dev.type} devices.`,
+            clear: false,
+            status: 'error',
+            command: rawInput,
+            device: dev
+        };
+    }
+
+    const command = (rawInput || '').trim();
+    if (!command) {
+        return {
+            success: true,
+            output: '',
+            clear: false,
+            status: 'empty',
+            command: '',
+            device: dev
+        };
+    }
+
+    pushCliCommandHistory(dev.id, command);
+
+    const isRouter = dev.type === 'router';
+    const lowerCmd = command.toLowerCase();
+    const tokens = lowerCmd.split(/\s+/);
+    const mainCmd = tokens[0];
+
+    // 1. HELP / ?
+    if (mainCmd === 'help' || mainCmd === '?') {
+        let helpText = '';
+        if (isRouter) {
+            helpText = `Commands available on ${dev.name} (Cisco IOS-style):
+  show ip route     - Display current IPv4 routing table
+  show arp          - Display router ARP table and interface bindings
+  show access-lists - Display configured Access Control Lists (ACLs) and hit counts
+  clear, cls        - Clear the terminal screen
+  help, ?           - Show available commands and usage`;
+        } else {
+            helpText = `Commands available on ${dev.name}:
+  ipconfig          - Display IP configuration, Subnet Mask, Gateway, and MAC
+  ipconfig /all     - Display detailed IP and interface configuration
+  arp -a            - Display the current ARP cache entries
+  clear, cls        - Clear the terminal screen
+  help, ?           - Show available commands and usage`;
+        }
+        return {
+            success: true,
+            output: helpText,
+            clear: false,
+            status: 'info',
+            command,
+            device: dev
+        };
+    }
+
+    // 2. CLEAR / CLS
+    if (mainCmd === 'clear' || mainCmd === 'cls') {
+        clearCliTerminal(dev.id);
+        return {
+            success: true,
+            output: '',
+            clear: true,
+            status: 'info',
+            command,
+            device: dev
+        };
+    }
+
+    // 3. IPCONFIG / IFCONFIG
+    if (mainCmd === 'ipconfig' || mainCmd === 'ifconfig' || mainCmd.startsWith('ipconfig/')) {
+        if (isRouter) {
+            return {
+                success: false,
+                output: `% 'ipconfig' is for end hosts (PC/Server). On Cisco IOS routers, use 'show ip route' or check interface settings.`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        return {
+            success: true,
+            output: formatCliIpconfig(dev),
+            clear: false,
+            status: 'success',
+            command,
+            device: dev
+        };
+    }
+
+    // 4. ARP -A
+    if (mainCmd === 'arp') {
+        if (tokens[1] === '-a' || tokens[1] === '-g' || tokens.length === 1) {
+            if (isRouter) {
+                return {
+                    success: false,
+                    output: `% 'arp -a' is an end host command. On Cisco IOS routers, use 'show arp'.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: formatCliHostArpTable(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+    }
+
+    // 5. SHOW commands (show ip route, show arp, show access-lists)
+    if (mainCmd === 'show') {
+        const sub1 = tokens[1] || '';
+        const sub2 = tokens[2] || '';
+
+        // show ip route / show route
+        if ((sub1 === 'ip' && (sub2 === 'route' || sub2 === 'routes')) || sub1 === 'route' || sub1 === 'routes') {
+            if (!isRouter) {
+                return {
+                    success: false,
+                    output: `% 'show ip route' is a Cisco IOS router command. End hosts use 'ipconfig' or their default gateway for routing.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: formatCliRouterRoutingTable(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // show arp / show ip arp
+        if (sub1 === 'arp' || (sub1 === 'ip' && sub2 === 'arp')) {
+            if (!isRouter) {
+                return {
+                    success: false,
+                    output: `% 'show arp' is a Cisco IOS router command. On end hosts, use 'arp -a'.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: formatCliRouterArpTable(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // show access-lists / show access-list / show ip access-lists
+        if (sub1 === 'access-lists' || sub1 === 'access-list' || sub1 === 'acls' || (sub1 === 'ip' && (sub2 === 'access-lists' || sub2 === 'access-list' || sub2 === 'acls'))) {
+            if (!isRouter) {
+                return {
+                    success: false,
+                    output: `% 'show access-lists' is a Cisco IOS router command. Access Control Lists are configured on routers.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: formatCliRouterAcls(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // Other show commands on router or end host
+        if (isRouter) {
+            return {
+                success: false,
+                output: `% Unrecognized show command: "${command}". Available: "show ip route", "show arp", "show access-lists".`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        } else {
+            return {
+                success: false,
+                output: `% 'show' commands are for Cisco IOS routers. End hosts support 'ipconfig', 'arp -a', 'help', and 'clear'.`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+    }
+
+    // 6. Common Utilities Preview (ping, traceroute, tracert)
+    if (mainCmd === 'ping') {
+        return {
+            success: false,
+            output: `% 'ping' will be fully simulated in Phase 2 CLI. Use the 'Send Frame' or 'Test Connection' toolbar tools in the meantime.`,
+            clear: false,
+            status: 'info',
+            command,
+            device: dev
+        };
+    }
+
+    if (mainCmd === 'traceroute' || mainCmd === 'tracert') {
+        return {
+            success: false,
+            output: `% 'traceroute' will be fully simulated in Phase 2 CLI. Use the 'Send Frame' panel's Trace Route feature in the meantime.`,
+            clear: false,
+            status: 'info',
+            command,
+            device: dev
+        };
+    }
+
+    // 7. Unknown / Unsupported command
+    return {
+        success: false,
+        output: `% Invalid command or syntax: "${command}". Type "help" or "?" to see available commands.`,
+        clear: false,
+        status: 'error',
+        command,
+        device: dev
+    };
+}
+
+function openDeviceTerminal(deviceId) {
+    const dev = getDeviceById(deviceId);
+    if (!dev || !isDeviceCliSupported(dev)) {
+        updateStatus('CLI is not supported on this device.');
+        return;
+    }
+
+    terminalRuntime.activeDeviceId = dev.id;
+    terminalRuntime.isOpen = true;
+
+    const modal = document.getElementById('deviceTerminalModal');
+    const titleEl = document.getElementById('terminalTitle');
+    const iconEl = document.getElementById('terminalDeviceIcon');
+    const badgeEl = document.getElementById('terminalDeviceTypeBadge');
+    const promptEl = document.getElementById('terminalPrompt');
+    const inputEl = document.getElementById('terminalInput');
+    const outputEl = document.getElementById('terminalOutput');
+
+    const promptText = getDeviceCliPrompt(dev);
+    const isRouter = dev.type === 'router';
+
+    if (titleEl) {
+        titleEl.textContent = `${dev.name} — ${isRouter ? 'Router Console (Cisco IOS)' : 'Device Terminal'}`;
+    }
+    if (iconEl) {
+        iconEl.textContent = isRouter ? '⚡' : '💻';
+    }
+    if (badgeEl) {
+        badgeEl.textContent = isRouter ? 'Router CLI' : 'Host CLI';
+        badgeEl.className = `terminal-badge ${isRouter ? 'terminal-badge--router' : ''}`;
+    }
+    if (promptEl) {
+        promptEl.textContent = promptText;
+        promptEl.className = `terminal-prompt ${isRouter ? 'terminal-prompt--router' : ''}`;
+    }
+
+    const session = getDeviceTerminalSession(dev.id);
+    session.historyIndex = -1;
+
+    if (outputEl) {
+        outputEl.innerHTML = '';
+        if (session.logs.length === 0) {
+            // Initial greeting
+            const greeting = isRouter
+                ? `Cisco IOS Software, NE-Toolkit Simulated Router\nType "help" or "?" to list available router commands.\n`
+                : `Microsoft Windows [Version 10.0.Simulated]\n(c) NE-Toolkit Corporation. All rights reserved.\n\nType "help" or "?" to list available host commands.\n`;
+            session.logs.push({
+                prompt: '',
+                command: '',
+                output: greeting,
+                status: 'info'
+            });
+        }
+
+        session.logs.forEach((log) => {
+            appendLogToTerminalDom(log, isRouter);
+        });
+    }
+
+    if (modal) {
+        modal.style.display = 'flex';
+        modal.classList.add('is-open');
+        modal.setAttribute('aria-hidden', 'false');
+    }
+
+    if (inputEl) {
+        inputEl.value = '';
+        setTimeout(() => inputEl.focus(), 50);
+    }
+
+    scrollTerminalToBottom();
+}
+
+function closeDeviceTerminal() {
+    terminalRuntime.isOpen = false;
+    const modal = document.getElementById('deviceTerminalModal');
+    if (modal) {
+        modal.classList.remove('is-open');
+        modal.setAttribute('aria-hidden', 'true');
+        setTimeout(() => {
+            if (!terminalRuntime.isOpen) {
+                modal.style.display = 'none';
+            }
+        }, 200);
+    }
+}
+
+function appendLogToTerminalDom(log, isRouter) {
+    const outputEl = document.getElementById('terminalOutput');
+    if (!outputEl) return;
+
+    const entry = document.createElement('div');
+    entry.className = 'terminal-entry';
+
+    let html = '';
+    if (log.command) {
+        const promptClass = isRouter ? 'terminal-command-prompt--router' : '';
+        html += `<div class="terminal-command-line">
+            <span class="terminal-command-prompt ${promptClass}">${escapeHtml(log.prompt)}</span>
+            <span class="terminal-command-text">${escapeHtml(log.command)}</span>
+        </div>`;
+    }
+
+    if (log.output) {
+        const statusClass = log.status === 'error' ? 'terminal-command-response--error' :
+                            log.status === 'success' ? 'terminal-command-response--success' :
+                            log.status === 'info' ? 'terminal-command-response--info' : '';
+        html += `<div class="terminal-command-response ${statusClass}">${escapeHtml(log.output)}</div>`;
+    }
+
+    entry.innerHTML = html;
+    outputEl.appendChild(entry);
+}
+
+function scrollTerminalToBottom() {
+    const body = document.getElementById('terminalBody');
+    if (body) {
+        body.scrollTop = body.scrollHeight;
+    }
+}
+
+function handleTerminalInputSubmit() {
+    const devId = terminalRuntime.activeDeviceId;
+    if (!devId) return;
+
+    const dev = getDeviceById(devId);
+    if (!dev) return;
+
+    const inputEl = document.getElementById('terminalInput');
+    if (!inputEl) return;
+
+    const rawInput = inputEl.value;
+    const prompt = getDeviceCliPrompt(dev);
+    const session = getDeviceTerminalSession(devId);
+    const isRouter = dev.type === 'router';
+
+    const result = executeCliCommand(devId, rawInput);
+
+    if (result.clear) {
+        clearCliTerminal(devId);
+    } else if (rawInput.trim() || result.output) {
+        const logEntry = {
+            prompt,
+            command: rawInput,
+            output: result.output,
+            status: result.status
+        };
+        session.logs.push(logEntry);
+        appendLogToTerminalDom(logEntry, isRouter);
+    }
+
+    inputEl.value = '';
+    session.historyIndex = -1;
+    scrollTerminalToBottom();
+}
+
+function handleTerminalHistoryNavigation(direction) {
+    const devId = terminalRuntime.activeDeviceId;
+    if (!devId) return;
+
+    const session = getDeviceTerminalSession(devId);
+    const inputEl = document.getElementById('terminalInput');
+    if (!inputEl || session.history.length === 0) return;
+
+    if (direction === 'up') {
+        if (session.historyIndex === -1) {
+            session.historyIndex = session.history.length - 1;
+        } else if (session.historyIndex > 0) {
+            session.historyIndex--;
+        }
+        inputEl.value = session.history[session.historyIndex] || '';
+    } else if (direction === 'down') {
+        if (session.historyIndex !== -1) {
+            if (session.historyIndex < session.history.length - 1) {
+                session.historyIndex++;
+                inputEl.value = session.history[session.historyIndex] || '';
+            } else {
+                session.historyIndex = -1;
+                inputEl.value = '';
+            }
+        }
+    }
+}
+
+function bindTerminalEvents() {
+    const closeBtn = document.getElementById('terminalCloseBtn');
+    const closeActionBtn = document.getElementById('terminalCloseActionBtn');
+    const backdrop = document.getElementById('terminalBackdrop');
+    const clearBtn = document.getElementById('terminalClearBtn');
+    const clearActionBtn = document.getElementById('terminalClearActionBtn');
+    const inputEl = document.getElementById('terminalInput');
+
+    if (closeBtn) closeBtn.addEventListener('click', closeDeviceTerminal);
+    if (closeActionBtn) closeActionBtn.addEventListener('click', closeDeviceTerminal);
+    if (backdrop) backdrop.addEventListener('click', closeDeviceTerminal);
+    if (clearBtn) clearBtn.addEventListener('click', () => clearCliTerminal(terminalRuntime.activeDeviceId));
+    if (clearActionBtn) clearActionBtn.addEventListener('click', () => clearCliTerminal(terminalRuntime.activeDeviceId));
+
+    if (inputEl) {
+        inputEl.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                handleTerminalInputSubmit();
+            } else if (event.key === 'ArrowUp') {
+                event.preventDefault();
+                handleTerminalHistoryNavigation('up');
+            } else if (event.key === 'ArrowDown') {
+                event.preventDefault();
+                handleTerminalHistoryNavigation('down');
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                closeDeviceTerminal();
+            }
+        });
+    }
 }
 
 document.addEventListener('DOMContentLoaded', initializeLab);

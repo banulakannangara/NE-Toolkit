@@ -10393,6 +10393,464 @@ runTest('303. Packet Inspector renders ACCESS CONTROL LIST (ACL) section when AC
     assert.ok(inspectorHtml.includes('Sequence 10'), 'Must render matched rule sequence');
 });
 
+// ==========================================================================
+// V5.11 Phase 1 — Interactive Network CLI Foundation Tests (304 - 333)
+// ==========================================================================
+
+// 304. Prompt generation for PC, Laptop, Server, and Router
+runTest('304. Prompt generation for PC, Laptop, Server, and Router', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('laptop', 150, 100);
+    addDevice('server', 250, 100);
+    addDevice('router', 350, 100);
+
+    const pc = networkState.devices[0];
+    const laptop = networkState.devices[1];
+    const server = networkState.devices[2];
+    const router = networkState.devices[3];
+
+    assert.strictEqual(getDeviceCliPrompt(pc), 'PC0>');
+    assert.strictEqual(getDeviceCliPrompt(laptop), 'Laptop0>');
+    assert.strictEqual(getDeviceCliPrompt(server), 'Server0>');
+    assert.strictEqual(getDeviceCliPrompt(router), 'Router0#');
+
+    pc.name = 'Custom-PC';
+    router.name = 'CoreRouter-1';
+    assert.strictEqual(getDeviceCliPrompt(pc), 'Custom-PC>');
+    assert.strictEqual(getDeviceCliPrompt(router), 'CoreRouter-1#');
+});
+
+// 305. isDeviceCliSupported returns true for supported devices and false for switches
+runTest('305. isDeviceCliSupported returns true for supported devices and false for switches', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('laptop', 150, 100);
+    addDevice('server', 250, 100);
+    addDevice('router', 350, 100);
+    addDevice('switch', 450, 100);
+
+    assert.strictEqual(isDeviceCliSupported('PC0'), true);
+    assert.strictEqual(isDeviceCliSupported('Laptop0'), true);
+    assert.strictEqual(isDeviceCliSupported('Server0'), true);
+    assert.strictEqual(isDeviceCliSupported('Router0'), true);
+    assert.strictEqual(isDeviceCliSupported('Switch0'), false);
+    assert.strictEqual(isDeviceCliSupported('NonExistentDevice'), false);
+});
+
+// 306. Help command output on end hosts (PC, Laptop, Server)
+runTest('306. Help command output on end hosts (PC, Laptop, Server)', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const resHelp = executeCliCommand('PC0', 'help');
+    assert.strictEqual(resHelp.success, true);
+    assert.ok(resHelp.output.includes('Commands available on PC0:'));
+    assert.ok(resHelp.output.includes('ipconfig'));
+    assert.ok(resHelp.output.includes('arp -a'));
+    assert.ok(resHelp.output.includes('clear'));
+
+    const resQuestion = executeCliCommand('PC0', '?');
+    assert.strictEqual(resQuestion.success, true);
+    assert.strictEqual(resQuestion.output, resHelp.output);
+});
+
+// 307. Help command output on Routers (Cisco IOS-style)
+runTest('307. Help command output on Routers (Cisco IOS-style)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const resHelp = executeCliCommand('Router0', 'help');
+    assert.strictEqual(resHelp.success, true);
+    assert.ok(resHelp.output.includes('Commands available on Router0 (Cisco IOS-style):'));
+    assert.ok(resHelp.output.includes('show ip route'));
+    assert.ok(resHelp.output.includes('show arp'));
+    assert.ok(resHelp.output.includes('show access-lists'));
+    assert.ok(resHelp.output.includes('clear'));
+});
+
+// 308. Clear command returns clear flag and empties terminal session logs
+runTest('308. Clear command returns clear flag and empties terminal session logs', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const session = getDeviceTerminalSession('PC0');
+    session.logs.push({ prompt: 'PC0>', command: 'ipconfig', output: 'dummy', status: 'success' });
+    assert.strictEqual(session.logs.length, 1);
+
+    const resClear = executeCliCommand('PC0', 'clear');
+    assert.strictEqual(resClear.success, true);
+    assert.strictEqual(resClear.clear, true);
+    assert.strictEqual(session.logs.length, 0);
+
+    const resCls = executeCliCommand('PC0', 'cls');
+    assert.strictEqual(resCls.success, true);
+    assert.strictEqual(resCls.clear, true);
+});
+
+// 309. ipconfig on configured end host renders IP, Mask, Gateway, MAC
+runTest('309. ipconfig on configured end host renders IP, Mask, Gateway, MAC', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const pc = networkState.devices[0];
+    pc.ip = '192.168.1.50';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+    pc.mac = '02:11:22:33:44:55';
+
+    const res = executeCliCommand('PC0', 'ipconfig');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.status, 'success');
+    assert.ok(res.output.includes('Windows IP Configuration'));
+    assert.ok(res.output.includes('IPv4 Address. . . . . . . . . . . : 192.168.1.50'));
+    assert.ok(res.output.includes('Subnet Mask . . . . . . . . . . . : 255.255.255.0'));
+    assert.ok(res.output.includes('Default Gateway . . . . . . . . . : 192.168.1.1'));
+    assert.ok(res.output.includes('Physical Address. . . . . . . . . : 02-11-22-33-44-55'));
+});
+
+// 310. ipconfig on unconfigured end host renders default 0.0.0.0 addresses
+runTest('310. ipconfig on unconfigured end host renders default 0.0.0.0 addresses', () => {
+    resetLab();
+    addDevice('laptop', 50, 100);
+    const res = executeCliCommand('Laptop0', 'ipconfig');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('IPv4 Address. . . . . . . . . . . : 0.0.0.0'));
+    assert.ok(res.output.includes('Subnet Mask . . . . . . . . . . . : 0.0.0.0'));
+    assert.ok(res.output.includes('Default Gateway . . . . . . . . . : 0.0.0.0'));
+});
+
+// 311. ipconfig /all and ifconfig aliases work on end hosts
+runTest('311. ipconfig /all and ifconfig aliases work on end hosts', () => {
+    resetLab();
+    addDevice('server', 50, 100);
+    const resAll = executeCliCommand('Server0', 'ipconfig /all');
+    assert.strictEqual(resAll.success, true);
+    assert.ok(resAll.output.includes('Windows IP Configuration'));
+
+    const resIfconfig = executeCliCommand('Server0', 'ifconfig');
+    assert.strictEqual(resIfconfig.success, true);
+    assert.ok(resIfconfig.output.includes('Windows IP Configuration'));
+});
+
+// 312. ipconfig on Router returns educational error message directing to router commands
+runTest('312. ipconfig on Router returns educational error message directing to router commands', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const res = executeCliCommand('Router0', 'ipconfig');
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.status, 'error');
+    assert.ok(res.output.includes("% 'ipconfig' is for end hosts (PC/Server)"));
+    assert.ok(res.output.includes("On Cisco IOS routers, use 'show ip route'"));
+});
+
+// 313. arp -a on end host with empty ARP cache returns "No ARP entries found"
+runTest('313. arp -a on end host with empty ARP cache returns "No ARP entries found"', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const res = executeCliCommand('PC0', 'arp -a');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('No ARP entries found.'));
+});
+
+// 314. arp -a on end host with learned entries renders formatted table
+runTest('314. arp -a on end host with learned entries renders formatted table', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const pc0 = networkState.devices[0];
+    pc0.ip = '192.168.1.10';
+
+    learnArp(pc0.id, '192.168.1.1', '02:00:00:11:22:33', { type: 'dynamic' });
+    learnArp(pc0.id, '192.168.1.20', '02:00:00:44:55:66', { type: 'dynamic' });
+
+    const res = executeCliCommand('PC0', 'arp -a');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Internet Address'));
+    assert.ok(res.output.includes('Physical Address'));
+    assert.ok(res.output.includes('192.168.1.1'));
+    assert.ok(res.output.includes('02:00:00:11:22:33'));
+    assert.ok(res.output.includes('192.168.1.20'));
+    assert.ok(res.output.includes('02:00:00:44:55:66'));
+});
+
+// 315. arp -a on Router returns educational error directing to 'show arp'
+runTest('315. arp -a on Router returns educational error directing to show arp', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const res = executeCliCommand('Router0', 'arp -a');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes("% 'arp -a' is an end host command"));
+    assert.ok(res.output.includes("On Cisco IOS routers, use 'show arp'"));
+});
+
+// 316. show ip route on Router renders connected and static routes with codes and interfaces
+runTest('316. show ip route on Router renders connected and static routes with codes and interfaces', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(r0.id, {
+        network: '192.168.2.0',
+        subnetMask: '255.255.255.0',
+        nextHop: '192.168.1.2',
+        interface: 'Gig0/0',
+        adminDistance: 1,
+        metric: 0
+    });
+
+    const res = executeCliCommand('Router0', 'show ip route');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Codes: C - connected, S - static'));
+    assert.ok(res.output.includes('192.168.1.0/24 is directly connected, Gig0/0'));
+    assert.ok(res.output.includes('192.168.2.0/24 [1/0] via 192.168.1.2, Gig0/0'));
+});
+
+// 317. show ip route on Router indicates inactive status when interface is shut down
+runTest('317. show ip route on Router indicates inactive status when interface is shut down', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addStaticRoute(r0.id, {
+        network: '10.0.0.0',
+        subnetMask: '255.0.0.0',
+        nextHop: '192.168.1.254',
+        interface: 'Gig0/0',
+        adminDistance: 10,
+        metric: 0
+    });
+
+    // Shut down Gig0/0
+    toggleRouterInterfaceStatus(r0.id, 'Gig0/0');
+    assert.strictEqual(r0.interfaces['Gig0/0'].status, 'down');
+
+    const res = executeCliCommand('Router0', 'show ip route');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('10.0.0.0/8 [10/0] via 192.168.1.254, Gig0/0 (inactive - interface down)'));
+});
+
+// 318. show ip route on empty routing table returns clear empty message
+runTest('318. show ip route on empty routing table returns clear empty message', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const res = executeCliCommand('Router0', 'show ip route');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Routing table is empty.'));
+});
+
+// 319. show ip route on end host returns educational error explaining router command
+runTest('319. show ip route on end host returns educational error explaining router command', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const res = executeCliCommand('PC0', 'show ip route');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes("% 'show ip route' is a Cisco IOS router command"));
+    assert.ok(res.output.includes("End hosts use 'ipconfig' or their default gateway"));
+});
+
+// 320. show arp on Router renders Cisco IOS style ARP table with IP, MAC, and interface
+runTest('320. show arp on Router renders Cisco IOS style ARP table with IP, MAC, and interface', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    learnArp(r0.id, '192.168.1.10', '02:00:00:aa:bb:cc', { interface: 'Gig0/0', type: 'dynamic' });
+
+    const res = executeCliCommand('Router0', 'show arp');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Protocol  Address'));
+    assert.ok(res.output.includes('Hardware Addr'));
+    assert.ok(res.output.includes('Internet'));
+    assert.ok(res.output.includes('192.168.1.10'));
+    assert.ok(res.output.includes('02:00:00:aa:bb:cc'));
+    assert.ok(res.output.includes('Gig0/0'));
+});
+
+// 321. show arp on Router with empty cache returns "No ARP entries found"
+runTest('321. show arp on Router with empty cache returns "No ARP entries found"', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const res = executeCliCommand('Router0', 'show arp');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('No ARP entries found.'));
+});
+
+// 322. show arp on end host returns educational error directing to 'arp -a'
+runTest('322. show arp on end host returns educational error directing to arp -a', () => {
+    resetLab();
+    addDevice('laptop', 50, 100);
+    const res = executeCliCommand('Laptop0', 'show arp');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes("% 'show arp' is a Cisco IOS router command"));
+    assert.ok(res.output.includes("On end hosts, use 'arp -a'"));
+});
+
+// 323. show access-lists on Router renders Standard and Extended ACL rules and hit counters
+runTest('323. show access-lists on Router renders Standard and Extended ACL rules and hit counters', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+
+    createRouterAcl(r0.id, '10', 'standard');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.10', sequence: 10 });
+    addRouterAclRule(r0.id, '10', { action: 'deny', sourceIp: 'any', sequence: 20 });
+
+    const acls = getRouterAcls(r0.id);
+    acls['10'].rules[0].hits = 5;
+
+    createRouterAcl(r0.id, '100', 'extended');
+    addRouterAclRule(r0.id, '100', {
+        action: 'permit',
+        protocol: 'icmp',
+        sourceIp: '192.168.1.0',
+        sourceWildcard: '0.0.0.255',
+        destinationIp: '192.168.2.10',
+        sequence: 10
+    });
+
+    const res = executeCliCommand('Router0', 'show access-lists');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Standard IP access list 10'));
+    assert.ok(res.output.includes('10 permit host 192.168.1.10 (5 matches)'));
+    assert.ok(res.output.includes('20 deny any (0 matches)'));
+    assert.ok(res.output.includes('Extended IP access list 100'));
+    assert.ok(res.output.includes('10 permit icmp 192.168.1.0 0.0.0.255 host 192.168.2.10 (0 matches)'));
+});
+
+// 324. show access-lists on Router with no ACLs returns "No access lists configured"
+runTest('324. show access-lists on Router with no ACLs returns "No access lists configured"', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const res = executeCliCommand('Router0', 'show access-lists');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('No access lists configured.'));
+});
+
+// 325. show access-lists on end host returns educational error explaining router command
+runTest('325. show access-lists on end host returns educational error explaining router command', () => {
+    resetLab();
+    addDevice('server', 50, 100);
+    const res = executeCliCommand('Server0', 'show access-lists');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes("% 'show access-lists' is a Cisco IOS router command"));
+    assert.ok(res.output.includes('Access Control Lists are configured on routers'));
+});
+
+// 326. Case-insensitivity and multiple whitespace tokens handling in CLI command engine
+runTest('326. Case-insensitivity and multiple whitespace tokens handling in CLI command engine', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.0.0.0';
+
+    const resUpper = executeCliCommand('Router0', '   SHOW    IP    ROUTE   ');
+    assert.strictEqual(resUpper.success, true);
+    assert.ok(resUpper.output.includes('10.0.0.0/8 is directly connected'));
+
+    const resMixed = executeCliCommand('Router0', 'ShOw  ArP');
+    assert.strictEqual(resMixed.success, true);
+});
+
+// 327. Common utilities preview messages for ping and traceroute in Phase 1
+runTest('327. Common utilities preview messages for ping and traceroute in Phase 1', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const resPing = executeCliCommand('PC0', 'ping 192.168.1.1');
+    assert.strictEqual(resPing.success, false);
+    assert.ok(resPing.output.includes("% 'ping' will be fully simulated in Phase 2 CLI"));
+
+    const resTrace = executeCliCommand('PC0', 'traceroute 192.168.1.1');
+    assert.strictEqual(resTrace.success, false);
+    assert.ok(resTrace.output.includes("% 'traceroute' will be fully simulated in Phase 2 CLI"));
+});
+
+// 328. Educational error message for arbitrary unsupported/unknown commands
+runTest('328. Educational error message for arbitrary unsupported/unknown commands', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const resUnknown = executeCliCommand('PC0', 'nonexistent_command_123');
+    assert.strictEqual(resUnknown.success, false);
+    assert.ok(resUnknown.output.includes('% Invalid command or syntax: "nonexistent_command_123"'));
+    assert.ok(resUnknown.output.includes('Type "help" or "?" to see available commands'));
+});
+
+// 329. Command history recording and retrieval via getCliCommandHistory
+runTest('329. Command history recording and retrieval via getCliCommandHistory', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    clearCliTerminal('PC0');
+    const session = getDeviceTerminalSession('PC0');
+    session.history = [];
+
+    executeCliCommand('PC0', 'ipconfig');
+    executeCliCommand('PC0', 'arp -a');
+    executeCliCommand('PC0', 'help');
+
+    const history = getCliCommandHistory('PC0');
+    assert.deepStrictEqual(history, ['ipconfig', 'arp -a', 'help']);
+});
+
+// 330. Device Inspector HTML renders Open Terminal button for PC, Laptop, Server
+runTest('330. Device Inspector HTML renders Open Terminal button for PC, Laptop, Server', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    const pc0 = networkState.devices[0];
+    networkState.selectedDeviceId = pc0.id;
+
+    renderPropertiesPanel();
+    const panel = document.getElementById('propertiesPanel');
+    assert.ok(panel.innerHTML.includes('openDeviceTerminalBtn'), 'Must render openDeviceTerminalBtn');
+    assert.ok(panel.innerHTML.includes('Open Terminal / CLI'), 'Must render button label');
+});
+
+// 331. Router Inspector HTML renders Open Router Console button
+runTest('331. Router Inspector HTML renders Open Router Console button', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    networkState.selectedDeviceId = r0.id;
+
+    renderPropertiesPanel();
+    const panel = document.getElementById('propertiesPanel');
+    assert.ok(panel.innerHTML.includes('openRouterTerminalBtn'), 'Must render openRouterTerminalBtn');
+    assert.ok(panel.innerHTML.includes('Open Router Console / CLI'), 'Must render router console button label');
+});
+
+// 332. Switch Inspector HTML does NOT render Open Terminal button
+runTest('332. Switch Inspector HTML does NOT render Open Terminal button', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw0 = networkState.devices[0];
+    networkState.selectedDeviceId = sw0.id;
+
+    renderPropertiesPanel();
+    const panel = document.getElementById('propertiesPanel');
+    assert.strictEqual(panel.innerHTML.includes('openDeviceTerminalBtn'), false);
+    assert.strictEqual(panel.innerHTML.includes('openRouterTerminalBtn'), false);
+});
+
+// 333. Terminal session state does not corrupt topology snapshots or undo/redo
+runTest('333. Terminal session state does not corrupt topology snapshots or undo/redo', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    networkState.devices[0].ip = '192.168.1.10';
+
+    pushHistory();
+    networkState.devices[0].ip = '192.168.1.20';
+
+    // Execute CLI commands which update terminal session runtime
+    executeCliCommand('PC0', 'ipconfig');
+    executeCliCommand('PC0', 'help');
+
+    // Undo should restore previous IP without error
+    undo();
+    assert.strictEqual(networkState.devices[0].ip, '192.168.1.10');
+
+    // Redo should restore modified IP
+    redo();
+    assert.strictEqual(networkState.devices[0].ip, '192.168.1.20');
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
