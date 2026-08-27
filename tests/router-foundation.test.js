@@ -13037,6 +13037,879 @@ runTest('432. End-to-end full CLI configuration of switch VLANs and access ports
     assert.strictEqual(pingCross.success, false);
 });
 
+// =========================================================================
+// V5.12 Phase 2: IEEE 802.1Q Trunking Tests (Tests 433 - 479)
+// =========================================================================
+
+// 433. Switchport default configuration is access mode with access VLAN 1, native VLAN 1, and allowed VLANs 'all'
+runTest('433. Switchport default configuration is access mode with access VLAN 1, native VLAN 1, and allowed VLANs all', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    const cfg = getSwitchPortConfig(sw, 'Fa0/1');
+    assert.strictEqual(cfg.mode, 'access');
+    assert.strictEqual(cfg.accessVlan, 1);
+    assert.strictEqual(cfg.nativeVlan, 1);
+    assert.strictEqual(cfg.allowedVlans, 'all');
+});
+
+// 434. setSwitchPortMode switches port to trunk mode and initializes trunk defaults
+runTest('434. setSwitchPortMode switches port to trunk mode and initializes trunk defaults', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    setSwitchPortMode(sw, 'Fa0/24', 'trunk');
+    const cfg = getSwitchPortConfig(sw, 'Fa0/24');
+    assert.strictEqual(cfg.mode, 'trunk');
+    assert.strictEqual(cfg.nativeVlan, 1);
+    assert.strictEqual(cfg.allowedVlans, 'all');
+});
+
+// 435. setSwitchPortMode rejects invalid port modes
+runTest('435. setSwitchPortMode rejects invalid port modes', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    assert.throws(() => {
+        setSwitchPortMode(sw, 'Fa0/1', 'dynamic');
+    }, /Mode "dynamic" is not supported/);
+});
+
+// 436. setSwitchPortMode switching back from trunk to access preserves access VLAN
+runTest('436. setSwitchPortMode switching back from trunk to access preserves access VLAN', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    createSwitchVlan(sw, 10, 'Sales');
+    setSwitchPortAccessVlan(sw, 'Fa0/5', 10);
+    setSwitchPortMode(sw, 'Fa0/5', 'trunk');
+    setSwitchPortMode(sw, 'Fa0/5', 'access');
+    const cfg = getSwitchPortConfig(sw, 'Fa0/5');
+    assert.strictEqual(cfg.mode, 'access');
+    assert.strictEqual(cfg.accessVlan, 10);
+});
+
+// 437. getSwitchPortConfig returns complete trunk configuration
+runTest('437. getSwitchPortConfig returns complete trunk configuration', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    createSwitchVlan(sw, 99, 'Management');
+    setSwitchPortMode(sw, 'Fa0/24', 'trunk');
+    setSwitchPortNativeVlan(sw, 'Fa0/24', 99);
+    setSwitchPortAllowedVlans(sw, 'Fa0/24', 'set', '10,20,99');
+    const cfg = getSwitchPortConfig(sw, 'Fa0/24');
+    assert.strictEqual(cfg.mode, 'trunk');
+    assert.strictEqual(cfg.nativeVlan, 99);
+    assert.strictEqual(cfg.allowedVlans.length, 3);
+    assert.strictEqual(cfg.allowedVlans[0], 10);
+    assert.strictEqual(cfg.allowedVlans[1], 20);
+    assert.strictEqual(cfg.allowedVlans[2], 99);
+});
+
+// 438. setSwitchPortNativeVlan configures valid native VLAN on trunk port
+runTest('438. setSwitchPortNativeVlan configures valid native VLAN on trunk port', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    createSwitchVlan(sw, 10, 'Data');
+    setSwitchPortMode(sw, 'Fa0/1', 'trunk');
+    setSwitchPortNativeVlan(sw, 'Fa0/1', 10);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').nativeVlan, 10);
+});
+
+// 439. setSwitchPortNativeVlan rejects invalid VLAN ID format or out-of-range
+runTest('439. setSwitchPortNativeVlan rejects invalid VLAN ID format or out-of-range', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    setSwitchPortMode(sw, 'Fa0/1', 'trunk');
+    assert.throws(() => {
+        setSwitchPortNativeVlan(sw, 'Fa0/1', 5000);
+    }, /Invalid VLAN ID/);
+});
+
+// 440. setSwitchPortNativeVlan throws error if executed on an access port
+runTest('440. setSwitchPortNativeVlan throws error if executed on an access port', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    createSwitchVlan(sw, 10, 'Data');
+    assert.throws(() => {
+        setSwitchPortNativeVlan(sw, 'Fa0/1', 10);
+    }, /is not in trunk mode/);
+});
+
+// 441. setSwitchPortNativeVlan throws error if target VLAN does not exist on the switch
+runTest('441. setSwitchPortNativeVlan throws error if target VLAN does not exist on the switch', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    setSwitchPortMode(sw, 'Fa0/1', 'trunk');
+    assert.throws(() => {
+        setSwitchPortNativeVlan(sw, 'Fa0/1', 100);
+    }, /does not exist on switch/);
+});
+
+// 442. parseAllowedVlanSpec parses 'all' keyword
+runTest('442. parseAllowedVlanSpec parses all keyword', () => {
+    assert.strictEqual(parseAllowedVlanSpec('all'), 'all');
+    assert.strictEqual(parseAllowedVlanSpec('ALL'), 'all');
+});
+
+// 443. parseAllowedVlanSpec parses single ID, comma-separated lists, and numeric arrays
+runTest('443. parseAllowedVlanSpec parses single ID, comma-separated lists, and numeric arrays', () => {
+    const res1 = parseAllowedVlanSpec('10');
+    assert.strictEqual(res1.length, 1);
+    assert.strictEqual(res1[0], 10);
+
+    const res2 = parseAllowedVlanSpec('10, 20, 30');
+    assert.strictEqual(res2.length, 3);
+    assert.strictEqual(res2[0], 10);
+    assert.strictEqual(res2[1], 20);
+    assert.strictEqual(res2[2], 30);
+});
+
+// 444. parseAllowedVlanSpec parses VLAN ranges
+runTest('444. parseAllowedVlanSpec parses VLAN ranges', () => {
+    const res = parseAllowedVlanSpec('1-3, 10-12');
+    assert.strictEqual(res.length, 6);
+    assert.strictEqual(res[0], 1);
+    assert.strictEqual(res[1], 2);
+    assert.strictEqual(res[2], 3);
+    assert.strictEqual(res[3], 10);
+    assert.strictEqual(res[4], 11);
+    assert.strictEqual(res[5], 12);
+});
+
+// 445. parseAllowedVlanSpec deduplicates and sorts VLAN numbers in ascending order
+runTest('445. parseAllowedVlanSpec deduplicates and sorts VLAN numbers in ascending order', () => {
+    const res = parseAllowedVlanSpec('30, 10, 20, 10, 30');
+    assert.strictEqual(res.length, 3);
+    assert.strictEqual(res[0], 10);
+    assert.strictEqual(res[1], 20);
+    assert.strictEqual(res[2], 30);
+});
+
+// 446. parseAllowedVlanSpec rejects invalid VLAN numbers and malformed ranges
+runTest('446. parseAllowedVlanSpec rejects invalid VLAN numbers and malformed ranges', () => {
+    assert.throws(() => {
+        parseAllowedVlanSpec('10, 5000');
+    }, /Invalid VLAN ID/);
+    assert.throws(() => {
+        parseAllowedVlanSpec('20-10');
+    }, /Invalid VLAN range/);
+});
+
+// 447. setSwitchPortAllowedVlans 'add' action adds VLANs to current allowed list
+runTest('447. setSwitchPortAllowedVlans add action adds VLANs to current allowed list', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    setSwitchPortMode(sw, 'Fa0/1', 'trunk');
+    setSwitchPortAllowedVlans(sw, 'Fa0/1', 'set', '10, 20');
+    setSwitchPortAllowedVlans(sw, 'Fa0/1', 'add', '30');
+    const cfg = getSwitchPortConfig(sw, 'Fa0/1');
+    assert.strictEqual(cfg.allowedVlans.length, 3);
+    assert.strictEqual(cfg.allowedVlans[2], 30);
+});
+
+// 448. setSwitchPortAllowedVlans 'remove' action removes specified VLANs from allowed list
+runTest('448. setSwitchPortAllowedVlans remove action removes specified VLANs from allowed list', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    setSwitchPortMode(sw, 'Fa0/1', 'trunk');
+    setSwitchPortAllowedVlans(sw, 'Fa0/1', 'set', '10, 20, 30');
+    setSwitchPortAllowedVlans(sw, 'Fa0/1', 'remove', '20');
+    const cfg = getSwitchPortConfig(sw, 'Fa0/1');
+    assert.strictEqual(cfg.allowedVlans.length, 2);
+    assert.strictEqual(cfg.allowedVlans[0], 10);
+    assert.strictEqual(cfg.allowedVlans[1], 30);
+});
+
+// 449. setSwitchPortAllowedVlans 'except' action allows all VLANs except specified list
+runTest('449. setSwitchPortAllowedVlans except action allows all VLANs except specified list', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    setSwitchPortMode(sw, 'Fa0/1', 'trunk');
+    setSwitchPortAllowedVlans(sw, 'Fa0/1', 'except', '100');
+    const cfg = getSwitchPortConfig(sw, 'Fa0/1');
+    assert.strictEqual(isVlanAllowedOnTrunk(cfg, 100), false);
+    assert.strictEqual(isVlanAllowedOnTrunk(cfg, 10), true);
+});
+
+// 450. setSwitchPortAllowedVlans throws error if port is in access mode
+runTest('450. setSwitchPortAllowedVlans throws error if port is in access mode', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    assert.throws(() => {
+        setSwitchPortAllowedVlans(sw, 'Fa0/1', 'set', '10,20');
+    }, /is not in trunk mode/);
+});
+
+// 451. CLI 'switchport mode trunk' configures trunk mode on switch interface
+runTest('451. CLI switchport mode trunk configures trunk mode on switch interface', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/24');
+    const res = executeCliCommand('Switch0', 'switchport mode trunk');
+    assert.strictEqual(res.success, true);
+    const cfg = getSwitchPortConfig('Switch0', 'Fa0/24');
+    assert.strictEqual(cfg.mode, 'trunk');
+});
+
+// 452. CLI 'switchport trunk native vlan <id>' configures trunk native VLAN and validates existence
+runTest('452. CLI switchport trunk native vlan <id> configures trunk native VLAN and validates existence', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'vlan 99');
+    executeCliCommand('Switch0', 'interface Fa0/24');
+    executeCliCommand('Switch0', 'switchport mode trunk');
+    const res = executeCliCommand('Switch0', 'switchport trunk native vlan 99');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getSwitchPortConfig('Switch0', 'Fa0/24').nativeVlan, 99);
+
+    const failRes = executeCliCommand('Switch0', 'switchport trunk native vlan 500');
+    assert.strictEqual(failRes.success, false);
+    assert.ok(failRes.output.includes('Native VLAN 500 does not exist'));
+});
+
+// 453. CLI 'switchport trunk allowed vlan [all|add|remove|except|<list>]' sets and modifies allowed VLANs
+runTest('453. CLI switchport trunk allowed vlan commands set and modify allowed VLANs', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/24');
+    executeCliCommand('Switch0', 'switchport mode trunk');
+
+    executeCliCommand('Switch0', 'switchport trunk allowed vlan 10,20,30');
+    let cfg = getSwitchPortConfig('Switch0', 'Fa0/24');
+    assert.strictEqual(cfg.allowedVlans.length, 3);
+
+    executeCliCommand('Switch0', 'switchport trunk allowed vlan add 40');
+    cfg = getSwitchPortConfig('Switch0', 'Fa0/24');
+    assert.strictEqual(cfg.allowedVlans.length, 4);
+
+    executeCliCommand('Switch0', 'switchport trunk allowed vlan remove 20');
+    cfg = getSwitchPortConfig('Switch0', 'Fa0/24');
+    assert.strictEqual(cfg.allowedVlans.length, 3);
+    assert.strictEqual(cfg.allowedVlans.includes(20), false);
+
+    executeCliCommand('Switch0', 'switchport trunk allowed vlan all');
+    cfg = getSwitchPortConfig('Switch0', 'Fa0/24');
+    assert.strictEqual(cfg.allowedVlans, 'all');
+});
+
+// 454. CLI rejects trunk commands on access ports with educational message
+runTest('454. CLI rejects trunk commands on access ports with educational message', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    const res = executeCliCommand('Switch0', 'switchport trunk native vlan 10');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('is not in trunk mode'));
+});
+
+// 455. CLI 'show interfaces trunk' renders formatted trunk table
+runTest('455. CLI show interfaces trunk renders formatted trunk table', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'vlan 10');
+    executeCliCommand('Switch0', 'interface Fa0/24');
+    executeCliCommand('Switch0', 'switchport mode trunk');
+    executeCliCommand('Switch0', 'switchport trunk allowed vlan 1,10');
+    executeCliCommand('Switch0', 'end');
+
+    const res = executeCliCommand('Switch0', 'show interfaces trunk');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Fa0/24'));
+    assert.ok(res.output.includes('802.1q'));
+    assert.ok(res.output.includes('trunking'));
+    assert.ok(res.output.includes('1, 10'));
+});
+
+// 456. CLI 'show interfaces <port> switchport' displays operational mode, native VLAN, and allowed VLANs
+runTest('456. CLI show interfaces <port> switchport displays operational mode, native VLAN, and allowed VLANs', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/24');
+    executeCliCommand('Switch0', 'switchport mode trunk');
+    executeCliCommand('Switch0', 'switchport trunk allowed vlan 10,20');
+    executeCliCommand('Switch0', 'end');
+
+    const res = executeCliCommand('Switch0', 'show interfaces Fa0/24 switchport');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Name: Fa0/24'));
+    assert.ok(res.output.includes('Administrative Mode: trunk'));
+    assert.ok(res.output.includes('Operational Mode: trunk'));
+    assert.ok(res.output.includes('Trunking VLANs Enabled: 10, 20'));
+});
+
+// 457. classifyFrameIngress on access port accepts untagged frame and classifies to access VLAN
+runTest('457. classifyFrameIngress on access port accepts untagged frame and classifies to access VLAN', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    createSwitchVlan(sw, 10, 'Data');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+    const frame = { events: [] };
+    const res = classifyFrameIngress(sw, 'Fa0/1', frame);
+    assert.strictEqual(res.accepted, true);
+    assert.strictEqual(res.ingressVlan, 10);
+});
+
+// 458. classifyFrameIngress on access port drops 802.1Q tagged frame
+runTest('458. classifyFrameIngress on access port drops 802.1Q tagged frame', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    const frame = {
+        vlanTag: { vlanId: 10, tpid: '0x8100', priority: 0, isTagged: true }
+    };
+    const res = classifyFrameIngress(sw, 'Fa0/1', frame);
+    assert.strictEqual(res.accepted, false);
+    assert.ok(res.reason.includes('received 802.1Q tagged frame'));
+});
+
+// 459. classifyFrameIngress on trunk port accepts 802.1Q tagged frame if VLAN is allowed
+runTest('459. classifyFrameIngress on trunk port accepts 802.1Q tagged frame if VLAN is allowed', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    setSwitchPortMode(sw, 'Fa0/24', 'trunk');
+    setSwitchPortAllowedVlans(sw, 'Fa0/24', 'set', '10,20');
+    const frame = {
+        vlanTag: { vlanId: 20, tpid: '0x8100', priority: 0, isTagged: true }
+    };
+    const res = classifyFrameIngress(sw, 'Fa0/24', frame);
+    assert.strictEqual(res.accepted, true);
+    assert.strictEqual(res.ingressVlan, 20);
+});
+
+// 460. classifyFrameIngress on trunk port drops 802.1Q tagged frame if VLAN is not allowed
+runTest('460. classifyFrameIngress on trunk port drops 802.1Q tagged frame if VLAN is not allowed', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    setSwitchPortMode(sw, 'Fa0/24', 'trunk');
+    setSwitchPortAllowedVlans(sw, 'Fa0/24', 'set', '10,20');
+    const frame = {
+        vlanTag: { vlanId: 30, tpid: '0x8100', priority: 0, isTagged: true }
+    };
+    const res = classifyFrameIngress(sw, 'Fa0/24', frame);
+    assert.strictEqual(res.accepted, false);
+    assert.ok(res.reason.includes('not in allowed VLAN list'));
+});
+
+// 461. classifyFrameIngress on trunk port accepts untagged frame and classifies to native VLAN
+runTest('461. classifyFrameIngress on trunk port accepts untagged frame and classifies to native VLAN', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    createSwitchVlan(sw, 99, 'Management');
+    setSwitchPortMode(sw, 'Fa0/24', 'trunk');
+    setSwitchPortNativeVlan(sw, 'Fa0/24', 99);
+    const frame = { events: [] };
+    const res = classifyFrameIngress(sw, 'Fa0/24', frame);
+    assert.strictEqual(res.accepted, true);
+    assert.strictEqual(res.ingressVlan, 99);
+});
+
+// 462. getEgressTagAction on trunk port tags non-native VLAN with 802.1Q tag
+runTest('462. getEgressTagAction on trunk port tags non-native VLAN with 802.1Q tag', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    setSwitchPortMode(sw, 'Fa0/24', 'trunk');
+    const cfg = getSwitchPortConfig(sw, 'Fa0/24');
+    const action = getEgressTagAction(cfg, 10);
+    assert.strictEqual(action.allowed, true);
+    assert.strictEqual(action.isTagged, true);
+    assert.strictEqual(action.vlanTag.vlanId, 10);
+    assert.strictEqual(action.vlanTag.tpid, '0x8100');
+});
+
+// 463. getEgressTagAction on trunk port transmits native VLAN frame untagged
+runTest('463. getEgressTagAction on trunk port transmits native VLAN frame untagged', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    createSwitchVlan(sw, 10, 'Native');
+    setSwitchPortMode(sw, 'Fa0/24', 'trunk');
+    setSwitchPortNativeVlan(sw, 'Fa0/24', 10);
+    const cfg = getSwitchPortConfig(sw, 'Fa0/24');
+    const action = getEgressTagAction(cfg, 10);
+    assert.strictEqual(action.allowed, true);
+    assert.strictEqual(action.isTagged, false);
+});
+
+// 464. getEgressTagAction on access port transmits frame untagged
+runTest('464. getEgressTagAction on access port transmits frame untagged', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    createSwitchVlan(sw, 10, 'Sales');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+    const cfg = getSwitchPortConfig(sw, 'Fa0/1');
+    const action = getEgressTagAction(cfg, 10);
+    assert.strictEqual(action.allowed, true);
+    assert.strictEqual(action.isTagged, false);
+});
+
+// 465. Multi-switch trunking: PC0 (VLAN 10) on Switch0 reaches PC1 (VLAN 10) on Switch1 across 802.1Q trunk
+runTest('465. Multi-switch trunking: PC0 (VLAN 10) on Switch0 reaches PC1 (VLAN 10) on Switch1 across 802.1Q trunk', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('switch', 450, 100);
+    addDevice('pc', 600, 100);
+
+    const pc0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+    const sw1 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    pc0.ip = '10.10.10.1';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '10.10.10.2';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0'); // Fa0/1 on Switch0
+    addConnection('Switch0', 'Switch1'); // Fa0/2 on Switch0, Fa0/1 on Switch1
+    addConnection('Switch1', 'PC1'); // Fa0/2 on Switch1
+
+    createSwitchVlan(sw0, 10, 'Sales');
+    createSwitchVlan(sw1, 10, 'Sales');
+
+    setSwitchPortAccessVlan(sw0, 'Fa0/1', 10);
+    setSwitchPortMode(sw0, 'Fa0/2', 'trunk');
+
+    setSwitchPortMode(sw1, 'Fa0/1', 'trunk');
+    setSwitchPortAccessVlan(sw1, 'Fa0/2', 10);
+
+    const frame = {
+        events: [],
+        protocol: 'ICMP',
+        sourceIp: pc0.ip,
+        destinationIp: pc1.ip,
+        sourceMac: pc0.mac,
+        destinationMac: pc1.mac
+    };
+
+    const res = simulatePathTransmission(frame, pc0, pc1, ['PC0', 'Switch0', 'Switch1', 'PC1']);
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.action, 'FORWARD');
+});
+
+// 466. Multi-switch trunking: VLAN 20 traffic remains strictly isolated from VLAN 10 across trunk
+runTest('466. Multi-switch trunking: VLAN 20 traffic remains strictly isolated from VLAN 10 across trunk', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('switch', 450, 100);
+    addDevice('pc', 600, 100);
+
+    const pc0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+    const sw1 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    pc0.ip = '10.10.10.1';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '10.20.20.1';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Switch1');
+    addConnection('Switch1', 'PC1');
+
+    createSwitchVlan(sw0, 10, 'Sales');
+    createSwitchVlan(sw1, 20, 'HR');
+
+    setSwitchPortAccessVlan(sw0, 'Fa0/1', 10);
+    setSwitchPortMode(sw0, 'Fa0/2', 'trunk');
+
+    setSwitchPortMode(sw1, 'Fa0/1', 'trunk');
+    setSwitchPortAccessVlan(sw1, 'Fa0/2', 20);
+
+    const frame = {
+        events: [],
+        protocol: 'ICMP',
+        sourceIp: pc0.ip,
+        destinationIp: pc1.ip,
+        sourceMac: pc0.mac,
+        destinationMac: pc1.mac
+    };
+
+    const res = simulatePathTransmission(frame, pc0, pc1, ['PC0', 'Switch0', 'Switch1', 'PC1']);
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.action, 'DROP');
+});
+
+// 467. Multi-switch trunking: Disallowed VLAN on trunk is dropped
+runTest('467. Multi-switch trunking: Disallowed VLAN on trunk is dropped', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('switch', 450, 100);
+    addDevice('pc', 600, 100);
+
+    const pc0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+    const sw1 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Switch1');
+    addConnection('Switch1', 'PC1');
+
+    createSwitchVlan(sw0, 30, 'Guest');
+    createSwitchVlan(sw1, 30, 'Guest');
+
+    setSwitchPortAccessVlan(sw0, 'Fa0/1', 30);
+    setSwitchPortMode(sw0, 'Fa0/2', 'trunk');
+    // Only allow VLAN 10 and 20 on the trunk
+    setSwitchPortAllowedVlans(sw0, 'Fa0/2', 'set', '10,20');
+
+    setSwitchPortMode(sw1, 'Fa0/1', 'trunk');
+    setSwitchPortAccessVlan(sw1, 'Fa0/2', 30);
+
+    const frame = {
+        events: [],
+        protocol: 'ICMP',
+        sourceIp: '10.30.30.1',
+        destinationIp: '10.30.30.2',
+        sourceMac: pc0.mac,
+        destinationMac: pc1.mac
+    };
+
+    const res = simulatePathTransmission(frame, pc0, pc1, ['PC0', 'Switch0', 'Switch1', 'PC1']);
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.action, 'DROP');
+});
+
+// 468. Flooding: Unknown unicast flood traverses trunk ports tagged with non-native VLAN
+runTest('468. Flooding: Unknown unicast flood traverses trunk ports tagged with non-native VLAN', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('switch', 450, 100);
+
+    const pc0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+    const sw1 = networkState.devices[2];
+
+    addConnection('PC0', 'Switch0'); // Fa0/1
+    addConnection('Switch0', 'Switch1'); // Fa0/2
+
+    createSwitchVlan(sw0, 10, 'Data');
+    setSwitchPortAccessVlan(sw0, 'Fa0/1', 10);
+    setSwitchPortMode(sw0, 'Fa0/2', 'trunk');
+
+    const frame = {
+        events: [],
+        protocol: 'ICMP',
+        sourceIp: '10.10.10.1',
+        destinationIp: '10.10.10.99',
+        sourceMac: pc0.mac,
+        destinationMac: '00:88:88:88:88:88'
+    };
+
+    const res = simulatePathTransmission(frame, pc0, sw1, ['PC0', 'Switch0', 'Switch1']);
+    const floodHop = res.hopActions.find(h => h.action === 'FLOOD');
+    assert.ok(floodHop, 'Must flood unknown unicast');
+    assert.strictEqual(floodHop.egressPorts.includes('Fa0/2'), true);
+});
+
+// 469. Flooding: Broadcast flood traverses trunk ports and is untagged on native VLAN
+runTest('469. Flooding: Broadcast flood traverses trunk ports and is untagged on native VLAN', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('switch', 450, 100);
+
+    const pc0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Switch1');
+
+    setSwitchPortAccessVlan(sw0, 'Fa0/1', 1);
+    setSwitchPortMode(sw0, 'Fa0/2', 'trunk'); // Native VLAN = 1
+
+    const frame = {
+        events: [],
+        protocol: 'ARP',
+        sourceMac: pc0.mac,
+        destinationMac: 'FF:FF:FF:FF:FF:FF'
+    };
+
+    const res = simulatePathTransmission(frame, pc0, networkState.devices[2], ['PC0', 'Switch0', 'Switch1']);
+    const floodHop = res.hopActions.find(h => h.action === 'FLOOD');
+    assert.ok(floodHop);
+    assert.strictEqual(floodHop.egressPorts.includes('Fa0/2'), true);
+    // Because VLAN is native (1), outgoing frame has no vlanTag
+    assert.strictEqual(frame.vlanTag, undefined);
+});
+
+// 470. MAC Learning: MAC addresses learned over trunk port are correctly associated with the 802.1Q tag's VLAN ID
+runTest('470. MAC Learning: MAC addresses learned over trunk port are correctly associated with the 802.1Q tag VLAN ID', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    createSwitchVlan(sw, 20, 'Voice');
+    setSwitchPortMode(sw, 'Fa0/24', 'trunk');
+
+    const frame = {
+        events: [],
+        sourceMac: '00:AA:BB:CC:DD:EE',
+        destinationMac: 'FF:FF:FF:FF:FF:FF',
+        vlanTag: { vlanId: 20, tpid: '0x8100', priority: 0, isTagged: true }
+    };
+
+    learnSwitchMac(sw.id, frame.sourceMac, 'RemoteDev', 'Fa0/24', 20);
+    const entryVlan20 = getSwitchMacEntry(sw.id, '00:AA:BB:CC:DD:EE', 20);
+    const entryVlan10 = getSwitchMacEntry(sw.id, '00:AA:BB:CC:DD:EE', 10);
+
+    assert.ok(entryVlan20, 'Entry must be present in VLAN 20');
+    assert.strictEqual(entryVlan20.port, 'Fa0/24');
+    assert.strictEqual(entryVlan10, null, 'Entry must NOT be present in VLAN 10');
+});
+
+// 471. ARP request broadcast crosses 802.1Q trunk to matching access VLAN host on remote switch
+runTest('471. ARP request broadcast crosses 802.1Q trunk to matching access VLAN host on remote switch', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('switch', 450, 100);
+    addDevice('pc', 600, 100);
+
+    const pc0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+    const sw1 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    pc0.ip = '192.168.10.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.10.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Switch1');
+    addConnection('Switch1', 'PC1');
+
+    createSwitchVlan(sw0, 10, 'Sales');
+    createSwitchVlan(sw1, 10, 'Sales');
+
+    setSwitchPortAccessVlan(sw0, 'Fa0/1', 10);
+    setSwitchPortMode(sw0, 'Fa0/2', 'trunk');
+
+    setSwitchPortMode(sw1, 'Fa0/1', 'trunk');
+    setSwitchPortAccessVlan(sw1, 'Fa0/2', 10);
+
+    const arpRes = simulateArpResolution(pc0, pc1.ip);
+    assert.strictEqual(arpRes.success, true);
+    assert.strictEqual(arpRes.targetMac, pc1.mac);
+});
+
+// 472. ARP resolution fails across trunk when access VLANs on endpoints do not match
+runTest('472. ARP resolution fails across trunk when access VLANs on endpoints do not match', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('switch', 450, 100);
+    addDevice('pc', 600, 100);
+
+    const pc0 = networkState.devices[0];
+    const sw0 = networkState.devices[1];
+    const sw1 = networkState.devices[2];
+    const pc1 = networkState.devices[3];
+
+    pc0.ip = '192.168.10.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.10.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0');
+    addConnection('Switch0', 'Switch1');
+    addConnection('Switch1', 'PC1');
+
+    createSwitchVlan(sw0, 10, 'Sales');
+    createSwitchVlan(sw1, 20, 'Marketing');
+
+    setSwitchPortAccessVlan(sw0, 'Fa0/1', 10);
+    setSwitchPortMode(sw0, 'Fa0/2', 'trunk');
+
+    setSwitchPortMode(sw1, 'Fa0/1', 'trunk');
+    setSwitchPortAccessVlan(sw1, 'Fa0/2', 20);
+
+    const arpRes = simulateArpResolution(pc0, pc1.ip);
+    assert.strictEqual(arpRes.success, false);
+});
+
+// 473. Native VLAN mismatch behavior: untagged traffic on native VLAN 10 ingresses to native VLAN 20
+runTest('473. Native VLAN mismatch behavior: untagged traffic on native VLAN 10 ingresses to native VLAN 20', () => {
+    resetLab();
+    addDevice('switch', 200, 100);
+    addDevice('switch', 400, 100);
+
+    const sw0 = networkState.devices[0];
+    const sw1 = networkState.devices[1];
+
+    createSwitchVlan(sw0, 10, 'NativeA');
+    createSwitchVlan(sw1, 20, 'NativeB');
+
+    setSwitchPortMode(sw0, 'Fa0/24', 'trunk');
+    setSwitchPortNativeVlan(sw0, 'Fa0/24', 10);
+
+    setSwitchPortMode(sw1, 'Fa0/24', 'trunk');
+    setSwitchPortNativeVlan(sw1, 'Fa0/24', 20);
+
+    // Egress from Switch0 on VLAN 10 (native) is UNTAGGED
+    const egressCfg0 = getSwitchPortConfig(sw0, 'Fa0/24');
+    const egressAction = getEgressTagAction(egressCfg0, 10);
+    assert.strictEqual(egressAction.isTagged, false);
+
+    // Switch1 receives untagged frame on trunk and classifies to its own native VLAN 20
+    const frame = { events: [] };
+    const ingressRes = classifyFrameIngress(sw1, 'Fa0/24', frame);
+    assert.strictEqual(ingressRes.accepted, true);
+    assert.strictEqual(ingressRes.ingressVlan, 20);
+});
+
+// 474. Packet Inspector displays IEEE 802.1Q VLAN TAG section for tagged frames
+runTest('474. Packet Inspector displays IEEE 802.1Q VLAN TAG section for tagged frames', () => {
+    const pkt = {
+        sourceMac: '00:11:22:33:44:55',
+        destinationMac: '00:66:77:88:99:AA',
+        protocol: 'ICMP',
+        vlanTag: {
+            vlanId: 10,
+            tpid: '0x8100',
+            priority: 0,
+            isTagged: true
+        }
+    };
+    const html = renderPacketInspector(pkt, { path: ['Switch0', 'Switch1'] });
+    assert.ok(html.includes('IEEE 802.1Q VLAN TAG'));
+    assert.ok(html.includes('0x8100'));
+    assert.ok(html.includes('10'));
+});
+
+// 475. Packet Inspector omits IEEE 802.1Q section for untagged frames
+runTest('475. Packet Inspector omits IEEE 802.1Q section for untagged frames', () => {
+    const pkt = {
+        sourceMac: '00:11:22:33:44:55',
+        destinationMac: '00:66:77:88:99:AA',
+        protocol: 'ICMP'
+    };
+    const html = renderPacketInspector(pkt, { path: ['PC0', 'Switch0'] });
+    assert.strictEqual(html.includes('IEEE 802.1Q VLAN TAG'), false);
+});
+
+// 476. Switch Inspector displays Switchports table with Mode, Native VLAN, and Allowed VLANs
+runTest('476. Switch Inspector displays Switchports table with Mode, Native VLAN, and Allowed VLANs', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    const sw = networkState.devices[0];
+    setSwitchPortMode(sw, 'Fa0/24', 'trunk');
+    setSwitchPortAllowedVlans(sw, 'Fa0/24', 'set', '10,20');
+
+    const html = renderSwitchInspector(sw);
+    assert.ok(html.includes('SWITCHPORTS'));
+    assert.ok(html.includes('Fa0/24'));
+    assert.ok(html.includes('trunk'));
+    assert.ok(html.includes('10, 20'));
+});
+
+// 477. End-to-End: Full CLI configuration of dual switches with access ports, 802.1Q trunk, native VLAN, and ping verification
+runTest('477. End-to-End: Full CLI configuration of dual switches with access ports, 802.1Q trunk, native VLAN, and ping verification', () => {
+    resetLab();
+    // Create 4 PCs and 2 Switches
+    addDevice('pc', 100, 100);     // PC0 (VLAN 10)
+    addDevice('pc', 100, 250);     // PC1 (VLAN 20)
+    addDevice('switch', 300, 175); // Switch0
+    addDevice('switch', 500, 175); // Switch1
+    addDevice('pc', 700, 100);     // PC2 (VLAN 10)
+    addDevice('pc', 700, 250);     // PC3 (VLAN 20)
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[1];
+    const sw0 = networkState.devices[2];
+    const sw1 = networkState.devices[3];
+    const pc2 = networkState.devices[4];
+    const pc3 = networkState.devices[5];
+
+    // Configure PC IPs
+    pc0.ip = '10.10.10.1'; pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '10.20.20.1'; pc1.subnetMask = '255.255.255.0';
+    pc2.ip = '10.10.10.2'; pc2.subnetMask = '255.255.255.0';
+    pc3.ip = '10.20.20.2'; pc3.subnetMask = '255.255.255.0';
+
+    // Connect topology
+    addConnection('PC0', 'Switch0');       // Switch0 Fa0/1
+    addConnection('PC1', 'Switch0');       // Switch0 Fa0/2
+    addConnection('Switch0', 'Switch1');   // Switch0 Fa0/3 <-> Switch1 Fa0/1
+    addConnection('Switch1', 'PC2');       // Switch1 Fa0/2
+    addConnection('Switch1', 'PC3');       // Switch1 Fa0/3
+
+    // Configure Switch0 via CLI
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'vlan 10');
+    executeCliCommand('Switch0', 'name Sales');
+    executeCliCommand('Switch0', 'vlan 20');
+    executeCliCommand('Switch0', 'name Engineering');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    executeCliCommand('Switch0', 'switchport mode access');
+    executeCliCommand('Switch0', 'switchport access vlan 10');
+    executeCliCommand('Switch0', 'interface Fa0/2');
+    executeCliCommand('Switch0', 'switchport mode access');
+    executeCliCommand('Switch0', 'switchport access vlan 20');
+    executeCliCommand('Switch0', 'interface Fa0/3');
+    executeCliCommand('Switch0', 'switchport mode trunk');
+    executeCliCommand('Switch0', 'switchport trunk allowed vlan 10,20');
+    executeCliCommand('Switch0', 'end');
+
+    // Configure Switch1 via CLI
+    executeCliCommand('Switch1', 'configure terminal');
+    executeCliCommand('Switch1', 'vlan 10');
+    executeCliCommand('Switch1', 'name Sales');
+    executeCliCommand('Switch1', 'vlan 20');
+    executeCliCommand('Switch1', 'name Engineering');
+    executeCliCommand('Switch1', 'interface Fa0/1');
+    executeCliCommand('Switch1', 'switchport mode trunk');
+    executeCliCommand('Switch1', 'switchport trunk allowed vlan 10,20');
+    executeCliCommand('Switch1', 'interface Fa0/2');
+    executeCliCommand('Switch1', 'switchport mode access');
+    executeCliCommand('Switch1', 'switchport access vlan 10');
+    executeCliCommand('Switch1', 'interface Fa0/3');
+    executeCliCommand('Switch1', 'switchport mode access');
+    executeCliCommand('Switch1', 'switchport access vlan 20');
+    executeCliCommand('Switch1', 'end');
+
+    // Test 1: PC0 (VLAN 10) pings PC2 (VLAN 10) across trunk link -> SUCCESS
+    const pingVlan10 = executeCliCommand('PC0', 'ping 10.10.10.2');
+    assert.strictEqual(pingVlan10.success, true);
+    assert.ok(pingVlan10.output.includes('Reply from 10.10.10.2'));
+
+    // Test 2: PC1 (VLAN 20) pings PC3 (VLAN 20) across trunk link -> SUCCESS
+    const pingVlan20 = executeCliCommand('PC1', 'ping 10.20.20.2');
+    assert.strictEqual(pingVlan20.success, true);
+    assert.ok(pingVlan20.output.includes('Reply from 10.20.20.2'));
+
+    // Test 3: PC0 (VLAN 10) pings PC3 (VLAN 20) -> FAILS (VLAN isolation)
+    const pingCross = executeCliCommand('PC0', 'ping 10.20.20.2');
+    assert.strictEqual(pingCross.success, false);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

@@ -2715,6 +2715,29 @@ function renderPacketInspector(packet, result) {
         </div>
     `;
 
+    let vlanHtml = '';
+    if (pkt.vlanTag?.isTagged) {
+        vlanHtml = `
+            <div class="packet-inspector__section">
+                <h5 class="packet-inspector__section-title">IEEE 802.1Q VLAN TAG</h5>
+                <div class="packet-inspector__grid">
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">TPID</span>
+                        <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(pkt.vlanTag.tpid || '0x8100')}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">VLAN ID (VID)</span>
+                        <strong class="packet-inspector__value">${escapeHtml(String(pkt.vlanTag.vlanId))}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Priority (CoS)</span>
+                        <strong class="packet-inspector__value">${escapeHtml(String(pkt.vlanTag.priority || 0))}</strong>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
     let ipv4Html = '';
     if (pkt.sourceIp || pkt.destinationIp || typeof pkt.ttl === 'number') {
         const protoText = formatProtocol(pkt.protocol || (pkt.icmp ? 'ICMP' : 'IPv4'));
@@ -2864,6 +2887,7 @@ function renderPacketInspector(packet, result) {
             </div>
             ${arpHtml}
             ${ethernetHtml}
+            ${vlanHtml}
             ${ipv4Html}
             ${icmpHtml}
             ${icmpErrorHtml}
@@ -3534,6 +3558,29 @@ function renderSwitchInspector(selected) {
             </tr>
         `).join('');
 
+    const allPortNames = new Set([
+        ...Object.values(runtime.ports || {}),
+        ...Object.keys((sw || selected).switchports || {})
+    ]);
+    const portRows = Array.from(allPortNames).sort((a, b) => {
+        const numA = parseInt(a.replace(/\D/g, ''), 10) || 0;
+        const numB = parseInt(b.replace(/\D/g, ''), 10) || 0;
+        return numA - numB;
+    }).map((pName) => {
+        const cfg = getSwitchPortConfig(sw || selected, pName);
+        const isTrunk = cfg.mode === 'trunk';
+        const vlanCol = isTrunk ? `Native: ${cfg.nativeVlan || 1}` : `VLAN ${cfg.accessVlan || 1}`;
+        const allowedCol = isTrunk ? formatAllowedVlans(cfg.allowedVlans) : '-';
+        return `
+            <tr>
+                <td>${escapeHtml(pName)}</td>
+                <td>${escapeHtml(cfg.mode || 'access')}</td>
+                <td>${escapeHtml(vlanCol)}</td>
+                <td>${escapeHtml(allowedCol)}</td>
+            </tr>
+        `;
+    }).join('');
+
     return `
         <div class="property-summary">
             <h4>SWITCH</h4>
@@ -3561,6 +3608,24 @@ function renderSwitchInspector(selected) {
                 </button>
             </div>
         </div>
+        ${allPortNames.size ? `
+            <div class="property-summary">
+                <h4>SWITCHPORTS</h4>
+                <table class="property-table">
+                    <thead>
+                        <tr>
+                            <th>Port</th>
+                            <th>Mode</th>
+                            <th>VLAN</th>
+                            <th>Allowed</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${portRows}
+                    </tbody>
+                </table>
+            </div>
+        ` : ''}
         <div class="property-summary">
             <h4>MAC ADDRESS TABLE</h4>
             ${learnedCount ? `
@@ -4681,7 +4746,14 @@ function getSwitchPortConfig(switchOrId, portName) {
     const sw = getSwitchDevice(switchOrId);
     const normPort = normalizeSwitchPortName(portName) || portName;
     if (!sw) {
-        return { port: normPort, name: normPort, mode: 'access', accessVlan: 1 };
+        return {
+            port: normPort,
+            name: normPort,
+            mode: 'access',
+            accessVlan: 1,
+            nativeVlan: 1,
+            allowedVlans: 'all'
+        };
     }
     ensureSwitchVlanState(sw);
     if (!sw.switchports[normPort]) {
@@ -4689,15 +4761,19 @@ function getSwitchPortConfig(switchOrId, portName) {
             port: normPort,
             name: normPort,
             mode: 'access',
-            accessVlan: 1
+            accessVlan: 1,
+            nativeVlan: 1,
+            allowedVlans: 'all'
         };
     }
     const cfg = sw.switchports[normPort];
     return {
         port: cfg.port || cfg.name || normPort,
         name: cfg.name || cfg.port || normPort,
-        mode: cfg.mode || 'access',
-        accessVlan: cfg.accessVlan || 1
+        mode: cfg.mode === 'trunk' ? 'trunk' : 'access',
+        accessVlan: cfg.accessVlan || 1,
+        nativeVlan: cfg.nativeVlan || 1,
+        allowedVlans: cfg.allowedVlans !== undefined ? cfg.allowedVlans : 'all'
     };
 }
 
@@ -4707,18 +4783,33 @@ function setSwitchPortMode(switchOrId, portName, mode) {
     ensureSwitchVlanState(sw);
     const normPort = normalizeSwitchPortName(portName);
     if (!normPort) throw new Error(`Invalid switch port "${portName}".`);
-    if (mode !== 'access') {
-        throw new Error(`Mode "${mode}" is not supported (only "access" mode supported in Phase 1).`);
+    const lowerMode = String(mode || '').toLowerCase().trim();
+    if (lowerMode !== 'access' && lowerMode !== 'trunk') {
+        throw new Error(`Mode "${mode}" is not supported (supported modes: access, trunk).`);
     }
     if (!sw.switchports[normPort]) {
         sw.switchports[normPort] = {
             port: normPort,
             name: normPort,
-            mode: 'access',
-            accessVlan: 1
+            mode: lowerMode,
+            accessVlan: 1,
+            nativeVlan: 1,
+            allowedVlans: 'all'
         };
     } else {
-        sw.switchports[normPort].mode = 'access';
+        sw.switchports[normPort].mode = lowerMode;
+        if (lowerMode === 'trunk') {
+            if (!sw.switchports[normPort].nativeVlan) {
+                sw.switchports[normPort].nativeVlan = 1;
+            }
+            if (sw.switchports[normPort].allowedVlans === undefined) {
+                sw.switchports[normPort].allowedVlans = 'all';
+            }
+        } else {
+            if (!sw.switchports[normPort].accessVlan) {
+                sw.switchports[normPort].accessVlan = 1;
+            }
+        }
     }
     return sw.switchports[normPort];
 }
@@ -4741,12 +4832,312 @@ function setSwitchPortAccessVlan(switchOrId, portName, vlanId) {
             port: normPort,
             name: normPort,
             mode: 'access',
-            accessVlan: normVlan
+            accessVlan: normVlan,
+            nativeVlan: 1,
+            allowedVlans: 'all'
         };
     } else {
         sw.switchports[normPort].accessVlan = normVlan;
     }
     return sw.switchports[normPort];
+}
+
+function setSwitchPortNativeVlan(switchOrId, portName, vlanId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) throw new Error('Switch not found.');
+    ensureSwitchVlanState(sw);
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) throw new Error(`Invalid switch port "${portName}".`);
+    const cfg = getSwitchPortConfig(sw, normPort);
+    if (cfg.mode !== 'trunk') {
+        throw new Error(`Port ${normPort} is not in trunk mode. Command rejected.`);
+    }
+    const normVlan = normalizeVlanId(vlanId);
+    if (normVlan === null) {
+        throw new Error(`Invalid VLAN ID "${vlanId}". Valid range is 1-4094.`);
+    }
+    if (!sw.vlans[normVlan]) {
+        throw new Error(`VLAN ${normVlan} does not exist on switch ${sw.name}. Create VLAN first.`);
+    }
+    if (!sw.switchports[normPort]) {
+        sw.switchports[normPort] = {
+            port: normPort,
+            name: normPort,
+            mode: 'trunk',
+            accessVlan: 1,
+            nativeVlan: normVlan,
+            allowedVlans: 'all'
+        };
+    } else {
+        sw.switchports[normPort].nativeVlan = normVlan;
+    }
+    return sw.switchports[normPort];
+}
+
+function parseAllowedVlanSpec(spec) {
+    if (spec === undefined || spec === null) {
+        throw new Error('VLAN specification is required.');
+    }
+    if (typeof spec === 'string' && spec.trim().toLowerCase() === 'all') {
+        return 'all';
+    }
+    if (Array.isArray(spec)) {
+        const set = new Set();
+        spec.forEach((item) => {
+            const v = normalizeVlanId(item);
+            if (v === null) {
+                throw new Error(`Invalid VLAN ID "${item}". Valid range is 1-4094.`);
+            }
+            set.add(v);
+        });
+        if (set.size === 0) {
+            throw new Error('Allowed VLAN list cannot be empty.');
+        }
+        return Array.from(set).sort((a, b) => a - b);
+    }
+    const str = String(spec).trim();
+    if (!str) {
+        throw new Error('Allowed VLAN list cannot be empty.');
+    }
+    if (str.toLowerCase() === 'all') {
+        return 'all';
+    }
+    const parts = str.split(',');
+    const set = new Set();
+    for (const part of parts) {
+        const trimmed = part.trim();
+        if (!trimmed) {
+            throw new Error(`Malformed VLAN list: "${str}".`);
+        }
+        if (trimmed.includes('-')) {
+            const rangeParts = trimmed.split('-');
+            if (rangeParts.length !== 2) {
+                throw new Error(`Malformed VLAN range: "${trimmed}".`);
+            }
+            const start = normalizeVlanId(rangeParts[0]);
+            const end = normalizeVlanId(rangeParts[1]);
+            if (start === null || end === null || start > end) {
+                throw new Error(`Invalid VLAN range: "${trimmed}". Start must be <= End (1-4094).`);
+            }
+            for (let i = start; i <= end; i++) {
+                set.add(i);
+            }
+        } else {
+            const v = normalizeVlanId(trimmed);
+            if (v === null) {
+                throw new Error(`Invalid VLAN ID "${trimmed}". Valid range is 1-4094.`);
+            }
+            set.add(v);
+        }
+    }
+    if (set.size === 0) {
+        throw new Error('Allowed VLAN list cannot be empty.');
+    }
+    return Array.from(set).sort((a, b) => a - b);
+}
+
+function isVlanAllowedOnTrunk(portConfig, vlanId) {
+    if (!portConfig) return false;
+    const vId = Number(vlanId);
+    if (portConfig.allowedVlans === 'all' || portConfig.allowedVlans === undefined || portConfig.allowedVlans === null) {
+        return true;
+    }
+    if (Array.isArray(portConfig.allowedVlans)) {
+        return portConfig.allowedVlans.includes(vId);
+    }
+    return false;
+}
+
+function setSwitchPortAllowedVlans(switchOrId, portName, action = 'set', vlanSpec = 'all') {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) throw new Error('Switch not found.');
+    ensureSwitchVlanState(sw);
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) throw new Error(`Invalid switch port "${portName}".`);
+    const cfg = getSwitchPortConfig(sw, normPort);
+    if (cfg.mode !== 'trunk') {
+        throw new Error(`Port ${normPort} is not in trunk mode. Command rejected.`);
+    }
+
+    const normAction = String(action || 'set').toLowerCase().trim();
+    if (!sw.switchports[normPort]) {
+        sw.switchports[normPort] = {
+            port: normPort,
+            name: normPort,
+            mode: 'trunk',
+            accessVlan: 1,
+            nativeVlan: 1,
+            allowedVlans: 'all'
+        };
+    }
+
+    if (normAction === 'all' || (normAction === 'set' && vlanSpec === 'all')) {
+        sw.switchports[normPort].allowedVlans = 'all';
+        return sw.switchports[normPort];
+    }
+
+    const parsed = parseAllowedVlanSpec(vlanSpec);
+
+    if (normAction === 'set') {
+        sw.switchports[normPort].allowedVlans = parsed;
+        return sw.switchports[normPort];
+    }
+
+    if (normAction === 'add') {
+        if (sw.switchports[normPort].allowedVlans === 'all') {
+            return sw.switchports[normPort];
+        }
+        const curList = Array.isArray(sw.switchports[normPort].allowedVlans) ? sw.switchports[normPort].allowedVlans : [];
+        const set = new Set([...curList, ...parsed]);
+        sw.switchports[normPort].allowedVlans = Array.from(set).sort((a, b) => a - b);
+        return sw.switchports[normPort];
+    }
+
+    if (normAction === 'remove') {
+        if (sw.switchports[normPort].allowedVlans === 'all') {
+            const set = new Set();
+            for (let i = 1; i <= 4094; i++) {
+                set.add(i);
+            }
+            parsed.forEach(v => set.delete(v));
+            sw.switchports[normPort].allowedVlans = Array.from(set).sort((a, b) => a - b);
+            return sw.switchports[normPort];
+        }
+        const curList = Array.isArray(sw.switchports[normPort].allowedVlans) ? sw.switchports[normPort].allowedVlans : [];
+        const removeSet = new Set(parsed);
+        sw.switchports[normPort].allowedVlans = curList.filter(v => !removeSet.has(v));
+        return sw.switchports[normPort];
+    }
+
+    if (normAction === 'except') {
+        const set = new Set();
+        for (let i = 1; i <= 4094; i++) {
+            set.add(i);
+        }
+        parsed.forEach(v => set.delete(v));
+        sw.switchports[normPort].allowedVlans = Array.from(set).sort((a, b) => a - b);
+        return sw.switchports[normPort];
+    }
+
+    throw new Error(`Unsupported action "${action}".`);
+}
+
+function formatAllowedVlans(allowed) {
+    if (allowed === 'all' || allowed === undefined || allowed === null) {
+        return '1-4094';
+    }
+    if (!Array.isArray(allowed) || allowed.length === 0) {
+        return 'none';
+    }
+    const sorted = [...allowed].sort((a, b) => a - b);
+    const ranges = [];
+    let start = sorted[0];
+    let prev = sorted[0];
+    for (let i = 1; i < sorted.length; i++) {
+        if (sorted[i] === prev + 1) {
+            prev = sorted[i];
+        } else {
+            ranges.push(start === prev ? `${start}` : `${start}-${prev}`);
+            start = sorted[i];
+            prev = sorted[i];
+        }
+    }
+    ranges.push(start === prev ? `${start}` : `${start}-${prev}`);
+    return ranges.join(', ');
+}
+
+function classifyFrameIngress(toDevice, ingressPort, frame) {
+    const portConfig = getSwitchPortConfig(toDevice, ingressPort);
+    const isTrunk = portConfig.mode === 'trunk';
+    const isTagged = Boolean(frame?.vlanTag?.isTagged);
+
+    if (!isTrunk) {
+        // Access Port
+        if (isTagged) {
+            return {
+                accepted: false,
+                reason: `Switch ${toDevice.name} dropped frame on access port ${ingressPort}: received 802.1Q tagged frame (VID ${frame.vlanTag.vlanId}) on access port.`,
+                ingressVlan: null
+            };
+        }
+        return {
+            accepted: true,
+            ingressVlan: portConfig.accessVlan || 1,
+            isNativeMismatch: false
+        };
+    }
+
+    // Trunk Port
+    if (isTagged) {
+        const tagVlan = frame.vlanTag.vlanId;
+        if (!isVlanAllowedOnTrunk(portConfig, tagVlan)) {
+            return {
+                accepted: false,
+                reason: `Switch ${toDevice.name} dropped frame on trunk ${ingressPort}: VLAN ${tagVlan} is not in allowed VLAN list.`,
+                ingressVlan: null
+            };
+        }
+        return {
+            accepted: true,
+            ingressVlan: tagVlan,
+            isNativeMismatch: false
+        };
+    }
+
+    // Untagged frame on Trunk -> classify to native VLAN
+    const nativeVlan = portConfig.nativeVlan || 1;
+    if (!isVlanAllowedOnTrunk(portConfig, nativeVlan)) {
+        return {
+            accepted: false,
+            reason: `Switch ${toDevice.name} dropped untagged frame on trunk ${ingressPort}: native VLAN ${nativeVlan} is not allowed on trunk.`,
+            ingressVlan: null
+        };
+    }
+    return {
+        accepted: true,
+        ingressVlan: nativeVlan,
+        isNativeMismatch: false
+    };
+}
+
+function getEgressTagAction(portConfig, ingressVlan) {
+    if (!portConfig) return { allowed: false, reason: 'Port configuration not found' };
+    const isTrunk = portConfig.mode === 'trunk';
+    if (!isTrunk) {
+        const accessVlan = portConfig.accessVlan || 1;
+        if (accessVlan !== ingressVlan) {
+            return { allowed: false, reason: `Port is in access VLAN ${accessVlan} (frame is in VLAN ${ingressVlan})` };
+        }
+        return {
+            allowed: true,
+            isTagged: false,
+            vlanTag: null
+        };
+    }
+
+    if (!isVlanAllowedOnTrunk(portConfig, ingressVlan)) {
+        return { allowed: false, reason: `VLAN ${ingressVlan} is not allowed on trunk` };
+    }
+
+    const nativeVlan = portConfig.nativeVlan || 1;
+    if (ingressVlan === nativeVlan) {
+        return {
+            allowed: true,
+            isTagged: false,
+            vlanTag: null
+        };
+    }
+
+    return {
+        allowed: true,
+        isTagged: true,
+        vlanTag: {
+            vlanId: ingressVlan,
+            tpid: '0x8100',
+            priority: 0,
+            isTagged: true
+        }
+    };
 }
 
 let staticRouteCounter = 0;
@@ -6214,10 +6605,36 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
             cleanupStaleSwitchMacEntries(toDevice.id);
 
             const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
-            frame.events.push(`Frame entered ${toDevice.name} on ${ingressPort}`);
+            const ingressRes = classifyFrameIngress(toDevice, ingressPort, frame);
+            if (!ingressRes.accepted) {
+                frame.events.push(ingressRes.reason);
+                hopActions.push({
+                    deviceId: toDevice.id,
+                    deviceName: toDevice.name,
+                    type: 'switch',
+                    action: 'DROP',
+                    reason: 'vlan-isolation',
+                    ingressPort,
+                    destinationMac: frame.destinationMac
+                });
+                return {
+                    success: false,
+                    reason: ingressRes.reason,
+                    path: traversedPath,
+                    action: 'DROP',
+                    hopActions
+                };
+            }
 
+            const ingressVlan = ingressRes.ingressVlan;
             const ingressPortConfig = getSwitchPortConfig(toDevice, ingressPort);
-            const ingressVlan = ingressPortConfig.accessVlan || 1;
+            if (frame?.vlanTag?.isTagged) {
+                frame.events.push(`Frame entered ${toDevice.name} on ${ingressPort} (802.1Q Tag VID: ${frame.vlanTag.vlanId})`);
+            } else if (ingressPortConfig.mode === 'trunk') {
+                frame.events.push(`Frame entered ${toDevice.name} on trunk ${ingressPort} (untagged → native VLAN ${ingressVlan})`);
+            } else {
+                frame.events.push(`Frame entered ${toDevice.name} on ${ingressPort} (VLAN ${ingressVlan})`);
+            }
 
             const learnedDevice = findDeviceByMac(frame.sourceMac, null, networkState.devices);
             const learnedDeviceId = learnedDevice?.id || fromEndpoint.id;
@@ -6229,14 +6646,15 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
             const expectedEgressPort = nextHopId ? getPortForSwitchAndNeighbor(toDevice.id, nextHopId) : null;
             const runtime = getSwitchRuntime(toDevice.id);
             const allOtherPorts = Object.values(runtime.ports).filter(p => p !== ingressPort);
-            const egressPorts = allOtherPorts.filter(p => (getSwitchPortConfig(toDevice, p).accessVlan || 1) === ingressVlan);
+            const egressPorts = allOtherPorts.filter(p => getEgressTagAction(getSwitchPortConfig(toDevice, p), ingressVlan).allowed);
 
-            // Layer-2 VLAN Isolation Check
+            // Layer-2 VLAN Egress Check
             if (expectedEgressPort) {
                 const egressPortConfig = getSwitchPortConfig(toDevice, expectedEgressPort);
-                const egressVlan = egressPortConfig.accessVlan || 1;
-                if (egressVlan !== ingressVlan) {
-                    frame.events.push(`Switch ${toDevice.name} dropped frame: ingress port ${ingressPort} (VLAN ${ingressVlan}) and egress port ${expectedEgressPort} (VLAN ${egressVlan}) are isolated in different VLANs`);
+                const egressTagAction = getEgressTagAction(egressPortConfig, ingressVlan);
+                if (!egressTagAction.allowed) {
+                    const egressVlanDesc = egressPortConfig.mode === 'trunk' ? `allowed: ${formatAllowedVlans(egressPortConfig.allowedVlans)}` : `VLAN ${egressPortConfig.accessVlan || 1}`;
+                    frame.events.push(`Switch ${toDevice.name} dropped frame: ingress port ${ingressPort} (VLAN ${ingressVlan}) and egress port ${expectedEgressPort} (${egressVlanDesc}) are isolated in different VLANs`);
                     hopActions.push({
                         deviceId: toDevice.id,
                         deviceName: toDevice.name,
@@ -6246,16 +6664,22 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                         ingressPort,
                         egressPort: expectedEgressPort,
                         ingressVlan,
-                        egressVlan,
                         destinationMac: frame.destinationMac
                     });
                     return {
                         success: false,
-                        reason: `Switch ${toDevice.name} dropped frame due to VLAN isolation (VLAN ${ingressVlan} vs VLAN ${egressVlan}).`,
+                        reason: `Switch ${toDevice.name} dropped frame due to VLAN isolation on port ${expectedEgressPort}.`,
                         path: traversedPath,
                         action: 'DROP',
                         hopActions
                     };
+                }
+
+                // Apply egress wire tagging / untagging
+                if (egressTagAction.isTagged) {
+                    frame.vlanTag = egressTagAction.vlanTag;
+                } else {
+                    delete frame.vlanTag;
                 }
             }
 
@@ -6899,6 +7323,18 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
         }
     }
 
+    // Determine initial VLAN of requester
+    let currentVlan = 1;
+    let currentTagged = false;
+    const firstSwitchId = arpPath.find(id => getDeviceById(id)?.type === 'switch');
+    if (firstSwitchId) {
+        const firstPort = getPortForSwitchAndNeighbor(firstSwitchId, requesterDevice.id);
+        if (firstPort) {
+            const cfg = getSwitchPortConfig(firstSwitchId, firstPort);
+            currentVlan = cfg.mode === 'trunk' ? (cfg.nativeVlan || 1) : (cfg.accessVlan || 1);
+        }
+    }
+
     // Traverse forward path (ARP Request Broadcast)
     for (let i = 0; i < arpPath.length - 1; i++) {
         const fromId = arpPath[i];
@@ -6919,19 +7355,51 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
         if (toDevice.type === 'switch') {
             const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
             const ingressPortConfig = getSwitchPortConfig(toDevice, ingressPort);
-            const ingressVlan = ingressPortConfig.accessVlan || 1;
+
+            let ingressVlan;
+            if (ingressPortConfig.mode === 'access') {
+                if (currentTagged) {
+                    events.push(`Switch ${toDevice.name} dropped ARP request: received tagged frame on access port ${ingressPort}`);
+                    return {
+                        success: false,
+                        reason: `ARP resolution failed: Switch ${toDevice.name} dropped tagged frame on access port ${ingressPort}.`,
+                        path: arpPath.slice(0, i + 1),
+                        events,
+                        hopActions
+                    };
+                }
+                ingressVlan = ingressPortConfig.accessVlan || 1;
+            } else {
+                if (currentTagged) {
+                    ingressVlan = currentVlan;
+                } else {
+                    ingressVlan = ingressPortConfig.nativeVlan || 1;
+                }
+                if (!isVlanAllowedOnTrunk(ingressPortConfig, ingressVlan)) {
+                    events.push(`Switch ${toDevice.name} dropped ARP request: VLAN ${ingressVlan} not allowed on trunk ${ingressPort}`);
+                    return {
+                        success: false,
+                        reason: `ARP resolution failed: Switch ${toDevice.name} blocked ARP request on trunk ${ingressPort}.`,
+                        path: arpPath.slice(0, i + 1),
+                        events,
+                        hopActions
+                    };
+                }
+            }
 
             learnSwitchMac(toDevice.id, reqMac, requesterDevice.id, ingressPort, ingressVlan);
             events.push(`Switch ${toDevice.name} learned ${requesterDevice.name} MAC (${reqMac}) → ${ingressPort} (VLAN ${ingressVlan})`);
 
-            // Check if next hop port is in same VLAN
+            // Check if next hop port is in same VLAN / allowed on trunk
             const nextHopId = arpPath[i + 2];
             const nextPort = nextHopId ? getPortForSwitchAndNeighbor(toDevice.id, nextHopId) : null;
             if (nextPort) {
                 const nextPortConfig = getSwitchPortConfig(toDevice, nextPort);
-                const nextVlan = nextPortConfig.accessVlan || 1;
-                if (nextVlan !== ingressVlan) {
-                    events.push(`Switch ${toDevice.name} dropped broadcast frame: ingress port ${ingressPort} (VLAN ${ingressVlan}) and destination port ${nextPort} (VLAN ${nextVlan}) are in different VLANs`);
+                const egressAction = getEgressTagAction(nextPortConfig, ingressVlan);
+                if (!egressAction.allowed) {
+                    const nextVlan = nextPortConfig.mode === 'trunk' ? (nextPortConfig.nativeVlan || 1) : (nextPortConfig.accessVlan || 1);
+                    const egressDesc = nextPortConfig.mode === 'trunk' ? `allowed: ${formatAllowedVlans(nextPortConfig.allowedVlans)}` : `VLAN ${nextPortConfig.accessVlan || 1}`;
+                    events.push(`Switch ${toDevice.name} dropped broadcast frame: ingress port ${ingressPort} (VLAN ${ingressVlan}) and destination port ${nextPort} (${egressDesc}) are isolated`);
                     hopActions.push({
                         deviceId: toDevice.id,
                         deviceName: toDevice.name,
@@ -6952,11 +7420,13 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
                         hopActions
                     };
                 }
+                currentVlan = ingressVlan;
+                currentTagged = egressAction.isTagged;
             }
 
             events.push(`Switch ${toDevice.name} flooded broadcast frame (FF:FF:FF:FF:FF:FF) on all ports except ${ingressPort}`);
             const runtime = getSwitchRuntime(toDevice.id);
-            const egressPorts = Object.values(runtime.ports).filter(p => p !== ingressPort && (getSwitchPortConfig(toDevice, p).accessVlan || 1) === ingressVlan);
+            const egressPorts = Object.values(runtime.ports).filter(p => p !== ingressPort && getEgressTagAction(getSwitchPortConfig(toDevice, p), ingressVlan).allowed);
             hopActions.push({
                 deviceId: toDevice.id,
                 deviceName: toDevice.name,
@@ -6989,6 +7459,18 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
 
     events.push(`${targetDevice.name} sent ARP Reply: ${targetIp} is at ${targetMac}`);
 
+    // Determine initial VLAN of target for reverse path
+    let replyVlan = 1;
+    let replyTagged = false;
+    const lastSwitchId = [...arpPath].reverse().find(id => getDeviceById(id)?.type === 'switch');
+    if (lastSwitchId) {
+        const lastPort = getPortForSwitchAndNeighbor(lastSwitchId, targetDevice.id);
+        if (lastPort) {
+            const cfg = getSwitchPortConfig(lastSwitchId, lastPort);
+            replyVlan = cfg.mode === 'trunk' ? (cfg.nativeVlan || 1) : (cfg.accessVlan || 1);
+        }
+    }
+
     // Traverse reverse path (ARP Reply Unicast)
     const reverseArpPath = [...arpPath].reverse();
     for (let i = 0; i < reverseArpPath.length - 1; i++) {
@@ -6999,7 +7481,37 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
         if (toDevice && toDevice.type === 'switch') {
             const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
             const ingressPortConfig = getSwitchPortConfig(toDevice, ingressPort);
-            const ingressVlan = ingressPortConfig.accessVlan || 1;
+
+            let ingressVlan;
+            if (ingressPortConfig.mode === 'access') {
+                if (replyTagged) {
+                    events.push(`Switch ${toDevice.name} dropped ARP reply: received tagged frame on access port ${ingressPort}`);
+                    return {
+                        success: false,
+                        reason: `ARP resolution failed: Switch ${toDevice.name} dropped tagged frame on access port ${ingressPort}.`,
+                        path: reverseArpPath.slice(0, i + 1),
+                        events,
+                        hopActions
+                    };
+                }
+                ingressVlan = ingressPortConfig.accessVlan || 1;
+            } else {
+                if (replyTagged) {
+                    ingressVlan = replyVlan;
+                } else {
+                    ingressVlan = ingressPortConfig.nativeVlan || 1;
+                }
+                if (!isVlanAllowedOnTrunk(ingressPortConfig, ingressVlan)) {
+                    events.push(`Switch ${toDevice.name} dropped ARP reply: VLAN ${ingressVlan} not allowed on trunk ${ingressPort}`);
+                    return {
+                        success: false,
+                        reason: `ARP resolution failed: Switch ${toDevice.name} blocked ARP reply on trunk ${ingressPort}.`,
+                        path: reverseArpPath.slice(0, i + 1),
+                        events,
+                        hopActions
+                    };
+                }
+            }
 
             learnSwitchMac(toDevice.id, targetMac, targetDevice.id, ingressPort, ingressVlan);
             events.push(`Switch ${toDevice.name} learned ${targetDevice.name} MAC (${targetMac}) → ${ingressPort} (VLAN ${ingressVlan})`);
@@ -7009,9 +7521,11 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
             const nextPort = nextHopId ? getPortForSwitchAndNeighbor(toDevice.id, nextHopId) : null;
             if (nextPort) {
                 const nextPortConfig = getSwitchPortConfig(toDevice, nextPort);
-                const nextVlan = nextPortConfig.accessVlan || 1;
-                if (nextVlan !== ingressVlan) {
-                    events.push(`Switch ${toDevice.name} dropped ARP reply: ports ${ingressPort} (VLAN ${ingressVlan}) and ${nextPort} (VLAN ${nextVlan}) are in different VLANs`);
+                const egressAction = getEgressTagAction(nextPortConfig, ingressVlan);
+                if (!egressAction.allowed) {
+                    const nextVlan = nextPortConfig.mode === 'trunk' ? (nextPortConfig.nativeVlan || 1) : (nextPortConfig.accessVlan || 1);
+                    const egressDesc = nextPortConfig.mode === 'trunk' ? `allowed: ${formatAllowedVlans(nextPortConfig.allowedVlans)}` : `VLAN ${nextPortConfig.accessVlan || 1}`;
+                    events.push(`Switch ${toDevice.name} dropped ARP reply: ports ${ingressPort} (VLAN ${ingressVlan}) and ${nextPort} (${egressDesc}) are isolated`);
                     hopActions.push({
                         deviceId: toDevice.id,
                         deviceName: toDevice.name,
@@ -7032,6 +7546,8 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
                         hopActions
                     };
                 }
+                replyVlan = ingressVlan;
+                replyTagged = egressAction.isTagged;
             }
 
             const destEntry = getSwitchMacEntry(toDevice.id, reqMac, ingressVlan);
@@ -7049,7 +7565,7 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
                 });
             } else {
                 const runtime = getSwitchRuntime(toDevice.id);
-                const egressPorts = Object.values(runtime.ports).filter(p => p !== ingressPort && (getSwitchPortConfig(toDevice, p).accessVlan || 1) === ingressVlan);
+                const egressPorts = Object.values(runtime.ports).filter(p => p !== ingressPort && getEgressTagAction(getSwitchPortConfig(toDevice, p), ingressVlan).allowed);
                 events.push(`Switch ${toDevice.name} flooded ARP Reply on VLAN ${ingressVlan} ports except ${ingressPort}`);
                 hopActions.push({
                     deviceId: toDevice.id,
@@ -8582,12 +9098,103 @@ function formatCliSwitchInterfaces(switchOrId) {
         }
         lines.push(`${pName} is up, line protocol is up`);
         lines.push(`  Hardware is FastEthernet`);
-        lines.push(`  Port mode: ${cfg.mode || 'access'}, Access VLAN: ${vlanId} (${vlanName})`);
+        if (cfg.mode === 'trunk') {
+            const nativeName = sw.vlans[cfg.nativeVlan || 1]?.name || 'default';
+            lines.push(`  Port mode: trunk, Native VLAN: ${cfg.nativeVlan || 1} (${nativeName}), Allowed VLANs: ${formatAllowedVlans(cfg.allowedVlans)}`);
+        } else {
+            lines.push(`  Port mode: access, Access VLAN: ${vlanId} (${vlanName})`);
+        }
         lines.push(`  Link status: ${neighborInfo}`);
         lines.push('');
     });
 
     return lines.join('\n').trimEnd();
+}
+
+function formatCliSwitchInterfacesTrunk(switchOrId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return '% Switch not found.';
+    ensureSwitchVlanState(sw);
+    const runtime = getSwitchRuntime(sw.id);
+    const allPortNames = new Set([
+        ...Object.values(runtime.ports || {}),
+        ...Object.keys(sw.switchports || {})
+    ]);
+
+    const trunkPorts = Array.from(allPortNames).filter(pName => {
+        return getSwitchPortConfig(sw, pName).mode === 'trunk';
+    }).sort((a, b) => {
+        const numA = parseInt(a.replace(/\D/g, ''), 10) || 0;
+        const numB = parseInt(b.replace(/\D/g, ''), 10) || 0;
+        return numA - numB;
+    });
+
+    if (trunkPorts.length === 0) {
+        return 'No trunk interfaces configured on this switch.';
+    }
+
+    const lines = [
+        'Port        Mode             Encapsulation  Status        Native vlan',
+        '====================================================================='
+    ];
+
+    trunkPorts.forEach((pName) => {
+        const cfg = getSwitchPortConfig(sw, pName);
+        const portStr = pName.padEnd(12, ' ');
+        const modeStr = 'on'.padEnd(17, ' ');
+        const encapStr = '802.1q'.padEnd(15, ' ');
+        const statusStr = 'trunking'.padEnd(14, ' ');
+        const nativeStr = String(cfg.nativeVlan || 1);
+        lines.push(`${portStr}${modeStr}${encapStr}${statusStr}${nativeStr}`);
+    });
+
+    lines.push('');
+    lines.push('Port        Vlans allowed on trunk');
+    lines.push('----------------------------------');
+    trunkPorts.forEach((pName) => {
+        const cfg = getSwitchPortConfig(sw, pName);
+        const portStr = pName.padEnd(12, ' ');
+        lines.push(`${portStr}${formatAllowedVlans(cfg.allowedVlans)}`);
+    });
+
+    lines.push('');
+    lines.push('Port        Vlans allowed and active in management domain');
+    lines.push('---------------------------------------------------------');
+    trunkPorts.forEach((pName) => {
+        const cfg = getSwitchPortConfig(sw, pName);
+        const portStr = pName.padEnd(12, ' ');
+        const activeVlans = Object.keys(sw.vlans).map(Number).filter(vId => isVlanAllowedOnTrunk(cfg, vId)).sort((a, b) => a - b);
+        lines.push(`${portStr}${activeVlans.length ? activeVlans.join(', ') : 'none'}`);
+    });
+
+    return lines.join('\n');
+}
+
+function formatCliSwitchInterfaceSwitchport(switchOrId, portName) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return '% Switch not found.';
+    ensureSwitchVlanState(sw);
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) return `% Invalid interface "${portName}".`;
+    const cfg = getSwitchPortConfig(sw, normPort);
+    const isTrunk = cfg.mode === 'trunk';
+    const accessVlanName = sw.vlans[cfg.accessVlan || 1]?.name || 'default';
+    const nativeVlanName = sw.vlans[cfg.nativeVlan || 1]?.name || 'default';
+
+    const lines = [
+        `Name: ${normPort}`,
+        `Switchport: Enabled`,
+        `Administrative Mode: ${isTrunk ? 'trunk' : 'static access'}`,
+        `Operational Mode: ${isTrunk ? 'trunk' : 'static access'}`,
+        `Administrative Trunking Encapsulation: dot1q`,
+        `Operational Trunking Encapsulation: dot1q`,
+        `Negotiation of Trunking: Off`,
+        `Access Mode VLAN: ${cfg.accessVlan || 1} (${accessVlanName})`,
+        `Trunking Native Mode VLAN: ${cfg.nativeVlan || 1} (${nativeVlanName})`,
+        `Administrative Native VLAN tagging: disabled`,
+        `Trunking VLANs Enabled: ${isTrunk ? (cfg.allowedVlans === 'all' ? 'ALL' : formatAllowedVlans(cfg.allowedVlans)) : 'ALL'}`
+    ];
+    return lines.join('\n');
 }
 
 function findDeviceByIp(ip) {
@@ -9348,6 +9955,8 @@ function executeCliCommand(deviceId, rawInput) {
         }
         const sub1 = tokens[1] || '';
         const sub2 = tokens[2] || '';
+
+        // switchport mode access / switchport mode trunk
         if (sub1 === 'mode') {
             if (sub2 === 'access') {
                 pushHistory();
@@ -9362,15 +9971,30 @@ function executeCliCommand(deviceId, rawInput) {
                     device: dev
                 };
             }
+            if (sub2 === 'trunk') {
+                pushHistory();
+                setSwitchPortMode(dev, session.selectedInterface, 'trunk');
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
             return {
                 success: false,
-                output: `% Mode "${tokens[2] || ''}" is not supported (only "access" mode is supported in Phase 1).`,
+                output: `% Mode "${tokens[2] || ''}" is not supported (supported modes: access, trunk).`,
                 clear: false,
                 status: 'error',
                 command,
                 device: dev
             };
         }
+
+        // switchport access vlan <id>
         if (sub1 === 'access' && sub2 === 'vlan') {
             const rawVlan = tokens[3];
             if (!rawVlan) {
@@ -9417,9 +10041,162 @@ function executeCliCommand(deviceId, rawInput) {
                 device: dev
             };
         }
+
+        // switchport trunk ...
+        if (sub1 === 'trunk') {
+            const portCfg = getSwitchPortConfig(dev, session.selectedInterface);
+            if (portCfg.mode !== 'trunk') {
+                return {
+                    success: false,
+                    output: `% Command rejected: Port ${session.selectedInterface} is not in trunk mode. Use "switchport mode trunk" first.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+
+            // switchport trunk native vlan <id>
+            if (sub2 === 'native' && tokens[3] === 'vlan') {
+                const rawVlan = tokens[4];
+                if (!rawVlan) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: switchport trunk native vlan <vlan-id>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                const normId = normalizeVlanId(rawVlan);
+                if (normId === null) {
+                    return {
+                        success: false,
+                        output: `% Invalid VLAN ID "${rawVlan}". Valid range is 1-4094.`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                ensureSwitchVlanState(dev);
+                if (!dev.vlans[normId]) {
+                    return {
+                        success: false,
+                        output: `% Native VLAN ${normId} does not exist. Create VLAN first.`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                setSwitchPortNativeVlan(dev, session.selectedInterface, normId);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+
+            // switchport trunk allowed vlan [add|remove|except|all|<list>]
+            if (sub2 === 'allowed' && tokens[3] === 'vlan') {
+                const arg1 = tokens[4] || '';
+                if (!arg1) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: switchport trunk allowed vlan [add|remove|except|all|<vlan-list>]',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+
+                if (arg1 === 'all') {
+                    pushHistory();
+                    setSwitchPortAllowedVlans(dev, session.selectedInterface, 'all');
+                    render();
+                    return {
+                        success: true,
+                        output: '',
+                        clear: false,
+                        status: 'success',
+                        command,
+                        device: dev
+                    };
+                }
+
+                if (arg1 === 'add' || arg1 === 'remove' || arg1 === 'except') {
+                    const listPart = tokens.slice(5).join(' ').trim();
+                    if (!listPart) {
+                        return {
+                            success: false,
+                            output: `% Incomplete command: switchport trunk allowed vlan ${arg1} <vlan-list>`,
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    try {
+                        pushHistory();
+                        setSwitchPortAllowedVlans(dev, session.selectedInterface, arg1, listPart);
+                        render();
+                        return {
+                            success: true,
+                            output: '',
+                            clear: false,
+                            status: 'success',
+                            command,
+                            device: dev
+                        };
+                    } catch (err) {
+                        return {
+                            success: false,
+                            output: `% ${err.message}`,
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                }
+
+                const listPart = tokens.slice(4).join(' ').trim();
+                try {
+                    pushHistory();
+                    setSwitchPortAllowedVlans(dev, session.selectedInterface, 'set', listPart);
+                    render();
+                    return {
+                        success: true,
+                        output: '',
+                        clear: false,
+                        status: 'success',
+                        command,
+                        device: dev
+                    };
+                } catch (err) {
+                    return {
+                        success: false,
+                        output: `% ${err.message}`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+            }
+        }
+
         return {
             success: false,
-            output: `% Incomplete or unrecognized switchport command. Available: "switchport mode access", "switchport access vlan <vlan-id>".`,
+            output: `% Incomplete or unrecognized switchport command. Available: "switchport mode access", "switchport mode trunk", "switchport access vlan <id>", "switchport trunk native vlan <id>", "switchport trunk allowed vlan <vlans>".`,
             clear: false,
             status: 'error',
             command,
@@ -10359,6 +11136,61 @@ function executeCliCommand(deviceId, rawInput) {
             return {
                 success: true,
                 output: formatCliRouterRoutingTable(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // show interfaces trunk / show int trunk
+        if ((sub1 === 'interfaces' || sub1 === 'interface' || sub1 === 'int') && sub2 === 'trunk') {
+            if (!isSwitch) {
+                return {
+                    success: false,
+                    output: `% 'show interfaces trunk' is a switch command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: formatCliSwitchInterfacesTrunk(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // show interfaces <port> switchport / show int <port> switchport
+        if ((sub1 === 'interfaces' || sub1 === 'interface' || sub1 === 'int') && (tokens[3] === 'switchport' || sub2 === 'switchport')) {
+            const portName = sub2 === 'switchport' ? (session.selectedInterface || '') : tokens[2];
+            if (!isSwitch) {
+                return {
+                    success: false,
+                    output: `% 'show interfaces switchport' is a switch command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (!portName) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: show interfaces <port> switchport',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: formatCliSwitchInterfaceSwitchport(dev, portName),
                 clear: false,
                 status: 'success',
                 command,
