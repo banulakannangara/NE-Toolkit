@@ -10424,8 +10424,8 @@ runTest('304. Prompt generation for PC, Laptop, Server, and Router', () => {
     assert.strictEqual(getDeviceCliPrompt(router), 'CoreRouter-1#');
 });
 
-// 305. isDeviceCliSupported returns true for supported devices and false for switches
-runTest('305. isDeviceCliSupported returns true for supported devices and false for switches', () => {
+// 305. isDeviceCliSupported returns true for supported devices including switches
+runTest('305. isDeviceCliSupported returns true for supported devices including switches', () => {
     resetLab();
     addDevice('pc', 50, 100);
     addDevice('laptop', 150, 100);
@@ -10437,7 +10437,7 @@ runTest('305. isDeviceCliSupported returns true for supported devices and false 
     assert.strictEqual(isDeviceCliSupported('Laptop0'), true);
     assert.strictEqual(isDeviceCliSupported('Server0'), true);
     assert.strictEqual(isDeviceCliSupported('Router0'), true);
-    assert.strictEqual(isDeviceCliSupported('Switch0'), false);
+    assert.strictEqual(isDeviceCliSupported('Switch0'), true);
     assert.strictEqual(isDeviceCliSupported('NonExistentDevice'), false);
 });
 
@@ -12259,6 +12259,782 @@ runTest('395. End-to-end network test: Full multi-router topology configured ent
     assert.ok(traceRes.output.includes('10.0.0.2'));
     assert.ok(traceRes.output.includes('192.168.2.10'));
     assert.ok(traceRes.output.includes('Trace complete.'));
+});
+
+// ============================================================================
+// V5.12 Phase 1: VLAN Foundation and Access Ports Tests (396 - 432)
+// ============================================================================
+
+// 396. Switch initialization creates default VLAN 1 (default, active) and switchports map
+runTest("396. Switch initialization creates default VLAN 1 (default, active) and switchports map", () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    assert.ok(sw.vlans, 'Switch must have vlans property');
+    assert.ok(sw.vlans[1], 'Switch must have default VLAN 1');
+    assert.strictEqual(sw.vlans[1].id, 1);
+    assert.strictEqual(sw.vlans[1].name, 'default');
+    assert.strictEqual(sw.vlans[1].status, 'active');
+    assert.ok(sw.switchports, 'Switch must have switchports map');
+});
+
+// 397. normalizeVlanId validates 1-4094 integers and rejects 0, 4095, negative, strings, and non-numeric inputs
+runTest('397. normalizeVlanId validates 1-4094 integers and rejects invalid inputs', () => {
+    assert.strictEqual(normalizeVlanId(1), 1);
+    assert.strictEqual(normalizeVlanId(10), 10);
+    assert.strictEqual(normalizeVlanId(4094), 4094);
+    assert.strictEqual(normalizeVlanId('20'), 20);
+    assert.strictEqual(normalizeVlanId(' 100 '), 100);
+
+    assert.strictEqual(normalizeVlanId(0), null);
+    assert.strictEqual(normalizeVlanId(4095), null);
+    assert.strictEqual(normalizeVlanId(5000), null);
+    assert.strictEqual(normalizeVlanId(-10), null);
+    assert.strictEqual(normalizeVlanId('abc'), null);
+    assert.strictEqual(normalizeVlanId(null), null);
+    assert.strictEqual(normalizeVlanId(undefined), null);
+    assert.strictEqual(normalizeVlanId(NaN), null);
+});
+
+// 398. createSwitchVlan creates VLAN with default naming "VLAN<id>" if name omitted
+runTest('398. createSwitchVlan creates VLAN with default naming "VLAN<id>" if name omitted', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    const v10 = createSwitchVlan(sw, 10);
+    assert.strictEqual(v10.id, 10);
+    assert.strictEqual(v10.name, 'VLAN10');
+    assert.strictEqual(v10.status, 'active');
+    assert.strictEqual(sw.vlans[10].id, 10);
+
+    const v20 = createSwitchVlan(sw, 20, 'Engineering');
+    assert.strictEqual(v20.id, 20);
+    assert.strictEqual(v20.name, 'Engineering');
+});
+
+// 399. createSwitchVlan prevents duplicate VLAN creation and rejects invalid VLAN IDs
+runTest('399. createSwitchVlan prevents duplicate VLAN creation and rejects invalid VLAN IDs', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    assert.throws(() => createSwitchVlan(sw, 1), /already exists/);
+    assert.throws(() => createSwitchVlan(sw, 0), /Invalid VLAN ID/);
+    assert.throws(() => createSwitchVlan(sw, 5000), /Invalid VLAN ID/);
+});
+
+// 400. renameSwitchVlan renames VLAN and rejects invalid characters or nonexistent VLANs
+runTest('400. renameSwitchVlan renames VLAN and rejects invalid names or nonexistent VLANs', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    createSwitchVlan(sw, 10, 'Temp');
+
+    const updated = renameSwitchVlan(sw, 10, 'Accounting');
+    assert.strictEqual(updated.name, 'Accounting');
+    assert.strictEqual(sw.vlans[10].name, 'Accounting');
+
+    assert.throws(() => renameSwitchVlan(sw, 99, 'Ghost'), /does not exist/);
+    assert.throws(() => renameSwitchVlan(sw, 10, 'Invalid Name!@#'), /Invalid VLAN name/);
+});
+
+// 401. deleteSwitchVlan blocks deletion of default VLAN 1
+runTest('401. deleteSwitchVlan blocks deletion of default VLAN 1', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    assert.throws(() => deleteSwitchVlan(sw, 1), /Default VLAN 1 cannot be deleted/);
+    assert.ok(sw.vlans[1], 'VLAN 1 must remain');
+});
+
+// 402. deleteSwitchVlan removes VLAN and reassigns all member ports back to VLAN 1
+runTest('402. deleteSwitchVlan removes VLAN and reassigns all member ports back to VLAN 1', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    createSwitchVlan(sw, 20, 'Sales');
+
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 20);
+    setSwitchPortAccessVlan(sw, 'Fa0/2', 20);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').accessVlan, 20);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/2').accessVlan, 20);
+
+    deleteSwitchVlan(sw, 20);
+    assert.strictEqual(sw.vlans[20], undefined);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').accessVlan, 1);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/2').accessVlan, 1);
+});
+
+// 403. normalizeSwitchPortName supports Fa0/1..Fa0/48, Gig0/1..Gig0/4 and abbreviations (f0/1, g0/1)
+runTest('403. normalizeSwitchPortName supports FastEthernet and GigabitEthernet port formats', () => {
+    assert.strictEqual(normalizeSwitchPortName('fa0/1'), 'Fa0/1');
+    assert.strictEqual(normalizeSwitchPortName('Fa0/24'), 'Fa0/24');
+    assert.strictEqual(normalizeSwitchPortName('fastethernet0/5'), 'Fa0/5');
+    assert.strictEqual(normalizeSwitchPortName('f0/12'), 'Fa0/12');
+    assert.strictEqual(normalizeSwitchPortName('gig0/1'), 'Gig0/1');
+    assert.strictEqual(normalizeSwitchPortName('GigabitEthernet0/2'), 'Gig0/2');
+    assert.strictEqual(normalizeSwitchPortName('g0/4'), 'Gig0/4');
+
+    assert.strictEqual(normalizeSwitchPortName('Fa0/50'), null);
+    assert.strictEqual(normalizeSwitchPortName('Gig0/10'), null);
+    assert.strictEqual(normalizeSwitchPortName('eth0'), null);
+});
+
+// 404. getSwitchPortConfig and setSwitchPortMode configures access mode on switchport
+runTest('404. getSwitchPortConfig and setSwitchPortMode configures access mode on switchport', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    const defCfg = getSwitchPortConfig(sw, 'Fa0/1');
+    assert.strictEqual(defCfg.port, 'Fa0/1');
+    assert.strictEqual(defCfg.mode, 'access');
+    assert.strictEqual(defCfg.accessVlan, 1);
+
+    setSwitchPortMode(sw, 'Fa0/1', 'access');
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').mode, 'access');
+});
+
+// 405. setSwitchPortAccessVlan configures access VLAN and rejects non-existent VLANs
+runTest('405. setSwitchPortAccessVlan configures access VLAN and rejects non-existent VLANs', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    createSwitchVlan(sw, 30, 'HR');
+
+    setSwitchPortAccessVlan(sw, 'Fa0/3', 30);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/3').accessVlan, 30);
+
+    assert.throws(() => setSwitchPortAccessVlan(sw, 'Fa0/3', 99), /does not exist/);
+});
+
+// 406. Switch CLI prompt generation across exec, config, config-vlan, and config-if modes
+runTest('406. Switch CLI prompt generation across exec, config, config-vlan, and config-if modes', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    const session = getDeviceTerminalSession(sw.id);
+
+    assert.strictEqual(getDeviceCliPrompt(sw), 'Switch0#');
+
+    session.mode = 'config';
+    assert.strictEqual(getDeviceCliPrompt(sw), 'Switch0(config)#');
+
+    session.mode = 'config-vlan';
+    session.selectedVlan = 10;
+    assert.strictEqual(getDeviceCliPrompt(sw), 'Switch0(config-vlan)#');
+
+    session.mode = 'config-if';
+    session.selectedInterface = 'Fa0/1';
+    assert.strictEqual(getDeviceCliPrompt(sw), 'Switch0(config-if)#');
+});
+
+// 407. Switch CLI configure terminal enters config mode and exit/end navigate back
+runTest('407. Switch CLI configure terminal enters config mode and exit/end navigate back', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    const res1 = executeCliCommand('Switch0', 'configure terminal');
+    assert.strictEqual(res1.success, true);
+    assert.strictEqual(getDeviceCliPrompt(sw), 'Switch0(config)#');
+
+    executeCliCommand('Switch0', 'exit');
+    assert.strictEqual(getDeviceCliPrompt(sw), 'Switch0#');
+
+    executeCliCommand('Switch0', 'conf t');
+    assert.strictEqual(getDeviceCliPrompt(sw), 'Switch0(config)#');
+    executeCliCommand('Switch0', 'end');
+    assert.strictEqual(getDeviceCliPrompt(sw), 'Switch0#');
+});
+
+// 408. Switch CLI vlan <id> enters config-vlan mode and creates VLAN if needed
+runTest('408. Switch CLI vlan <id> enters config-vlan mode and creates VLAN if needed', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    executeCliCommand('Switch0', 'conf t');
+    const resVlan = executeCliCommand('Switch0', 'vlan 10');
+    assert.strictEqual(resVlan.success, true);
+    assert.strictEqual(getDeviceCliPrompt(sw), 'Switch0(config-vlan)#');
+    assert.ok(sw.vlans[10], 'VLAN 10 must be created');
+
+    const resBad = executeCliCommand('Switch0', 'vlan 5000');
+    assert.strictEqual(resBad.success, false);
+    assert.ok(resBad.output.includes('Invalid VLAN ID'));
+});
+
+// 409. Switch CLI name <name> inside config-vlan renames active VLAN
+runTest('409. Switch CLI name <name> inside config-vlan renames active VLAN', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    executeCliCommand('Switch0', 'conf t');
+    executeCliCommand('Switch0', 'vlan 20');
+    const resName = executeCliCommand('Switch0', 'name Engineering');
+    assert.strictEqual(resName.success, true);
+    assert.strictEqual(sw.vlans[20].name, 'Engineering');
+
+    executeCliCommand('Switch0', 'exit');
+    assert.strictEqual(getDeviceCliPrompt(sw), 'Switch0(config)#');
+});
+
+// 410. Switch CLI no vlan <id> deletes VLAN and returns member ports to VLAN 1
+runTest('410. Switch CLI no vlan <id> deletes VLAN and returns member ports to VLAN 1', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    executeCliCommand('Switch0', 'conf t');
+    executeCliCommand('Switch0', 'vlan 50');
+    executeCliCommand('Switch0', 'interface Fa0/5');
+    executeCliCommand('Switch0', 'switchport access vlan 50');
+    executeCliCommand('Switch0', 'exit');
+
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/5').accessVlan, 50);
+
+    const resDel = executeCliCommand('Switch0', 'no vlan 50');
+    assert.strictEqual(resDel.success, true);
+    assert.strictEqual(sw.vlans[50], undefined);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/5').accessVlan, 1);
+});
+
+// 411. Switch CLI no vlan 1 is rejected with clear error
+runTest('411. Switch CLI no vlan 1 is rejected with clear error', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    executeCliCommand('Switch0', 'conf t');
+    const res = executeCliCommand('Switch0', 'no vlan 1');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Default VLAN 1 cannot be deleted'));
+});
+
+// 412. Switch CLI interface <name> enters config-if mode on switch
+runTest('412. Switch CLI interface <name> enters config-if mode on switch', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    executeCliCommand('Switch0', 'conf t');
+    const resIf = executeCliCommand('Switch0', 'interface Fa0/2');
+    assert.strictEqual(resIf.success, true);
+    assert.strictEqual(getDeviceCliPrompt(sw), 'Switch0(config-if)#');
+
+    const resBadIf = executeCliCommand('Switch0', 'interface eth99');
+    assert.strictEqual(resBadIf.success, false);
+    assert.ok(resBadIf.output.includes('Invalid switch interface'));
+});
+
+// 413. Switch CLI switchport mode access sets port mode
+runTest('413. Switch CLI switchport mode access sets port mode', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    executeCliCommand('Switch0', 'conf t');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    const resMode = executeCliCommand('Switch0', 'switchport mode access');
+    assert.strictEqual(resMode.success, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').mode, 'access');
+});
+
+// 414. Switch CLI switchport access vlan <id> assigns access VLAN to port
+runTest('414. Switch CLI switchport access vlan <id> assigns access VLAN to port', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    executeCliCommand('Switch0', 'conf t');
+    executeCliCommand('Switch0', 'vlan 10');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    const resAcc = executeCliCommand('Switch0', 'switchport access vlan 10');
+    assert.strictEqual(resAcc.success, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').accessVlan, 10);
+});
+
+// 415. Switch CLI switchport access vlan rejects nonexistent VLAN with helpful error
+runTest('415. Switch CLI switchport access vlan rejects nonexistent VLAN with helpful error', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+
+    executeCliCommand('Switch0', 'conf t');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    const res = executeCliCommand('Switch0', 'switchport access vlan 99');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Access VLAN 99 does not exist'));
+});
+
+// 416. Switch CLI do <command> executes show and operational commands from config/vlan/if modes
+runTest('416. Switch CLI do <command> executes show and operational commands from config/vlan/if modes', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    executeCliCommand('Switch0', 'conf t');
+    executeCliCommand('Switch0', 'vlan 10');
+    executeCliCommand('Switch0', 'name Accounting');
+
+    const resDo = executeCliCommand('Switch0', 'do show vlan brief');
+    assert.strictEqual(resDo.success, true);
+    assert.ok(resDo.output.includes('Accounting'));
+    assert.strictEqual(getDeviceCliPrompt(networkState.devices[0]), 'Switch0(config-vlan)#');
+});
+
+// 417. Switch CLI context-aware help / ? outputs mode-specific command lists
+runTest('417. Switch CLI context-aware help / ? outputs mode-specific command lists', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+
+    const helpExec = executeCliCommand('Switch0', 'help');
+    assert.ok(helpExec.output.includes('show vlan brief'));
+    assert.ok(helpExec.output.includes('show mac-address-table'));
+
+    executeCliCommand('Switch0', 'conf t');
+    const helpConfig = executeCliCommand('Switch0', 'help');
+    assert.ok(helpConfig.output.includes('vlan <id>'));
+    assert.ok(helpConfig.output.includes('no vlan <id>'));
+
+    executeCliCommand('Switch0', 'vlan 10');
+    const helpVlan = executeCliCommand('Switch0', 'help');
+    assert.ok(helpVlan.output.includes('name <name>'));
+
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    const helpIf = executeCliCommand('Switch0', 'help');
+    assert.ok(helpIf.output.includes('switchport mode access'));
+    assert.ok(helpIf.output.includes('switchport access vlan <id>'));
+});
+
+// 418. Switch CLI show vlan / show vlan brief renders VLAN table with IDs, names, status, and port assignments
+runTest('418. Switch CLI show vlan / show vlan brief renders VLAN table with IDs, names, status, and port assignments', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    createSwitchVlan(sw, 10, 'Sales');
+    createSwitchVlan(sw, 20, 'Engineering');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+    setSwitchPortAccessVlan(sw, 'Fa0/2', 10);
+    setSwitchPortAccessVlan(sw, 'Fa0/3', 20);
+
+    const res = executeCliCommand('Switch0', 'show vlan brief');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('VLAN Name                             Status    Ports'));
+    assert.ok(res.output.includes('1    default                          active'));
+    assert.ok(res.output.includes('10   Sales                            active    Fa0/1, Fa0/2'));
+    assert.ok(res.output.includes('20   Engineering                      active    Fa0/3'));
+});
+
+// 419. Switch CLI show mac-address-table renders MAC table with VLAN column, MAC, Type DYNAMIC, and Port
+runTest('419. Switch CLI show mac-address-table renders MAC table with VLAN column, MAC, Type DYNAMIC, and Port', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    learnSwitchMac(sw.id, '00:11:22:33:44:55', 'PC0', 'Fa0/1', 10);
+    learnSwitchMac(sw.id, '66:77:88:99:AA:BB', 'PC1', 'Fa0/2', 20);
+
+    const res = executeCliCommand('Switch0', 'show mac-address-table');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Vlan    Mac Address       Type        Ports'));
+    assert.ok(res.output.includes('00:11:22:33:44:55'));
+    assert.ok(res.output.includes('66:77:88:99:AA:BB'));
+    assert.ok(res.output.includes('DYNAMIC'));
+    assert.ok(res.output.includes('Fa0/1'));
+    assert.ok(res.output.includes('Fa0/2'));
+    assert.ok(res.output.includes('Total Mac Addresses for this criterion: 2'));
+});
+
+// 420. Switch CLI show interfaces renders switch interfaces and their VLAN membership
+runTest('420. Switch CLI show interfaces renders switch interfaces and their VLAN membership', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const sw = networkState.devices[0];
+
+    createSwitchVlan(sw, 10, 'Sales');
+    addConnection('Switch0', 'PC0');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+
+    const res = executeCliCommand('Switch0', 'show interfaces');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Fa0/1 is up'));
+    assert.ok(res.output.includes('Access VLAN: 10'));
+});
+
+// 421. Switch CLI rejects router-specific commands (ip address, ip route) with educational message
+runTest('421. Switch CLI rejects router-specific commands (ip address, ip route) with educational message', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+
+    executeCliCommand('Switch0', 'conf t');
+    const resRoute = executeCliCommand('Switch0', 'ip route 10.0.0.0 255.0.0.0 10.0.0.1');
+    assert.strictEqual(resRoute.success, false);
+    assert.ok(resRoute.output.includes('Layer 2'));
+
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    const resIp = executeCliCommand('Switch0', 'ip address 192.168.1.1 255.255.255.0');
+    assert.strictEqual(resIp.success, false);
+    assert.ok(resIp.output.includes('Layer 2'));
+});
+
+// 422. VLAN-aware MAC learning associates learned MAC with incoming port access VLAN
+runTest('422. VLAN-aware MAC learning associates learned MAC with incoming port access VLAN', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    createSwitchVlan(sw, 10, 'VLAN10');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+    learnSwitchMac(sw.id, 'AA:BB:CC:DD:EE:01', 'PC0', 'Fa0/1', 10);
+
+    const entry = getSwitchMacEntry(sw.id, 'AA:BB:CC:DD:EE:01', 10);
+    assert.ok(entry);
+    assert.strictEqual(entry.vlan, 10);
+    assert.strictEqual(entry.port, 'Fa0/1');
+});
+
+// 423. getSwitchMacEntry isolates MAC entries between different VLANs
+runTest('423. getSwitchMacEntry isolates MAC entries between different VLANs', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    learnSwitchMac(sw.id, 'AA:BB:CC:DD:EE:01', 'PC0', 'Fa0/1', 10);
+
+    const entryVlan10 = getSwitchMacEntry(sw.id, 'AA:BB:CC:DD:EE:01', 10);
+    assert.ok(entryVlan10, 'Must find MAC in VLAN 10');
+
+    const entryVlan20 = getSwitchMacEntry(sw.id, 'AA:BB:CC:DD:EE:01', 20);
+    assert.strictEqual(entryVlan20, null, 'Must NOT find MAC in VLAN 20');
+});
+
+// 424. Layer-2 VLAN isolation: frames between access ports on different VLANs are dropped
+runTest('424. Layer-2 VLAN isolation: frames between access ports on different VLANs are dropped', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const sw = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0'); // Fa0/1
+    addConnection('Switch0', 'PC1'); // Fa0/2
+
+    // Put PC0 on VLAN 10 and PC1 on VLAN 20
+    createSwitchVlan(sw, 10, 'VLAN10');
+    createSwitchVlan(sw, 20, 'VLAN20');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+    setSwitchPortAccessVlan(sw, 'Fa0/2', 20);
+
+    // Pre-populate ARP and MAC tables
+    learnArp(pc0.id, pc1.ip, pc1.mac);
+    learnSwitchMac(sw.id, pc1.mac, pc1.id, 'Fa0/2', 20);
+
+    const frame = {
+        events: [],
+        protocol: 'ICMP',
+        sourceIp: pc0.ip,
+        destinationIp: pc1.ip,
+        sourceMac: pc0.mac,
+        destinationMac: pc1.mac
+    };
+    const result = simulatePathTransmission(frame, pc0, pc1, ['PC0', 'Switch0', 'PC1']);
+
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.action, 'DROP');
+    assert.ok(result.reason.includes('VLAN isolation'));
+});
+
+// 425. Layer-2 VLAN isolation: frames between access ports on the same VLAN are successfully forwarded
+runTest('425. Layer-2 VLAN isolation: frames between access ports on the same VLAN are successfully forwarded', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const sw = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0'); // Fa0/1
+    addConnection('Switch0', 'PC1'); // Fa0/2
+
+    // Put both PC0 and PC1 on VLAN 10
+    createSwitchVlan(sw, 10, 'Sales');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+    setSwitchPortAccessVlan(sw, 'Fa0/2', 10);
+
+    learnArp(pc0.id, pc1.ip, pc1.mac);
+    learnSwitchMac(sw.id, pc1.mac, pc1.id, 'Fa0/2', 10);
+
+    const frame = {
+        events: [],
+        protocol: 'ICMP',
+        sourceIp: pc0.ip,
+        destinationIp: pc1.ip,
+        sourceMac: pc0.mac,
+        destinationMac: pc1.mac
+    };
+    const result = simulatePathTransmission(frame, pc0, pc1, ['PC0', 'Switch0', 'PC1']);
+
+    assert.strictEqual(result.success, true);
+    assert.ok(frame.events.some(e => e.includes('forwarded frame through Fa0/2')));
+});
+
+// 426. Layer-2 VLAN isolation: unknown unicast flooding is restricted exclusively to ports matching ingress VLAN
+runTest('426. Layer-2 VLAN isolation: unknown unicast flooding is restricted exclusively to ports matching ingress VLAN', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+    addDevice('pc', 400, 200);
+
+    const pc0 = networkState.devices[0];
+    const sw = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+    const pc2 = networkState.devices[3];
+
+    addConnection('PC0', 'Switch0'); // Fa0/1 (VLAN 10)
+    addConnection('Switch0', 'PC1'); // Fa0/2 (VLAN 10)
+    addConnection('Switch0', 'PC2'); // Fa0/3 (VLAN 20)
+
+    createSwitchVlan(sw, 10, 'Sales');
+    createSwitchVlan(sw, 20, 'HR');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+    setSwitchPortAccessVlan(sw, 'Fa0/2', 10);
+    setSwitchPortAccessVlan(sw, 'Fa0/3', 20);
+
+    // Send frame to unknown unicast destination MAC from PC0 (VLAN 10)
+    const frame = {
+        events: [],
+        protocol: 'ICMP',
+        sourceIp: '192.168.1.10',
+        destinationIp: '192.168.1.20',
+        sourceMac: pc0.mac,
+        destinationMac: '00:99:99:99:99:99'
+    };
+    const result = simulatePathTransmission(frame, pc0, pc1, ['PC0', 'Switch0', 'PC1']);
+
+    const floodHop = result.hopActions.find(h => h.action === 'FLOOD');
+    assert.ok(floodHop, 'Switch must perform flood');
+    assert.strictEqual(floodHop.egressPorts.length, 1, 'Flood must ONLY go to VLAN 10 ports, excluding Fa0/3');
+    assert.strictEqual(floodHop.egressPorts[0], 'Fa0/2');
+});
+
+// 427. ARP isolation across VLANs: ARP request does not flood to ports in different VLANs and cannot resolve
+runTest('427. ARP isolation across VLANs: ARP request does not flood to ports in different VLANs and cannot resolve', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const sw = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0'); // Fa0/1
+    addConnection('Switch0', 'PC1'); // Fa0/2
+
+    createSwitchVlan(sw, 10, 'VLAN10');
+    createSwitchVlan(sw, 20, 'VLAN20');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+    setSwitchPortAccessVlan(sw, 'Fa0/2', 20);
+
+    const arpRes = simulateArpResolution(pc0, pc1.ip);
+    assert.strictEqual(arpRes.success, false);
+    assert.ok(arpRes.reason.includes('isolated broadcast between VLAN 10 and VLAN 20'));
+});
+
+// 428. ARP resolution succeeds between hosts assigned to the same access VLAN (e.g. VLAN 10)
+runTest('428. ARP resolution succeeds between hosts assigned to the same access VLAN (e.g. VLAN 10)', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+
+    const pc0 = networkState.devices[0];
+    const sw = networkState.devices[1];
+    const pc1 = networkState.devices[2];
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0'); // Fa0/1
+    addConnection('Switch0', 'PC1'); // Fa0/2
+
+    createSwitchVlan(sw, 10, 'VLAN10');
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+    setSwitchPortAccessVlan(sw, 'Fa0/2', 10);
+
+    const arpRes = simulateArpResolution(pc0, pc1.ip);
+    assert.strictEqual(arpRes.success, true);
+    assert.strictEqual(arpRes.targetMac, pc1.mac);
+});
+
+// 429. Undo / Redo properly tracks VLAN creation, deletion, naming, and switchport assignments
+runTest('429. Undo / Redo properly tracks VLAN creation, deletion, naming, and switchport assignments', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    // Initial state: only VLAN 1
+    assert.strictEqual(Object.keys(sw.vlans).length, 1);
+
+    // CLI vlan 10
+    executeCliCommand('Switch0', 'conf t');
+    executeCliCommand('Switch0', 'vlan 10');
+    executeCliCommand('Switch0', 'name TestVlan');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    executeCliCommand('Switch0', 'switchport access vlan 10');
+
+    assert.ok(networkState.devices[0].vlans[10]);
+    assert.strictEqual(networkState.devices[0].vlans[10].name, 'TestVlan');
+    assert.strictEqual(getSwitchPortConfig(networkState.devices[0], 'Fa0/1').accessVlan, 10);
+
+    // Undo switchport assignment
+    undo();
+    assert.strictEqual(getSwitchPortConfig(networkState.devices[0], 'Fa0/1').accessVlan, 1);
+
+    // Undo name
+    undo();
+    assert.strictEqual(networkState.devices[0].vlans[10].name, 'VLAN10');
+
+    // Redo name & switchport
+    redo();
+    assert.strictEqual(networkState.devices[0].vlans[10].name, 'TestVlan');
+    redo();
+    assert.strictEqual(getSwitchPortConfig(networkState.devices[0], 'Fa0/1').accessVlan, 10);
+});
+
+// 430. Backward compatibility: legacy switch topology snapshots without vlans/switchports properties load without errors
+runTest('430. Backward compatibility: legacy switch topology snapshots without vlans/switchports properties load without errors', () => {
+    resetLab();
+    // Simulate legacy switch object missing vlans and switchports
+    networkState.devices.push({
+        id: 'Switch0',
+        name: 'Switch0',
+        type: 'switch',
+        x: 100,
+        y: 100,
+        mac: '00:11:22:33:44:00'
+    });
+
+    const legacySw = networkState.devices[0];
+    const vlans = getSwitchVlans(legacySw);
+    assert.strictEqual(Object.keys(vlans).length, 1);
+    assert.strictEqual(vlans[1].id, 1);
+
+    const portCfg = getSwitchPortConfig(legacySw, 'Fa0/1');
+    assert.strictEqual(portCfg.accessVlan, 1);
+    assert.strictEqual(portCfg.mode, 'access');
+
+    // CLI execution on legacy switch works seamlessly
+    const res = executeCliCommand('Switch0', 'show vlan brief');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('default'));
+});
+
+// 431. Switch Inspector UI renders VLAN count and VLAN column in MAC table
+runTest('431. Switch Inspector UI renders VLAN count and VLAN column in MAC table', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    createSwitchVlan(sw, 10, 'Sales');
+    learnSwitchMac(sw.id, '00:AA:BB:CC:DD:EE', 'PC0', 'Fa0/1', 10);
+
+    const html = renderSwitchInspector(sw);
+    assert.ok(html.includes('VLANs'), 'Must render VLANs summary');
+    assert.ok(html.includes('2'), 'Must show 2 VLANs configured');
+    assert.ok(html.includes('<th>VLAN</th>'), 'Must render VLAN header in MAC table');
+    assert.ok(html.includes('<td>10</td>'), 'Must render VLAN 10 row in MAC table');
+    assert.ok(html.includes('openSwitchTerminalBtn'), 'Must render Switch CLI button');
+});
+
+// 432. End-to-end full CLI configuration of switch VLANs and access ports with packet verification
+runTest('432. End-to-end full CLI configuration of switch VLANs and access ports with packet verification', () => {
+    resetLab();
+    addDevice('pc', 100, 100);     // PC0
+    addDevice('pc', 100, 200);     // PC1
+    addDevice('switch', 300, 150); // Switch0
+    addDevice('pc', 500, 100);     // PC2
+    addDevice('pc', 500, 200);     // PC3
+
+    const pc0 = networkState.devices[0];
+    const pc1 = networkState.devices[1];
+    const sw0 = networkState.devices[2];
+    const pc2 = networkState.devices[3];
+    const pc3 = networkState.devices[4];
+
+    pc0.ip = '10.10.10.1'; pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '10.20.20.1'; pc1.subnetMask = '255.255.255.0';
+    pc2.ip = '10.10.10.2'; pc2.subnetMask = '255.255.255.0';
+    pc3.ip = '10.20.20.2'; pc3.subnetMask = '255.255.255.0';
+
+    addConnection('PC0', 'Switch0'); // Fa0/1
+    addConnection('PC1', 'Switch0'); // Fa0/2
+    addConnection('Switch0', 'PC2'); // Fa0/3
+    addConnection('Switch0', 'PC3'); // Fa0/4
+
+    // Configure Switch0 ENTIRELY via CLI commands
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'vlan 10');
+    executeCliCommand('Switch0', 'name Sales');
+    executeCliCommand('Switch0', 'vlan 20');
+    executeCliCommand('Switch0', 'name Engineering');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    executeCliCommand('Switch0', 'switchport mode access');
+    executeCliCommand('Switch0', 'switchport access vlan 10');
+    executeCliCommand('Switch0', 'interface Fa0/2');
+    executeCliCommand('Switch0', 'switchport mode access');
+    executeCliCommand('Switch0', 'switchport access vlan 20');
+    executeCliCommand('Switch0', 'interface Fa0/3');
+    executeCliCommand('Switch0', 'switchport mode access');
+    executeCliCommand('Switch0', 'switchport access vlan 10');
+    executeCliCommand('Switch0', 'interface Fa0/4');
+    executeCliCommand('Switch0', 'switchport mode access');
+    executeCliCommand('Switch0', 'switchport access vlan 20');
+    executeCliCommand('Switch0', 'end');
+
+    // Verify show vlan brief output
+    const vlanShow = executeCliCommand('Switch0', 'show vlan brief');
+    assert.ok(vlanShow.output.includes('10   Sales                            active    Fa0/1, Fa0/3'));
+    assert.ok(vlanShow.output.includes('20   Engineering                      active    Fa0/2, Fa0/4'));
+
+    // PC0 (VLAN 10) to PC2 (VLAN 10) ping succeeds
+    const pingVlan10 = executeCliCommand('PC0', 'ping 10.10.10.2');
+    assert.strictEqual(pingVlan10.success, true);
+    assert.ok(pingVlan10.output.includes('Reply from 10.10.10.2'));
+
+    // PC1 (VLAN 20) to PC3 (VLAN 20) ping succeeds
+    const pingVlan20 = executeCliCommand('PC1', 'ping 10.20.20.2');
+    assert.strictEqual(pingVlan20.success, true);
+    assert.ok(pingVlan20.output.includes('Reply from 10.20.20.2'));
+
+    // PC0 (VLAN 10) to PC1 (VLAN 20) ping fails due to VLAN isolation
+    const pingCross = executeCliCommand('PC0', 'ping 10.20.20.1');
+    assert.strictEqual(pingCross.success, false);
 });
 
 console.log('----------------------------------------------------');

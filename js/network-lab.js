@@ -449,6 +449,23 @@ function addDevice(type, x, y) {
                 }
             }
         };
+    } else if (type === 'switch') {
+        device = {
+            id: `${DEVICE_DEFINITIONS[type].label}${counter}`,
+            type,
+            name: `${DEVICE_DEFINITIONS[type].label}${counter}`,
+            x: clamp(x - 56, 24, safeWidth),
+            y: clamp(y - 48, 24, safeHeight),
+            mac: generateMacAddress(networkState.devices),
+            vlans: {
+                1: {
+                    id: 1,
+                    name: 'default',
+                    status: 'active'
+                }
+            },
+            switchports: {}
+        };
     } else {
         device = {
             id: `${DEVICE_DEFINITIONS[type].label}${counter}`,
@@ -2019,7 +2036,7 @@ function renderPropertiesPanel() {
         });
     }
 
-    const openTerminalBtn = panel.querySelector('#openDeviceTerminalBtn') || panel.querySelector('#openRouterTerminalBtn');
+    const openTerminalBtn = panel.querySelector('#openDeviceTerminalBtn') || panel.querySelector('#openRouterTerminalBtn') || panel.querySelector('#openSwitchTerminalBtn');
     if (openTerminalBtn) {
         openTerminalBtn.addEventListener('click', () => {
             const devId = openTerminalBtn.dataset.deviceId || networkState.selectedDeviceId;
@@ -3502,11 +3519,15 @@ function renderRouterInspector(selected) {
 }
 
 function renderSwitchInspector(selected) {
+    const sw = getSwitchDevice(selected);
+    ensureSwitchVlanState(sw || selected);
     const runtime = getSwitchRuntime(selected.id);
     const portCount = getSwitchPortCount(selected.id);
+    const vlanCount = Object.keys((sw || selected).vlans || {}).length || 1;
     const learnedCount = runtime.macTable.length;
     const macRows = runtime.macTable.map((entry) => `
             <tr>
+                <td>${escapeHtml(String(entry.vlan || 1))}</td>
                 <td>${escapeHtml(entry.mac)}</td>
                 <td>${escapeHtml(entry.port)}</td>
                 <td>${escapeHtml(getDeviceById(entry.deviceId)?.name || entry.deviceId)}</td>
@@ -3522,6 +3543,10 @@ function renderSwitchInspector(selected) {
                     <strong>2</strong>
                 </div>
                 <div class="property-summary-item">
+                    <span>VLANs</span>
+                    <strong>${vlanCount}</strong>
+                </div>
+                <div class="property-summary-item">
                     <span>Ports</span>
                     <strong>${portCount}</strong>
                 </div>
@@ -3530,6 +3555,11 @@ function renderSwitchInspector(selected) {
                     <strong>${learnedCount}</strong>
                 </div>
             </div>
+            <div class="property-actions" style="margin-top: 10px;">
+                <button id="openSwitchTerminalBtn" class="terminal-launch-btn" type="button" data-device-id="${escapeHtml(selected.id)}">
+                    Open Switch Console / CLI
+                </button>
+            </div>
         </div>
         <div class="property-summary">
             <h4>MAC ADDRESS TABLE</h4>
@@ -3537,6 +3567,7 @@ function renderSwitchInspector(selected) {
                 <table class="property-table">
                     <thead>
                         <tr>
+                            <th>VLAN</th>
                             <th>MAC Address</th>
                             <th>Port</th>
                             <th>Device</th>
@@ -4493,6 +4524,229 @@ function getPortForSwitchAndNeighbor(switchId, neighborId) {
         return null;
     }
     return getSwitchPortLabel(switchId, connection.id);
+}
+
+const MIN_VLAN_ID = 1;
+const MAX_VLAN_ID = 4094;
+
+function normalizeVlanId(vlanId) {
+    if (typeof vlanId === 'number' && Number.isInteger(vlanId)) {
+        if (vlanId >= MIN_VLAN_ID && vlanId <= MAX_VLAN_ID) {
+            return vlanId;
+        }
+        return null;
+    }
+    if (typeof vlanId === 'string') {
+        const trimmed = vlanId.trim();
+        if (/^\d+$/.test(trimmed)) {
+            const num = parseInt(trimmed, 10);
+            if (num >= MIN_VLAN_ID && num <= MAX_VLAN_ID) {
+                return num;
+            }
+        }
+    }
+    return null;
+}
+
+function getSwitchDevice(switchOrId) {
+    if (!switchOrId) return null;
+    if (typeof switchOrId === 'object' && switchOrId.type === 'switch') {
+        return switchOrId;
+    }
+    const dev = getDeviceById(switchOrId) || (networkState.devices && networkState.devices.find((d) => d.name === switchOrId || d.id === switchOrId));
+    return dev && dev.type === 'switch' ? dev : null;
+}
+
+function ensureSwitchVlanState(sw) {
+    if (!sw || sw.type !== 'switch') return;
+    if (!sw.vlans || typeof sw.vlans !== 'object') {
+        sw.vlans = {};
+    }
+    if (!sw.vlans[1]) {
+        sw.vlans[1] = {
+            id: 1,
+            name: 'default',
+            status: 'active'
+        };
+    }
+    if (!sw.switchports || typeof sw.switchports !== 'object') {
+        sw.switchports = {};
+    }
+}
+
+function getSwitchVlans(switchOrId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return {};
+    ensureSwitchVlanState(sw);
+    return sw.vlans;
+}
+
+function createSwitchVlan(switchOrId, vlanId, name = '') {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) {
+        throw new Error('Switch not found.');
+    }
+    ensureSwitchVlanState(sw);
+    const normId = normalizeVlanId(vlanId);
+    if (normId === null) {
+        throw new Error(`Invalid VLAN ID "${vlanId}". Valid range is 1-4094.`);
+    }
+    if (sw.vlans[normId]) {
+        throw new Error(`VLAN ${normId} already exists.`);
+    }
+    const vlanName = (name || '').trim() || (normId === 1 ? 'default' : `VLAN${normId}`);
+    sw.vlans[normId] = {
+        id: normId,
+        name: vlanName,
+        status: 'active'
+    };
+    return sw.vlans[normId];
+}
+
+function deleteSwitchVlan(switchOrId, vlanId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) {
+        throw new Error('Switch not found.');
+    }
+    ensureSwitchVlanState(sw);
+    const normId = normalizeVlanId(vlanId);
+    if (normId === null) {
+        throw new Error(`Invalid VLAN ID "${vlanId}". Valid range is 1-4094.`);
+    }
+    if (normId === 1) {
+        throw new Error('Default VLAN 1 cannot be deleted.');
+    }
+    if (!sw.vlans[normId]) {
+        throw new Error(`VLAN ${normId} does not exist.`);
+    }
+
+    delete sw.vlans[normId];
+
+    // Policy: Ports assigned to a deleted VLAN automatically return to VLAN 1
+    if (sw.switchports) {
+        Object.keys(sw.switchports).forEach((portName) => {
+            if (sw.switchports[portName].accessVlan === normId) {
+                sw.switchports[portName].accessVlan = 1;
+            }
+        });
+    }
+
+    return true;
+}
+
+function renameSwitchVlan(switchOrId, vlanId, newName) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) {
+        throw new Error('Switch not found.');
+    }
+    ensureSwitchVlanState(sw);
+    const normId = normalizeVlanId(vlanId);
+    if (normId === null || !sw.vlans[normId]) {
+        throw new Error(`VLAN ${vlanId} does not exist.`);
+    }
+    const trimmed = (newName || '').trim();
+    if (!trimmed) {
+        throw new Error('VLAN name cannot be empty.');
+    }
+    if (!/^[a-zA-Z0-9_-]{1,32}$/.test(trimmed)) {
+        throw new Error('Invalid VLAN name. Must be 1-32 alphanumeric characters, dashes, or underscores.');
+    }
+    sw.vlans[normId].name = trimmed;
+    return sw.vlans[normId];
+}
+
+function normalizeSwitchPortName(portName) {
+    if (!portName || typeof portName !== 'string') return null;
+    const trimmed = portName.trim();
+    const faMatch = trimmed.match(/^(?:fa|fastethernet|f)\s*0?\/(\d+)$/i);
+    if (faMatch) {
+        const portNum = parseInt(faMatch[1], 10);
+        if (portNum >= 1 && portNum <= 48) {
+            return `Fa0/${portNum}`;
+        }
+        return null;
+    }
+    const gigMatch = trimmed.match(/^(?:gig|gigabitethernet|g)\s*0?\/(\d+)$/i);
+    if (gigMatch) {
+        const portNum = parseInt(gigMatch[1], 10);
+        if (portNum >= 1 && portNum <= 8) {
+            return `Gig0/${portNum}`;
+        }
+        return null;
+    }
+    return null;
+}
+
+function getSwitchPortConfig(switchOrId, portName) {
+    const sw = getSwitchDevice(switchOrId);
+    const normPort = normalizeSwitchPortName(portName) || portName;
+    if (!sw) {
+        return { port: normPort, name: normPort, mode: 'access', accessVlan: 1 };
+    }
+    ensureSwitchVlanState(sw);
+    if (!sw.switchports[normPort]) {
+        return {
+            port: normPort,
+            name: normPort,
+            mode: 'access',
+            accessVlan: 1
+        };
+    }
+    const cfg = sw.switchports[normPort];
+    return {
+        port: cfg.port || cfg.name || normPort,
+        name: cfg.name || cfg.port || normPort,
+        mode: cfg.mode || 'access',
+        accessVlan: cfg.accessVlan || 1
+    };
+}
+
+function setSwitchPortMode(switchOrId, portName, mode) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) throw new Error('Switch not found.');
+    ensureSwitchVlanState(sw);
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) throw new Error(`Invalid switch port "${portName}".`);
+    if (mode !== 'access') {
+        throw new Error(`Mode "${mode}" is not supported (only "access" mode supported in Phase 1).`);
+    }
+    if (!sw.switchports[normPort]) {
+        sw.switchports[normPort] = {
+            port: normPort,
+            name: normPort,
+            mode: 'access',
+            accessVlan: 1
+        };
+    } else {
+        sw.switchports[normPort].mode = 'access';
+    }
+    return sw.switchports[normPort];
+}
+
+function setSwitchPortAccessVlan(switchOrId, portName, vlanId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) throw new Error('Switch not found.');
+    ensureSwitchVlanState(sw);
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) throw new Error(`Invalid switch port "${portName}".`);
+    const normVlan = normalizeVlanId(vlanId);
+    if (normVlan === null) {
+        throw new Error(`Invalid VLAN ID "${vlanId}". Valid range is 1-4094.`);
+    }
+    if (!sw.vlans[normVlan]) {
+        throw new Error(`VLAN ${normVlan} does not exist on switch ${sw.name}.`);
+    }
+    if (!sw.switchports[normPort]) {
+        sw.switchports[normPort] = {
+            port: normPort,
+            name: normPort,
+            mode: 'access',
+            accessVlan: normVlan
+        };
+    } else {
+        sw.switchports[normPort].accessVlan = normVlan;
+    }
+    return sw.switchports[normPort];
 }
 
 let staticRouteCounter = 0;
@@ -5553,34 +5807,42 @@ function cleanupAllStaleSwitchMacEntries() {
     return totalRemoved;
 }
 
-function getSwitchMacEntry(switchId, mac) {
+function getSwitchMacEntry(switchId, mac, vlan = null) {
     const runtime = getSwitchRuntime(switchId);
     const normalized = normalizeMacAddress(mac);
     if (!normalized) {
         return null;
     }
+    const targetVlan = vlan !== null && vlan !== undefined ? Number(vlan) : null;
+    if (targetVlan !== null) {
+        return runtime.macTable.find((entry) => entry.mac === normalized && (Number(entry.vlan) || 1) === targetVlan) || null;
+    }
     return runtime.macTable.find((entry) => entry.mac === normalized) || null;
 }
 
-function learnSwitchMac(switchId, sourceMac, sourceDeviceId, portLabel) {
+function learnSwitchMac(switchId, sourceMac, sourceDeviceId, portLabel, vlan = 1) {
     const runtime = getSwitchRuntime(switchId);
     const normalized = normalizeMacAddress(sourceMac);
     if (!normalized) {
         return null;
     }
+    const vlanId = Number(vlan) || 1;
 
-    const existing = runtime.macTable.find((entry) => entry.mac === normalized);
+    const existing = runtime.macTable.find((entry) => entry.mac === normalized && (Number(entry.vlan) || 1) === vlanId);
     if (existing) {
         existing.port = portLabel;
         existing.deviceId = sourceDeviceId;
+        existing.vlan = vlanId;
         existing.learnedAt = new Date().toISOString();
         return existing;
     }
 
     const entry = {
+        vlan: vlanId,
         mac: normalized,
         port: portLabel,
         deviceId: sourceDeviceId,
+        type: 'DYNAMIC',
         learnedAt: new Date().toISOString()
     };
     runtime.macTable.push(entry);
@@ -5954,22 +6216,54 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
             const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
             frame.events.push(`Frame entered ${toDevice.name} on ${ingressPort}`);
 
+            const ingressPortConfig = getSwitchPortConfig(toDevice, ingressPort);
+            const ingressVlan = ingressPortConfig.accessVlan || 1;
+
             const learnedDevice = findDeviceByMac(frame.sourceMac, null, networkState.devices);
             const learnedDeviceId = learnedDevice?.id || fromEndpoint.id;
             const learnedDeviceName = learnedDevice?.name || fromEndpoint.name;
-            learnSwitchMac(toDevice.id, frame.sourceMac, learnedDeviceId, ingressPort);
-            frame.events.push(`Switch ${toDevice.name} learned ${learnedDeviceName} MAC (${frame.sourceMac}) → ${ingressPort}`);
+            learnSwitchMac(toDevice.id, frame.sourceMac, learnedDeviceId, ingressPort, ingressVlan);
+            frame.events.push(`Switch ${toDevice.name} learned ${learnedDeviceName} MAC (${frame.sourceMac}) → ${ingressPort} (VLAN ${ingressVlan})`);
 
             const nextHopId = topologyPath[i + 2];
             const expectedEgressPort = nextHopId ? getPortForSwitchAndNeighbor(toDevice.id, nextHopId) : null;
             const runtime = getSwitchRuntime(toDevice.id);
-            const egressPorts = Object.values(runtime.ports).filter(p => p !== ingressPort);
+            const allOtherPorts = Object.values(runtime.ports).filter(p => p !== ingressPort);
+            const egressPorts = allOtherPorts.filter(p => (getSwitchPortConfig(toDevice, p).accessVlan || 1) === ingressVlan);
+
+            // Layer-2 VLAN Isolation Check
+            if (expectedEgressPort) {
+                const egressPortConfig = getSwitchPortConfig(toDevice, expectedEgressPort);
+                const egressVlan = egressPortConfig.accessVlan || 1;
+                if (egressVlan !== ingressVlan) {
+                    frame.events.push(`Switch ${toDevice.name} dropped frame: ingress port ${ingressPort} (VLAN ${ingressVlan}) and egress port ${expectedEgressPort} (VLAN ${egressVlan}) are isolated in different VLANs`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'switch',
+                        action: 'DROP',
+                        reason: 'vlan-isolation',
+                        ingressPort,
+                        egressPort: expectedEgressPort,
+                        ingressVlan,
+                        egressVlan,
+                        destinationMac: frame.destinationMac
+                    });
+                    return {
+                        success: false,
+                        reason: `Switch ${toDevice.name} dropped frame due to VLAN isolation (VLAN ${ingressVlan} vs VLAN ${egressVlan}).`,
+                        path: traversedPath,
+                        action: 'DROP',
+                        hopActions
+                    };
+                }
+            }
 
             const isBroadcast = frame.destinationMac === 'FF:FF:FF:FF:FF:FF';
-            const destEntry = isBroadcast ? null : getSwitchMacEntry(toDevice.id, frame.destinationMac);
+            const destEntry = isBroadcast ? null : getSwitchMacEntry(toDevice.id, frame.destinationMac, ingressVlan);
 
             if (isBroadcast) {
-                frame.events.push(`Switch ${toDevice.name} flooded broadcast frame (FF:FF:FF:FF:FF:FF) on all ports except ${ingressPort}`);
+                frame.events.push(`Switch ${toDevice.name} flooded broadcast frame (FF:FF:FF:FF:FF:FF) on all VLAN ${ingressVlan} ports except ${ingressPort}`);
                 hopActions.push({
                     deviceId: toDevice.id,
                     deviceName: toDevice.name,
@@ -5981,8 +6275,8 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     destinationMac: frame.destinationMac
                 });
             } else if (!destEntry) {
-                frame.events.push(`Destination MAC (${frame.destinationMac}) unknown in MAC table`);
-                frame.events.push(`Switch ${toDevice.name} flooded unknown unicast frame on all ports except ${ingressPort}`);
+                frame.events.push(`Destination MAC (${frame.destinationMac}) unknown in VLAN ${ingressVlan} MAC table`);
+                frame.events.push(`Switch ${toDevice.name} flooded unknown unicast frame on all VLAN ${ingressVlan} ports except ${ingressPort}`);
                 hopActions.push({
                     deviceId: toDevice.id,
                     deviceName: toDevice.name,
@@ -6624,11 +6918,45 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
 
         if (toDevice.type === 'switch') {
             const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
-            learnSwitchMac(toDevice.id, reqMac, requesterDevice.id, ingressPort);
-            events.push(`Switch ${toDevice.name} learned ${requesterDevice.name} MAC (${reqMac}) → ${ingressPort}`);
+            const ingressPortConfig = getSwitchPortConfig(toDevice, ingressPort);
+            const ingressVlan = ingressPortConfig.accessVlan || 1;
+
+            learnSwitchMac(toDevice.id, reqMac, requesterDevice.id, ingressPort, ingressVlan);
+            events.push(`Switch ${toDevice.name} learned ${requesterDevice.name} MAC (${reqMac}) → ${ingressPort} (VLAN ${ingressVlan})`);
+
+            // Check if next hop port is in same VLAN
+            const nextHopId = arpPath[i + 2];
+            const nextPort = nextHopId ? getPortForSwitchAndNeighbor(toDevice.id, nextHopId) : null;
+            if (nextPort) {
+                const nextPortConfig = getSwitchPortConfig(toDevice, nextPort);
+                const nextVlan = nextPortConfig.accessVlan || 1;
+                if (nextVlan !== ingressVlan) {
+                    events.push(`Switch ${toDevice.name} dropped broadcast frame: ingress port ${ingressPort} (VLAN ${ingressVlan}) and destination port ${nextPort} (VLAN ${nextVlan}) are in different VLANs`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'switch',
+                        action: 'DROP',
+                        reason: 'vlan-isolation',
+                        ingressPort,
+                        egressPort: nextPort,
+                        ingressVlan,
+                        egressVlan: nextVlan,
+                        destinationMac: 'FF:FF:FF:FF:FF:FF'
+                    });
+                    return {
+                        success: false,
+                        reason: `ARP resolution failed: Switch ${toDevice.name} isolated broadcast between VLAN ${ingressVlan} and VLAN ${nextVlan}.`,
+                        path: arpPath.slice(0, i + 1),
+                        events,
+                        hopActions
+                    };
+                }
+            }
+
             events.push(`Switch ${toDevice.name} flooded broadcast frame (FF:FF:FF:FF:FF:FF) on all ports except ${ingressPort}`);
             const runtime = getSwitchRuntime(toDevice.id);
-            const egressPorts = Object.values(runtime.ports).filter(p => p !== ingressPort);
+            const egressPorts = Object.values(runtime.ports).filter(p => p !== ingressPort && (getSwitchPortConfig(toDevice, p).accessVlan || 1) === ingressVlan);
             hopActions.push({
                 deviceId: toDevice.id,
                 deviceName: toDevice.name,
@@ -6670,10 +6998,43 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
 
         if (toDevice && toDevice.type === 'switch') {
             const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
-            learnSwitchMac(toDevice.id, targetMac, targetDevice.id, ingressPort);
-            events.push(`Switch ${toDevice.name} learned ${targetDevice.name} MAC (${targetMac}) → ${ingressPort}`);
+            const ingressPortConfig = getSwitchPortConfig(toDevice, ingressPort);
+            const ingressVlan = ingressPortConfig.accessVlan || 1;
 
-            const destEntry = getSwitchMacEntry(toDevice.id, reqMac);
+            learnSwitchMac(toDevice.id, targetMac, targetDevice.id, ingressPort, ingressVlan);
+            events.push(`Switch ${toDevice.name} learned ${targetDevice.name} MAC (${targetMac}) → ${ingressPort} (VLAN ${ingressVlan})`);
+
+            // Next hop VLAN check
+            const nextHopId = reverseArpPath[i + 2];
+            const nextPort = nextHopId ? getPortForSwitchAndNeighbor(toDevice.id, nextHopId) : null;
+            if (nextPort) {
+                const nextPortConfig = getSwitchPortConfig(toDevice, nextPort);
+                const nextVlan = nextPortConfig.accessVlan || 1;
+                if (nextVlan !== ingressVlan) {
+                    events.push(`Switch ${toDevice.name} dropped ARP reply: ports ${ingressPort} (VLAN ${ingressVlan}) and ${nextPort} (VLAN ${nextVlan}) are in different VLANs`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'switch',
+                        action: 'DROP',
+                        reason: 'vlan-isolation',
+                        ingressPort,
+                        egressPort: nextPort,
+                        ingressVlan,
+                        egressVlan: nextVlan,
+                        destinationMac: reqMac
+                    });
+                    return {
+                        success: false,
+                        reason: `ARP resolution failed: Switch ${toDevice.name} isolated ARP reply between VLAN ${ingressVlan} and VLAN ${nextVlan}.`,
+                        path: reverseArpPath.slice(0, i + 1),
+                        events,
+                        hopActions
+                    };
+                }
+            }
+
+            const destEntry = getSwitchMacEntry(toDevice.id, reqMac, ingressVlan);
             if (destEntry) {
                 events.push(`Switch ${toDevice.name} forwarded unicast ARP Reply to ${requesterDevice.name} on ${destEntry.port}`);
                 hopActions.push({
@@ -6688,8 +7049,8 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
                 });
             } else {
                 const runtime = getSwitchRuntime(toDevice.id);
-                const egressPorts = Object.values(runtime.ports).filter(p => p !== ingressPort);
-                events.push(`Switch ${toDevice.name} flooded ARP Reply on all ports except ${ingressPort}`);
+                const egressPorts = Object.values(runtime.ports).filter(p => p !== ingressPort && (getSwitchPortConfig(toDevice, p).accessVlan || 1) === ingressVlan);
+                events.push(`Switch ${toDevice.name} flooded ARP Reply on VLAN ${ingressVlan} ports except ${ingressPort}`);
                 hopActions.push({
                     deviceId: toDevice.id,
                     deviceName: toDevice.name,
@@ -7747,6 +8108,7 @@ function getDeviceTerminalSession(deviceId) {
             logs: [],
             mode: 'exec',
             selectedInterface: null,
+            selectedVlan: null,
             prevMode: 'exec'
         };
     }
@@ -7754,17 +8116,30 @@ function getDeviceTerminalSession(deviceId) {
 }
 
 function isDeviceCliSupported(deviceOrId) {
-    const dev = typeof deviceOrId === 'string' ? getDeviceById(deviceOrId) : deviceOrId;
+    const dev = typeof deviceOrId === 'string' ? (getDeviceById(deviceOrId) || (networkState.devices && networkState.devices.find(d => d.name === deviceOrId || d.id === deviceOrId))) : deviceOrId;
     if (!dev) return false;
-    return ['pc', 'laptop', 'server', 'router'].includes(dev.type);
+    return ['pc', 'laptop', 'server', 'router', 'switch'].includes(dev.type);
 }
 
 function getDeviceCliPrompt(deviceOrId) {
-    const dev = typeof deviceOrId === 'string' ? getDeviceById(deviceOrId) : deviceOrId;
+    const dev = typeof deviceOrId === 'string' ? (getDeviceById(deviceOrId) || (networkState.devices && networkState.devices.find(d => d.name === deviceOrId || d.id === deviceOrId))) : deviceOrId;
     if (!dev) return 'Device>';
     const name = dev.name || dev.id;
     if (dev.type === 'router') {
         const session = getDeviceTerminalSession(dev.id);
+        if (session.mode === 'config-if') {
+            return `${name}(config-if)#`;
+        }
+        if (session.mode === 'config') {
+            return `${name}(config)#`;
+        }
+        return `${name}#`;
+    }
+    if (dev.type === 'switch') {
+        const session = getDeviceTerminalSession(dev.id);
+        if (session.mode === 'config-vlan') {
+            return `${name}(config-vlan)#`;
+        }
         if (session.mode === 'config-if') {
             return `${name}(config-if)#`;
         }
@@ -8088,6 +8463,131 @@ function formatCliRouterAcls(router) {
     });
 
     return lines.join('\n');
+}
+
+function formatCliSwitchVlanBrief(switchOrId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return '% Switch not found.';
+    ensureSwitchVlanState(sw);
+    const runtime = getSwitchRuntime(sw.id);
+
+    // Collect all ports that exist on the switch (connected ports + configured switchports)
+    const allPortNames = new Set([
+        ...Object.values(runtime.ports || {}),
+        ...Object.keys(sw.switchports || {})
+    ]);
+
+    // Map VLAN ID to assigned ports
+    const vlanPortsMap = {};
+    Object.keys(sw.vlans).forEach((vId) => {
+        vlanPortsMap[vId] = [];
+    });
+
+    allPortNames.forEach((pName) => {
+        const pCfg = getSwitchPortConfig(sw, pName);
+        const vId = pCfg.accessVlan || 1;
+        if (!vlanPortsMap[vId]) {
+            vlanPortsMap[vId] = [];
+        }
+        vlanPortsMap[vId].push(pName);
+    });
+
+    const lines = [
+        'VLAN Name                             Status    Ports',
+        '---- -------------------------------- --------- -------------------------------'
+    ];
+
+    const sortedVlanIds = Object.keys(sw.vlans).map(Number).sort((a, b) => a - b);
+    sortedVlanIds.forEach((vId) => {
+        const vlan = sw.vlans[vId];
+        const vlanIdStr = String(vlan.id).padEnd(4, ' ');
+        const nameStr = (vlan.name || '').padEnd(32, ' ');
+        const statusStr = (vlan.status || 'active').padEnd(9, ' ');
+        const ports = (vlanPortsMap[vId] || []).sort((a, b) => {
+            const numA = parseInt(a.replace(/\D/g, ''), 10) || 0;
+            const numB = parseInt(b.replace(/\D/g, ''), 10) || 0;
+            return numA - numB;
+        }).join(', ');
+        lines.push(`${vlanIdStr} ${nameStr} ${statusStr} ${ports}`.trimEnd());
+    });
+
+    return lines.join('\n');
+}
+
+function formatCliSwitchMacTable(switchOrId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return '% Switch not found.';
+    const runtime = getSwitchRuntime(sw.id);
+    const entries = runtime.macTable || [];
+
+    if (entries.length === 0) {
+        return `          Mac Address Table\n-------------------------------------------\n\nVlan    Mac Address       Type        Ports\n----    -----------       --------    -----\nNo MAC addresses learned yet.`;
+    }
+
+    const lines = [
+        '          Mac Address Table',
+        '-------------------------------------------',
+        '',
+        'Vlan    Mac Address       Type        Ports',
+        '----    -----------       --------    -----'
+    ];
+
+    entries.forEach((entry) => {
+        const vlanStr = String(entry.vlan || 1).padEnd(8, ' ');
+        const macStr = (entry.mac || '').padEnd(18, ' ');
+        const typeStr = (entry.type || 'DYNAMIC').padEnd(12, ' ');
+        const portStr = entry.port || '';
+        lines.push(`${vlanStr}${macStr}${typeStr}${portStr}`.trimEnd());
+    });
+
+    lines.push(`Total Mac Addresses for this criterion: ${entries.length}`);
+
+    return lines.join('\n');
+}
+
+function formatCliSwitchInterfaces(switchOrId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return '% Switch not found.';
+    ensureSwitchVlanState(sw);
+    const runtime = getSwitchRuntime(sw.id);
+    const allPortNames = new Set([
+        ...Object.values(runtime.ports || {}),
+        ...Object.keys(sw.switchports || {})
+    ]);
+
+    if (allPortNames.size === 0) {
+        return 'No interfaces active or configured on this switch.';
+    }
+
+    const lines = [];
+    Array.from(allPortNames).sort((a, b) => {
+        const numA = parseInt(a.replace(/\D/g, ''), 10) || 0;
+        const numB = parseInt(b.replace(/\D/g, ''), 10) || 0;
+        return numA - numB;
+    }).forEach((pName) => {
+        const cfg = getSwitchPortConfig(sw, pName);
+        const vlanId = cfg.accessVlan || 1;
+        const vlanName = sw.vlans[vlanId]?.name || `VLAN${vlanId}`;
+        const connId = Object.keys(runtime.ports || {}).find(cId => runtime.ports[cId] === pName);
+        let neighborInfo = 'not connected';
+        if (connId) {
+            const conn = getConnectionById(connId);
+            if (conn) {
+                const neighborId = conn.source === sw.id ? conn.target : conn.source;
+                const neighborDev = getDeviceById(neighborId);
+                if (neighborDev) {
+                    neighborInfo = `connected to ${neighborDev.name}`;
+                }
+            }
+        }
+        lines.push(`${pName} is up, line protocol is up`);
+        lines.push(`  Hardware is FastEthernet`);
+        lines.push(`  Port mode: ${cfg.mode || 'access'}, Access VLAN: ${vlanId} (${vlanName})`);
+        lines.push(`  Link status: ${neighborInfo}`);
+        lines.push('');
+    });
+
+    return lines.join('\n').trimEnd();
 }
 
 function findDeviceByIp(ip) {
@@ -8422,7 +8922,7 @@ function executeCliTraceroute(sourceDev, targetIpArg) {
 }
 
 function executeCliCommand(deviceId, rawInput) {
-    const dev = getDeviceById(deviceId) || networkState.devices.find((d) => d.name === deviceId);
+    const dev = getDeviceById(deviceId) || (networkState.devices && networkState.devices.find((d) => d.name === deviceId || d.id === deviceId));
     if (!dev) {
         return {
             success: false,
@@ -8460,12 +8960,13 @@ function executeCliCommand(deviceId, rawInput) {
     pushCliCommandHistory(dev.id, command);
 
     const isRouter = dev.type === 'router';
+    const isSwitch = dev.type === 'switch';
     const lowerCmd = command.toLowerCase();
     const tokens = lowerCmd.split(/\s+/);
     const mainCmd = tokens[0];
 
     // 0. DO <command> (execute operational command from any config mode)
-    if (mainCmd === 'do' && isRouter) {
+    if (mainCmd === 'do' && (isRouter || isSwitch)) {
         const innerCmd = command.replace(/^do\s+/i, '').trim();
         if (!innerCmd) {
             return {
@@ -8523,6 +9024,44 @@ function executeCliCommand(deviceId, rawInput) {
   clear, cls        - Clear the terminal screen
   help, ?           - Show available commands and usage`;
             }
+        } else if (isSwitch) {
+            if (session.mode === 'config-vlan') {
+                helpText = `Commands available in VLAN Configuration mode on ${dev.name}:
+  name <name>                   - Set VLAN name
+  exit                          - Return to Global Configuration mode
+  end                           - Return to Privileged EXEC mode
+  do <command>                  - Execute an operational command
+  help, ?                       - Show available commands`;
+            } else if (session.mode === 'config-if') {
+                helpText = `Commands available in Interface Configuration mode on ${dev.name}:
+  switchport mode access        - Set port mode to access
+  switchport access vlan <id>   - Set access VLAN for this port
+  interface <name>              - Switch to another interface (alias: int)
+  exit                          - Return to Global Configuration mode
+  end                           - Return to Privileged EXEC mode
+  do <command>                  - Execute an operational command
+  help, ?                       - Show available commands`;
+            } else if (session.mode === 'config') {
+                helpText = `Commands available in Global Configuration mode on ${dev.name}:
+  hostname <name>               - Set device system name
+  vlan <id>                     - Configure VLAN (enters VLAN config mode)
+  no vlan <id>                  - Delete a VLAN
+  interface <name>              - Enter interface configuration mode (alias: int)
+  exit                          - Return to Privileged EXEC mode
+  end                           - Return to Privileged EXEC mode
+  do <command>                  - Execute an operational command
+  help, ?                       - Show available commands`;
+            } else {
+                helpText = `Commands available on ${dev.name} (Cisco IOS-style Switch):
+  configure terminal - Enter global configuration mode (alias: conf t)
+  hostname <name>   - Set device system name
+  interface <name>  - Enter interface configuration mode (alias: int)
+  show vlan brief   - Display switch VLAN configuration table (alias: show vlan)
+  show mac-address-table - Display MAC address table (alias: show mac)
+  show interfaces   - Display switch interface status (alias: show int)
+  clear, cls        - Clear the terminal screen
+  help, ?           - Show available commands and usage`;
+            }
         } else {
             helpText = `Commands available on ${dev.name}:
   hostname <name>   - Set device system name
@@ -8562,10 +9101,10 @@ function executeCliCommand(deviceId, rawInput) {
     // 3. CONFIGURE TERMINAL / CONF T / CONFIG T
     if (mainCmd === 'configure' || mainCmd === 'conf' || mainCmd === 'config') {
         if (tokens[1] === 'terminal' || tokens[1] === 't' || tokens.length === 1) {
-            if (!isRouter) {
+            if (!isRouter && !isSwitch) {
                 return {
                     success: false,
-                    output: `% 'configure terminal' is a Cisco IOS router command.`,
+                    output: `% 'configure terminal' is a Cisco IOS router command (and switch configuration command).`,
                     clear: false,
                     status: 'error',
                     command,
@@ -8574,6 +9113,7 @@ function executeCliCommand(deviceId, rawInput) {
             }
             session.mode = 'config';
             session.selectedInterface = null;
+            session.selectedVlan = null;
             return {
                 success: true,
                 output: 'Enter configuration commands, one per line. End with CNTL/Z or "end".',
@@ -8587,6 +9127,11 @@ function executeCliCommand(deviceId, rawInput) {
 
     // 4. EXIT
     if (mainCmd === 'exit') {
+        if (session.mode === 'config-vlan') {
+            session.mode = 'config';
+            session.selectedVlan = null;
+            return { success: true, output: '', clear: false, status: 'info', command, device: dev };
+        }
         if (session.mode === 'config-if') {
             session.mode = 'config';
             session.selectedInterface = null;
@@ -8595,6 +9140,7 @@ function executeCliCommand(deviceId, rawInput) {
         if (session.mode === 'config') {
             session.mode = 'exec';
             session.selectedInterface = null;
+            session.selectedVlan = null;
             return { success: true, output: '', clear: false, status: 'info', command, device: dev };
         }
         return { success: true, output: '', clear: false, status: 'info', command, device: dev };
@@ -8602,9 +9148,10 @@ function executeCliCommand(deviceId, rawInput) {
 
     // 5. END
     if (mainCmd === 'end') {
-        if (isRouter) {
+        if (isRouter || isSwitch) {
             session.mode = 'exec';
             session.selectedInterface = null;
+            session.selectedVlan = null;
             return { success: true, output: '', clear: false, status: 'info', command, device: dev };
         }
         return { success: true, output: '', clear: false, status: 'info', command, device: dev };
@@ -8659,12 +9206,233 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 7. INTERFACE <ifName> / INT <ifName>
-    if (mainCmd === 'interface' || mainCmd === 'int') {
-        if (!isRouter) {
+    // 7. VLAN <id> (switch only)
+    if (mainCmd === 'vlan') {
+        if (!isSwitch) {
             return {
                 success: false,
-                output: "% 'interface' is a Cisco IOS router command.",
+                output: "% 'vlan' is a switch configuration command.",
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (session.mode !== 'config' && session.mode !== 'config-vlan' && session.mode !== 'config-if') {
+            return {
+                success: false,
+                output: '% "vlan" command must be executed in configuration mode (e.g. after "configure terminal").',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (tokens.length < 2) {
+            return {
+                success: false,
+                output: '% Incomplete command: vlan <vlan-id>',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        const normId = normalizeVlanId(tokens[1]);
+        if (normId === null) {
+            return {
+                success: false,
+                output: `% Invalid VLAN ID "${tokens[1]}". Valid range is 1-4094.`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        ensureSwitchVlanState(dev);
+        if (!dev.vlans[normId]) {
+            pushHistory();
+            createSwitchVlan(dev, normId);
+            render();
+        }
+        session.mode = 'config-vlan';
+        session.selectedVlan = normId;
+        session.selectedInterface = null;
+        return {
+            success: true,
+            output: '',
+            clear: false,
+            status: 'success',
+            command,
+            device: dev
+        };
+    }
+
+    // 8. NAME <vlanName> (in config-vlan mode)
+    if (mainCmd === 'name') {
+        if (!isSwitch) {
+            return {
+                success: false,
+                output: "% 'name' is a switch VLAN configuration command.",
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (session.mode !== 'config-vlan' || !session.selectedVlan) {
+            return {
+                success: false,
+                output: '% "name" command is only valid in VLAN configuration mode (e.g. "vlan 10").',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        const newName = command.replace(/^name\s+/i, '').trim();
+        if (!newName) {
+            return {
+                success: false,
+                output: '% Incomplete command: name <vlan-name>',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (!/^[a-zA-Z0-9_-]{1,32}$/.test(newName)) {
+            return {
+                success: false,
+                output: '% Invalid VLAN name: must contain 1-32 alphanumeric characters, dashes, or underscores.',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        pushHistory();
+        renameSwitchVlan(dev, session.selectedVlan, newName);
+        render();
+        return {
+            success: true,
+            output: '',
+            clear: false,
+            status: 'success',
+            command,
+            device: dev
+        };
+    }
+
+    // 9. SWITCHPORT commands (config-if on switch)
+    if (mainCmd === 'switchport') {
+        if (!isSwitch) {
+            return {
+                success: false,
+                output: "% 'switchport' is a switch interface command.",
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (session.mode !== 'config-if' || !session.selectedInterface) {
+            return {
+                success: false,
+                output: '% "switchport" commands must be executed inside interface configuration mode (e.g. "interface Fa0/1").',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        const sub1 = tokens[1] || '';
+        const sub2 = tokens[2] || '';
+        if (sub1 === 'mode') {
+            if (sub2 === 'access') {
+                pushHistory();
+                setSwitchPortMode(dev, session.selectedInterface, 'access');
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: false,
+                output: `% Mode "${tokens[2] || ''}" is not supported (only "access" mode is supported in Phase 1).`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (sub1 === 'access' && sub2 === 'vlan') {
+            const rawVlan = tokens[3];
+            if (!rawVlan) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: switchport access vlan <vlan-id>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const normId = normalizeVlanId(rawVlan);
+            if (normId === null) {
+                return {
+                    success: false,
+                    output: `% Invalid VLAN ID "${rawVlan}". Valid range is 1-4094.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            ensureSwitchVlanState(dev);
+            if (!dev.vlans[normId]) {
+                return {
+                    success: false,
+                    output: `% Access VLAN ${normId} does not exist. Create VLAN first.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            pushHistory();
+            setSwitchPortAccessVlan(dev, session.selectedInterface, normId);
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+        return {
+            success: false,
+            output: `% Incomplete or unrecognized switchport command. Available: "switchport mode access", "switchport access vlan <vlan-id>".`,
+            clear: false,
+            status: 'error',
+            command,
+            device: dev
+        };
+    }
+
+    // 10. INTERFACE <ifName> / INT <ifName>
+    if (mainCmd === 'interface' || mainCmd === 'int') {
+        if (!isRouter && !isSwitch) {
+            return {
+                success: false,
+                output: "% 'interface' is a Cisco IOS router command (and switch command).",
                 clear: false,
                 status: 'error',
                 command,
@@ -8682,70 +9450,100 @@ function executeCliCommand(deviceId, rawInput) {
             };
         }
         const rawIfName = tokens[1];
-        let matchedIfName = null;
-        const available = Object.keys(dev.interfaces || {});
-        for (const ifName of available) {
-            const lowerIf = ifName.toLowerCase();
-            const lowerRaw = rawIfName.toLowerCase();
-            if (lowerIf === lowerRaw
-                || (lowerRaw === 'g0/0' && ifName === 'Gig0/0')
-                || (lowerRaw === 'g0/1' && ifName === 'Gig0/1')
-                || (lowerRaw === 'gigabitethernet0/0' && ifName === 'Gig0/0')
-                || (lowerRaw === 'gigabitethernet0/1' && ifName === 'Gig0/1')) {
-                matchedIfName = ifName;
-                break;
+        if (isRouter) {
+            let matchedIfName = null;
+            const available = Object.keys(dev.interfaces || {});
+            for (const ifName of available) {
+                const lowerIf = ifName.toLowerCase();
+                const lowerRaw = rawIfName.toLowerCase();
+                if (lowerIf === lowerRaw
+                    || (lowerRaw === 'g0/0' && ifName === 'Gig0/0')
+                    || (lowerRaw === 'g0/1' && ifName === 'Gig0/1')
+                    || (lowerRaw === 'gigabitethernet0/0' && ifName === 'Gig0/0')
+                    || (lowerRaw === 'gigabitethernet0/1' && ifName === 'Gig0/1')) {
+                    matchedIfName = ifName;
+                    break;
+                }
             }
-        }
-        if (!matchedIfName) {
+            if (!matchedIfName) {
+                return {
+                    success: false,
+                    output: `% Invalid interface: "${rawIfName}". Available interfaces: ${available.join(', ')}`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            session.prevMode = session.mode === 'config' ? 'config' : 'exec';
+            session.mode = 'config-if';
+            session.selectedInterface = matchedIfName;
+            session.selectedVlan = null;
             return {
-                success: false,
-                output: `% Invalid interface: "${rawIfName}". Available interfaces: ${available.join(', ')}`,
+                success: true,
+                output: '',
                 clear: false,
-                status: 'error',
+                status: 'success',
                 command,
                 device: dev
             };
         }
-        session.prevMode = session.mode === 'config' ? 'config' : 'exec';
-        session.mode = 'config-if';
-        session.selectedInterface = matchedIfName;
-        return {
-            success: true,
-            output: '',
-            clear: false,
-            status: 'success',
-            command,
-            device: dev
-        };
+        if (isSwitch) {
+            const normPort = normalizeSwitchPortName(rawIfName);
+            if (!normPort) {
+                return {
+                    success: false,
+                    output: `% Invalid switch interface: "${rawIfName}". Example: "Fa0/1" or "Gig0/1".`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            session.prevMode = session.mode === 'config' ? 'config' : 'exec';
+            session.mode = 'config-if';
+            session.selectedInterface = normPort;
+            session.selectedVlan = null;
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
     }
 
-    // 8. SHUTDOWN / SHUT
+    // 11. SHUTDOWN / SHUT
     if ((mainCmd === 'shutdown' || mainCmd === 'shut') && tokens.length === 1) {
-        if (!isRouter) {
+        if (!isRouter && !isSwitch) {
             return {
                 success: false,
-                output: "% 'shutdown' is a Cisco IOS router command.",
+                output: "% 'shutdown' is a Cisco IOS command.",
                 clear: false,
                 status: 'error',
                 command,
                 device: dev
             };
         }
-        if (session.mode !== 'config-if' || !session.selectedInterface || !dev.interfaces?.[session.selectedInterface]) {
+        if (session.mode !== 'config-if' || !session.selectedInterface) {
             return {
                 success: false,
-                output: '% "shutdown" must be executed inside interface configuration mode (e.g. "interface Gig0/0").',
+                output: '% "shutdown" must be executed inside interface configuration mode (e.g. "interface Gig0/0" or "interface Fa0/1").',
                 clear: false,
                 status: 'error',
                 command,
                 device: dev
             };
         }
-        const iface = dev.interfaces[session.selectedInterface];
-        if (iface.status !== 'down') {
-            pushHistory();
-            iface.status = 'down';
-            render();
+        if (isRouter) {
+            const iface = dev.interfaces?.[session.selectedInterface];
+            if (iface && iface.status !== 'down') {
+                pushHistory();
+                iface.status = 'down';
+                render();
+            }
         }
         return {
             success: true,
@@ -8757,38 +9555,118 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 9. NO commands (no shutdown, no ip address, no ip route)
+    // 12. NO commands (no shutdown, no ip address, no ip route, no vlan)
     if (mainCmd === 'no') {
         const sub1 = tokens[1] || '';
         const sub2 = tokens[2] || '';
 
+        // no vlan <id>
+        if (sub1 === 'vlan') {
+            if (!isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'no vlan' is a switch configuration command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode !== 'config') {
+                return {
+                    success: false,
+                    output: '% "no vlan" must be executed in global configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const rawVlan = tokens[2];
+            if (!rawVlan) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: no vlan <vlan-id>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const normId = normalizeVlanId(rawVlan);
+            if (normId === null) {
+                return {
+                    success: false,
+                    output: `% Invalid VLAN ID "${rawVlan}". Valid range is 1-4094.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (normId === 1) {
+                return {
+                    success: false,
+                    output: '% Default VLAN 1 cannot be deleted.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            ensureSwitchVlanState(dev);
+            if (!dev.vlans[normId]) {
+                return {
+                    success: false,
+                    output: `% VLAN ${normId} not found.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            pushHistory();
+            deleteSwitchVlan(dev, normId);
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
         // no shutdown / no shut
         if (sub1 === 'shutdown' || sub1 === 'shut') {
-            if (!isRouter) {
+            if (!isRouter && !isSwitch) {
                 return {
                     success: false,
-                    output: "% 'no shutdown' is a Cisco IOS router command.",
+                    output: "% 'no shutdown' is a Cisco IOS command.",
                     clear: false,
                     status: 'error',
                     command,
                     device: dev
                 };
             }
-            if (session.mode !== 'config-if' || !session.selectedInterface || !dev.interfaces?.[session.selectedInterface]) {
+            if (session.mode !== 'config-if' || !session.selectedInterface) {
                 return {
                     success: false,
-                    output: '% "no shutdown" must be executed inside interface configuration mode (e.g. "interface Gig0/0").',
+                    output: '% "no shutdown" must be executed inside interface configuration mode.',
                     clear: false,
                     status: 'error',
                     command,
                     device: dev
                 };
             }
-            const iface = dev.interfaces[session.selectedInterface];
-            if (iface.status !== 'up') {
-                pushHistory();
-                iface.status = 'up';
-                render();
+            if (isRouter) {
+                const iface = dev.interfaces?.[session.selectedInterface];
+                if (iface && iface.status !== 'up') {
+                    pushHistory();
+                    iface.status = 'up';
+                    render();
+                }
             }
             return {
                 success: true,
@@ -8802,6 +9680,16 @@ function executeCliCommand(deviceId, rawInput) {
 
         // no ip address / no ip addr
         if (sub1 === 'ip' && (sub2 === 'address' || sub2 === 'addr')) {
+            if (isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'ip address' is a router interface command (Layer-2 switches operate at Layer 2).",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
             if (!isRouter) {
                 return {
                     success: false,
@@ -8843,6 +9731,16 @@ function executeCliCommand(deviceId, rawInput) {
 
         // no ip route <network> <mask/prefix> [next-hop/interface]
         if (sub1 === 'ip' && (sub2 === 'route' || sub2 === 'routes')) {
+            if (isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'ip route' is a router command. Switches operate at Layer 2.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
             if (!isRouter) {
                 return {
                     success: false,
@@ -8925,8 +9823,18 @@ function executeCliCommand(deviceId, rawInput) {
         }
     }
 
-    // 10. IP ADDRESS / IP ADDR
+    // 13. IP ADDRESS / IP ADDR (router only)
     if (mainCmd === 'ip' && (tokens[1] === 'address' || tokens[1] === 'addr')) {
+        if (isSwitch) {
+            return {
+                success: false,
+                output: "% 'ip address' is a router interface command (Layer-2 switches operate at Layer 2).",
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
         if (!isRouter) {
             return {
                 success: false,
@@ -9033,8 +9941,18 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 11. IP ROUTE <network> <mask/prefix> <nextHop/interface> [ad] [metric]
+    // 14. IP ROUTE <network> <mask/prefix> <nextHop/interface> [ad] [metric]
     if (mainCmd === 'ip' && (tokens[1] === 'route' || tokens[1] === 'routes')) {
+        if (isSwitch) {
+            return {
+                success: false,
+                output: "% 'ip route' is a router configuration command. Switches operate at Layer 2.",
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
         if (!isRouter) {
             return {
                 success: false,
@@ -9207,12 +10125,22 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 12. IPCONFIG
+    // 15. IPCONFIG
     if (mainCmd === 'ipconfig' || mainCmd.startsWith('ipconfig/')) {
         if (isRouter) {
             return {
                 success: false,
                 output: `% 'ipconfig' is for end hosts (PC/Server). On Cisco IOS routers, use 'show ip route' or check interface settings.`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (isSwitch) {
+            return {
+                success: false,
+                output: `% 'ipconfig' is for end hosts. On switches, use 'show vlan brief' or 'show interfaces'.`,
                 clear: false,
                 status: 'error',
                 command,
@@ -9229,12 +10157,22 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 13. IFCONFIG
+    // 16. IFCONFIG
     if (mainCmd === 'ifconfig') {
         if (isRouter) {
             return {
                 success: true,
                 output: formatCliRouterInterfaces(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+        if (isSwitch) {
+            return {
+                success: true,
+                output: formatCliSwitchInterfaces(dev),
                 clear: false,
                 status: 'success',
                 command,
@@ -9251,13 +10189,23 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 14. ARP
+    // 17. ARP
     if (mainCmd === 'arp') {
         if (tokens[1] === '-a' || tokens[1] === '-g') {
             if (isRouter) {
                 return {
                     success: false,
                     output: `% 'arp -a' is an end host command. On Cisco IOS routers, use 'show arp'.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (isSwitch) {
+                return {
+                    success: false,
+                    output: `% 'arp -a' is an end host command. On switches, use 'show mac-address-table'.`,
                     clear: false,
                     status: 'error',
                     command,
@@ -9284,6 +10232,16 @@ function executeCliCommand(deviceId, rawInput) {
                     device: dev
                 };
             }
+            if (isSwitch) {
+                return {
+                    success: true,
+                    output: formatCliSwitchMacTable(dev),
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
             return {
                 success: true,
                 output: formatCliHostArpTable(dev),
@@ -9295,7 +10253,7 @@ function executeCliCommand(deviceId, rawInput) {
         }
     }
 
-    // 15. ROUTE / ROUTE PRINT / NETSTAT -R
+    // 18. ROUTE / ROUTE PRINT / NETSTAT -R
     if (mainCmd === 'route' || (mainCmd === 'netstat' && tokens[1] === '-r')) {
         if (isRouter) {
             return {
@@ -9303,6 +10261,16 @@ function executeCliCommand(deviceId, rawInput) {
                 output: formatCliRouterRoutingTable(dev),
                 clear: false,
                 status: 'success',
+                command,
+                device: dev
+            };
+        }
+        if (isSwitch) {
+            return {
+                success: false,
+                output: `% 'route' is for routed devices. Switches operate at Layer 2.`,
+                clear: false,
+                status: 'error',
                 command,
                 device: dev
             };
@@ -9317,13 +10285,67 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 16. SHOW commands (show ip route, show interfaces, show arp, show access-lists)
+    // 19. SHOW commands
     if (mainCmd === 'show') {
         const sub1 = tokens[1] || '';
         const sub2 = tokens[2] || '';
 
+        // show vlan / show vlan brief
+        if (sub1 === 'vlan' || sub1 === 'vlans') {
+            if (!isSwitch) {
+                return {
+                    success: false,
+                    output: `% 'show vlan' is a switch command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: formatCliSwitchVlanBrief(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // show mac-address-table / show mac address-table / show mac
+        if (sub1 === 'mac-address-table' || sub1 === 'mac' || (sub1 === 'mac' && (sub2 === 'address-table' || sub2 === 'address')) || (sub1 === 'mac-address' && sub2 === 'table')) {
+            if (!isSwitch) {
+                return {
+                    success: false,
+                    output: `% 'show mac-address-table' is a switch command.${isRouter ? " On routers, use 'show arp'." : " On hosts, use 'arp -a'."}`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: formatCliSwitchMacTable(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
         // show ip route / show route
         if ((sub1 === 'ip' && (sub2 === 'route' || sub2 === 'routes')) || sub1 === 'route' || sub1 === 'routes') {
+            if (isSwitch) {
+                return {
+                    success: false,
+                    output: `% 'show ip route' is a router command. Switches operate at Layer 2.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
             if (!isRouter) {
                 return {
                     success: false,
@@ -9346,6 +10368,16 @@ function executeCliCommand(deviceId, rawInput) {
 
         // show interfaces / show interface / show ip interface / show int
         if (sub1 === 'interfaces' || sub1 === 'interface' || sub1 === 'int' || (sub1 === 'ip' && (sub2 === 'interface' || sub2 === 'interfaces' || sub2 === 'int'))) {
+            if (isSwitch) {
+                return {
+                    success: true,
+                    output: formatCliSwitchInterfaces(dev),
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
             if (!isRouter) {
                 return {
                     success: false,
@@ -9368,6 +10400,16 @@ function executeCliCommand(deviceId, rawInput) {
 
         // show arp / show ip arp
         if (sub1 === 'arp' || (sub1 === 'ip' && sub2 === 'arp')) {
+            if (isSwitch) {
+                return {
+                    success: false,
+                    output: `% 'show arp' is a router/host command. On switches, use 'show mac-address-table'.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
             if (!isRouter) {
                 return {
                     success: false,
@@ -9410,7 +10452,7 @@ function executeCliCommand(deviceId, rawInput) {
             };
         }
 
-        // Other show commands on router or end host
+        // Other show commands
         if (isRouter) {
             return {
                 success: false,
@@ -9420,10 +10462,19 @@ function executeCliCommand(deviceId, rawInput) {
                 command,
                 device: dev
             };
+        } else if (isSwitch) {
+            return {
+                success: false,
+                output: `% Unrecognized show command: "${command}". Available: "show vlan brief", "show mac-address-table", "show interfaces".`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
         } else {
             return {
                 success: false,
-                output: `% 'show' commands are for Cisco IOS routers. End hosts support 'ipconfig', 'ifconfig', 'arp', 'route', 'ping', 'traceroute', 'help', and 'clear'.`,
+                output: `% 'show' commands are for Cisco IOS routers/switches. End hosts support 'ipconfig', 'ifconfig', 'arp', 'route', 'ping', 'traceroute', 'help', and 'clear'.`,
                 clear: false,
                 status: 'error',
                 command,
@@ -9432,8 +10483,18 @@ function executeCliCommand(deviceId, rawInput) {
         }
     }
 
-    // 17. Real Utilities (ping, traceroute, tracert)
+    // 20. Real Utilities (ping, traceroute, tracert)
     if (mainCmd === 'ping') {
+        if (isSwitch) {
+            return {
+                success: false,
+                output: `% 'ping' from Layer-2 switches is not supported in this phase.`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
         const targetArg = tokens.slice(1).join(' ').trim();
         const pingRes = executeCliPing(dev, targetArg);
         return {
@@ -9444,6 +10505,16 @@ function executeCliCommand(deviceId, rawInput) {
     }
 
     if (mainCmd === 'traceroute' || mainCmd === 'tracert') {
+        if (isSwitch) {
+            return {
+                success: false,
+                output: `% 'traceroute' from Layer-2 switches is not supported in this phase.`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
         const targetArg = tokens.slice(1).join(' ').trim();
         const traceRes = executeCliTraceroute(dev, targetArg);
         return {
@@ -9453,7 +10524,7 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 18. Unknown / Unsupported command
+    // 21. Unknown / Unsupported command
     return {
         success: false,
         output: `% Invalid command or syntax: "${command}". Type "help" or "?" to see available commands.`,
@@ -9484,20 +10555,21 @@ function openDeviceTerminal(deviceId) {
 
     const promptText = getDeviceCliPrompt(dev);
     const isRouter = dev.type === 'router';
+    const isSwitch = dev.type === 'switch';
 
     if (titleEl) {
-        titleEl.textContent = `${dev.name} — ${isRouter ? 'Router Console (Cisco IOS)' : 'Device Terminal'}`;
+        titleEl.textContent = `${dev.name} — ${isRouter ? 'Router Console (Cisco IOS)' : (isSwitch ? 'Switch Console (Cisco IOS)' : 'Device Terminal')}`;
     }
     if (iconEl) {
-        iconEl.textContent = isRouter ? '⚡' : '💻';
+        iconEl.textContent = isRouter ? '⚡' : (isSwitch ? '🔀' : '💻');
     }
     if (badgeEl) {
-        badgeEl.textContent = isRouter ? 'Router CLI' : 'Host CLI';
-        badgeEl.className = `terminal-badge ${isRouter ? 'terminal-badge--router' : ''}`;
+        badgeEl.textContent = isRouter ? 'Router CLI' : (isSwitch ? 'Switch CLI' : 'Host CLI');
+        badgeEl.className = `terminal-badge ${isRouter ? 'terminal-badge--router' : (isSwitch ? 'terminal-badge--switch' : '')}`;
     }
     if (promptEl) {
         promptEl.textContent = promptText;
-        promptEl.className = `terminal-prompt ${isRouter ? 'terminal-prompt--router' : ''}`;
+        promptEl.className = `terminal-prompt ${(isRouter || isSwitch) ? 'terminal-prompt--router' : ''}`;
     }
 
     const session = getDeviceTerminalSession(dev.id);
@@ -9509,7 +10581,9 @@ function openDeviceTerminal(deviceId) {
             // Initial greeting
             const greeting = isRouter
                 ? `Cisco IOS Software, NE-Toolkit Simulated Router\nType "help" or "?" to list available router commands.\n`
-                : `Microsoft Windows [Version 10.0.Simulated]\n(c) NE-Toolkit Corporation. All rights reserved.\n\nType "help" or "?" to list available host commands.\n`;
+                : (isSwitch
+                    ? `Cisco IOS Software, NE-Toolkit Simulated Switch\nType "help" or "?" to list available switch commands.\n`
+                    : `Microsoft Windows [Version 10.0.Simulated]\n(c) NE-Toolkit Corporation. All rights reserved.\n\nType "help" or "?" to list available host commands.\n`);
             session.logs.push({
                 prompt: '',
                 command: '',
@@ -9519,7 +10593,7 @@ function openDeviceTerminal(deviceId) {
         }
 
         session.logs.forEach((log) => {
-            appendLogToTerminalDom(log, isRouter);
+            appendLogToTerminalDom(log, isRouter || isSwitch);
         });
     }
 
