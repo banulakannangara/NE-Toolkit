@@ -1951,24 +1951,53 @@ function renderPropertiesPanel() {
                     ${supports.ip || supports.subnetMask || supports.gateway || supports.mac ? `
                         <div class="property-section">
                             <h4>NETWORK CONFIGURATION</h4>
+                            ${['pc', 'laptop', 'server'].includes(selected.type) ? `
+                                <div class="property-field">
+                                    <label>IP Configuration</label>
+                                    <div class="dhcp-mode-selector" style="display: flex; gap: 12px; margin-top: 4px; margin-bottom: 6px;">
+                                        <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;">
+                                            <input type="radio" name="ipConfigMode" value="static" ${!selected.dhcpClient?.enabled ? 'checked' : ''}> Static
+                                        </label>
+                                        <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;">
+                                            <input type="radio" name="ipConfigMode" value="dhcp" ${selected.dhcpClient?.enabled ? 'checked' : ''}> DHCP
+                                        </label>
+                                    </div>
+                                </div>
+                                ${selected.dhcpClient?.enabled ? `
+                                    <div class="dhcp-client-status-card" style="background: rgba(255,255,255,0.05); padding: 8px; border-radius: 4px; margin-bottom: 8px;">
+                                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                                            <span style="font-size: 11px; color: #a0aec0;">DHCP STATE:</span>
+                                            <span class="badge badge--${selected.dhcpClient.state === 'BOUND' ? 'forward' : 'warning'}" style="font-size: 11px; font-weight: bold;">${escapeHtml(selected.dhcpClient.state || 'INIT')}</span>
+                                        </div>
+                                        <div style="font-size: 11px; color: #cbd5e0; margin-bottom: 6px;">
+                                            <div>DHCP Server: ${escapeHtml(selected.dhcpClient.serverIp || selected.dhcpClient.lease?.serverId || 'None')}</div>
+                                            <div>DNS Server: ${escapeHtml(selected.dnsServer || selected.dhcpClient.lease?.dnsServer || 'None')}</div>
+                                        </div>
+                                        <div style="display: flex; gap: 6px;">
+                                            <button id="dhcpRequestRenewBtn" class="toolbar-button" type="button" style="font-size: 11px; padding: 4px 8px;">Request / Renew Lease</button>
+                                            <button id="dhcpReleaseBtn" class="toolbar-button" type="button" style="font-size: 11px; padding: 4px 8px;" ${selected.dhcpClient.state === 'BOUND' ? '' : 'disabled'}>Release Lease</button>
+                                        </div>
+                                    </div>
+                                ` : ''}
+                            ` : ''}
                             ${supports.ip ? `
                                 <div class="property-field">
                                     <label for="deviceIp">IP Address</label>
-                                    <input id="deviceIp" type="text" value="${ipValue}" data-field="ip" placeholder="Not configured">
+                                    <input id="deviceIp" type="text" value="${ipValue}" data-field="ip" placeholder="Not configured" ${selected.dhcpClient?.enabled ? 'readonly' : ''}>
                                     <div class="property-feedback" data-feedback-for="ip"></div>
                                 </div>
                             ` : ''}
                             ${supports.subnetMask ? `
                                 <div class="property-field">
                                     <label for="deviceSubnet">Subnet Mask</label>
-                                    <input id="deviceSubnet" type="text" value="${subnetValue}" data-field="subnetMask" placeholder="Not configured">
+                                    <input id="deviceSubnet" type="text" value="${subnetValue}" data-field="subnetMask" placeholder="Not configured" ${selected.dhcpClient?.enabled ? 'readonly' : ''}>
                                     <div class="property-feedback" data-feedback-for="subnetMask"></div>
                                 </div>
                             ` : ''}
                             ${supports.gateway ? `
                                 <div class="property-field">
                                     <label for="deviceGateway">Default Gateway</label>
-                                    <input id="deviceGateway" type="text" value="${gatewayValue}" data-field="gateway" placeholder="Not configured">
+                                    <input id="deviceGateway" type="text" value="${gatewayValue}" data-field="gateway" placeholder="Not configured" ${selected.dhcpClient?.enabled ? 'readonly' : ''}>
                                     <div class="property-feedback" data-feedback-for="gateway"></div>
                                 </div>
                             ` : ''}
@@ -1981,6 +2010,7 @@ function renderPropertiesPanel() {
                             ` : ''}
                         </div>
                     ` : ''}
+
                 </div>
                 <div class="property-actions">
                     <button id="applyDeviceConfig" class="toolbar-button" type="button" ${isValid ? '' : 'disabled'}>Apply Changes</button>
@@ -2059,7 +2089,96 @@ function renderPropertiesPanel() {
         });
     }
 
+    // Endpoint DHCP mode selector change
+    panel.querySelectorAll('input[name="ipConfigMode"]').forEach(radio => {
+        radio.addEventListener('change', (e) => {
+            const dev = getDeviceById(networkState.selectedDeviceId);
+            if (!dev) return;
+            ensureDeviceDhcpClientState(dev);
+            if (e.target.value === 'dhcp') {
+                dev.dhcpClient.enabled = true;
+                pushHistory();
+                simulateDhcpDora(dev.id);
+                render();
+            } else {
+                dev.dhcpClient.enabled = false;
+                pushHistory();
+                render();
+            }
+        });
+    });
+
+    // Endpoint DHCP Renew
+    const renewBtn = panel.querySelector('#dhcpRequestRenewBtn');
+    if (renewBtn) {
+        renewBtn.addEventListener('click', () => {
+            const dev = getDeviceById(networkState.selectedDeviceId);
+            if (!dev) return;
+            ensureDeviceDhcpClientState(dev);
+            dev.dhcpClient.enabled = true;
+            pushHistory();
+            const res = simulateDhcpDora(dev.id);
+            if (res.success) {
+                updateStatus(`DHCP lease acquired: ${res.assignedIp}`);
+            } else {
+                updateStatus(`DHCP request failed: ${res.reason}`);
+            }
+            render();
+        });
+    }
+
+    // Endpoint DHCP Release
+    const releaseBtn = panel.querySelector('#dhcpReleaseBtn');
+    if (releaseBtn) {
+        releaseBtn.addEventListener('click', () => {
+            const dev = getDeviceById(networkState.selectedDeviceId);
+            if (!dev) return;
+            pushHistory();
+            const res = simulateDhcpRelease(dev.id);
+            if (res.success) {
+                updateStatus(`DHCP lease released for ${dev.name}.`);
+            } else {
+                updateStatus(`DHCP release failed: ${res.reason}`);
+            }
+            render();
+        });
+    }
+
+    // Add helper address buttons
+    panel.querySelectorAll('.add-helper-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const dev = getDeviceById(networkState.selectedDeviceId);
+            if (!dev) return;
+            const ifName = btn.dataset.iface;
+            const input = panel.querySelector(`.add-helper-input[data-iface="${ifName}"]`);
+            const helperIp = input ? input.value.trim() : '';
+            if (!helperIp) return;
+            try {
+                pushHistory();
+                addDhcpHelperAddress(dev, ifName, helperIp);
+                render();
+            } catch (err) {
+                alert(err.message);
+            }
+        });
+    });
+
+    // Remove helper address buttons
+    panel.querySelectorAll('.remove-helper-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const dev = getDeviceById(networkState.selectedDeviceId);
+            if (!dev) return;
+            const ifName = btn.dataset.iface;
+            const helperIp = btn.dataset.helper;
+            if (!ifName || !helperIp) return;
+            pushHistory();
+            removeDhcpHelperAddress(dev, ifName, helperIp);
+            render();
+        });
+    });
+
     const openTerminalBtn = panel.querySelector('#openDeviceTerminalBtn') || panel.querySelector('#openRouterTerminalBtn') || panel.querySelector('#openSwitchTerminalBtn');
+
     if (openTerminalBtn) {
         openTerminalBtn.addEventListener('click', () => {
             const devId = openTerminalBtn.dataset.deviceId || networkState.selectedDeviceId;
@@ -3490,6 +3609,25 @@ function renderRouterInspector(selected) {
             }
         }
 
+        const helpers = getDhcpHelperAddresses(selected, ifName);
+        const helpersHtml = `
+            <div class="property-field" style="margin-top: 6px;">
+                <label>DHCP IP Helper Addresses</label>
+                <div class="router-interface-helpers-list" style="display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px;">
+                    ${helpers.length > 0 ? helpers.map(h => `
+                        <span class="badge" style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; font-size: 11px; background: rgba(99, 179, 237, 0.2); border: 1px solid rgba(99, 179, 237, 0.4); border-radius: 3px;">
+                            ${escapeHtml(h)}
+                            <button class="remove-helper-btn" data-iface="${escapeHtml(ifName)}" data-helper="${escapeHtml(h)}" type="button" style="background: none; border: none; color: #fc8181; cursor: pointer; font-size: 11px; padding: 0;" title="Remove helper ${escapeHtml(h)}">✕</button>
+                        </span>
+                    `).join('') : '<span style="font-size: 11px; font-style: italic; color: #718096;">None configured</span>'}
+                </div>
+                <div style="display: flex; gap: 4px;">
+                    <input type="text" class="add-helper-input" data-iface="${escapeHtml(ifName)}" placeholder="Helper IP (e.g. 10.0.0.2)" style="font-size: 11px; padding: 4px; flex: 1;">
+                    <button class="add-helper-btn toolbar-button" data-iface="${escapeHtml(ifName)}" type="button" style="font-size: 11px; padding: 4px 8px;">Add</button>
+                </div>
+            </div>
+        `;
+
         return `
             <div class="router-interface-card">
                 <div class="router-interface-header">
@@ -3517,6 +3655,7 @@ function renderRouterInspector(selected) {
                     <input id="router_${escapeHtml(ifName)}_mac" type="text" value="${macVal}" data-field="interfaces.${escapeHtml(ifName)}.mac" placeholder="Not configured">
                     <div class="property-feedback" data-feedback-for="interfaces.${escapeHtml(ifName)}.mac"></div>
                 </div>
+                ${helpersHtml}
             </div>
         `;
     }).join('');
@@ -3553,6 +3692,7 @@ function renderRouterInspector(selected) {
             ${renderRouterRoutingTableSection(selected)}
             ${renderRouterStaticRouteFormSection(selected)}
             ${renderRouterAclSection(selected)}
+            ${renderDhcpServerInspector(selected)}
             ${renderArpTableInspector(selected)}
             <div class="property-actions">
                 <button id="applyDeviceConfig" class="toolbar-button" type="button" ${isValid ? '' : 'disabled'}>Apply Changes</button>
@@ -3565,7 +3705,87 @@ function renderRouterInspector(selected) {
     `;
 }
 
+function renderDhcpServerInspector(device) {
+    if (!device || (device.type !== 'router' && !(device.type === 'switch' && device.ipRouting))) {
+        return '';
+    }
+    ensureDeviceDhcpServerState(device);
+    const pools = getDhcpPools(device);
+    const excluded = device.dhcpServer?.excludedRanges || [];
+    const bindings = getDhcpBindings(device);
+
+    return `
+        <div class="property-summary" id="routerDhcpServerSection">
+            <h4>DHCP SERVER CONFIGURATION</h4>
+            <div class="property-summary-grid">
+                <div class="property-summary-item">
+                    <span>POOLS</span>
+                    <strong>${pools.length}</strong>
+                </div>
+                <div class="property-summary-item">
+                    <span>EXCLUDED</span>
+                    <strong>${excluded.length}</strong>
+                </div>
+                <div class="property-summary-item">
+                    <span>ACTIVE LEASES</span>
+                    <strong>${bindings.length}</strong>
+                </div>
+            </div>
+            ${pools.length > 0 ? `
+                <div class="dhcp-pools-list" style="margin-top: 8px;">
+                    <h5 style="font-size: 11px; margin-bottom: 4px; color: #a0aec0;">CONFIGURED POOLS</h5>
+                    ${pools.map(p => `
+                        <div class="dhcp-pool-card" style="background: rgba(255,255,255,0.05); padding: 6px 8px; border-radius: 4px; margin-bottom: 4px; font-size: 12px;">
+                            <div style="font-weight: 600; color: #63b3ed;">Pool: ${escapeHtml(p.name)}</div>
+                            <div>Network: ${escapeHtml(p.network || 'None')}/${p.prefixLength || '0'} (${escapeHtml(p.subnetMask || 'None')})</div>
+                            <div>Default Router: ${escapeHtml(p.defaultRouter || 'None')}</div>
+                            <div>DNS Server: ${escapeHtml(p.dnsServer || 'None')}</div>
+                            <div>Domain: ${escapeHtml(p.domainName || 'None')} | Lease: ${p.leaseTime || 86400}s</div>
+                        </div>
+                    `).join('')}
+                </div>
+            ` : '<p class="property-info" style="margin: 4px 0;">No DHCP pools configured.</p>'}
+            ${excluded.length > 0 ? `
+                <div class="dhcp-excluded-list" style="margin-top: 8px;">
+                    <h5 style="font-size: 11px; margin-bottom: 4px; color: #a0aec0;">EXCLUDED IP RANGES</h5>
+                    <div style="display: flex; flex-wrap: wrap; gap: 4px;">
+                        ${excluded.map(r => `
+                            <span class="badge" style="padding: 2px 6px; font-size: 11px; background: rgba(237, 137, 54, 0.2); border: 1px solid rgba(237, 137, 54, 0.4); border-radius: 3px;">
+                                ${escapeHtml(r.startIp)}${r.startIp !== r.endIp ? ' - ' + escapeHtml(r.endIp) : ''}
+                            </span>
+                        `).join('')}
+                    </div>
+                </div>
+            ` : ''}
+            ${bindings.length > 0 ? `
+                <div class="dhcp-bindings-list" style="margin-top: 8px;">
+                    <h5 style="font-size: 11px; margin-bottom: 4px; color: #a0aec0;">ACTIVE DHCP BINDINGS</h5>
+                    <table class="dhcp-bindings-table" style="width: 100%; font-size: 11px; border-collapse: collapse;">
+                        <thead>
+                            <tr style="border-bottom: 1px solid rgba(255,255,255,0.1); text-align: left;">
+                                <th style="padding: 4px;">IP Address</th>
+                                <th style="padding: 4px;">MAC Address</th>
+                                <th style="padding: 4px;">Pool</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${bindings.map(b => `
+                                <tr>
+                                    <td style="padding: 4px;">${escapeHtml(b.ip)}</td>
+                                    <td style="padding: 4px;">${escapeHtml(b.mac)}</td>
+                                    <td style="padding: 4px;">${escapeHtml(b.poolName)}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            ` : ''}
+        </div>
+    `;
+}
+
 function renderSwitchInspector(selected) {
+
     const sw = getSwitchDevice(selected);
     const targetSw = sw || selected;
     ensureSwitchVlanState(targetSw);
@@ -10349,6 +10569,9 @@ function getDeviceCliPrompt(deviceOrId) {
     const name = dev.name || dev.id;
     if (dev.type === 'router') {
         const session = getDeviceTerminalSession(dev.id);
+        if (session.mode === 'dhcp-config' || session.mode === 'config-dhcp') {
+            return `${name}(dhcp-config)#`;
+        }
         if (session.mode === 'config-subif') {
             return `${name}(config-subif)#`;
         }
@@ -10362,6 +10585,9 @@ function getDeviceCliPrompt(deviceOrId) {
     }
     if (dev.type === 'switch') {
         const session = getDeviceTerminalSession(dev.id);
+        if (session.mode === 'dhcp-config' || session.mode === 'config-dhcp') {
+            return `${name}(dhcp-config)#`;
+        }
         if (session.mode === 'config-vlan') {
             return `${name}(config-vlan)#`;
         }
@@ -10389,7 +10615,18 @@ function pushCliCommandHistory(deviceId, command) {
     if (session.history.length > 50) {
         session.history.shift();
     }
+    session.historyIndex = session.history.length;
+}
+
+function clearDeviceTerminalHistory(deviceId) {
+    const session = getDeviceTerminalSession(deviceId);
+    session.history = [];
     session.historyIndex = -1;
+    session.logs = [];
+    const outputEl = document.getElementById('terminalOutput');
+    if (outputEl) {
+        outputEl.innerHTML = '';
+    }
 }
 
 function clearCliTerminal(deviceId) {
@@ -10434,6 +10671,59 @@ function formatCliIpconfig(device) {
         lines.push(`   Subnet Mask . . . . . . . . . . . : ${mask}`);
         lines.push(`   Default Gateway . . . . . . . . . : ${gateway}`);
         lines.push(`   Physical Address. . . . . . . . . : ${mac}`);
+    }
+    return lines.join('\n').trimEnd();
+}
+
+function formatCliIpconfigAll(device) {
+    const lines = ['Windows IP Configuration', ''];
+    const dhcpClient = device.dhcpClient || {};
+    const isDhcp = dhcpClient.enabled !== false;
+    const lease = dhcpClient.lease || {};
+    const dns = device.dnsServer || lease.dnsServer || '0.0.0.0';
+    const dhcpServer = dhcpClient.serverIp || lease.serverId || '0.0.0.0';
+
+    if (device.interfaces && typeof device.interfaces === 'object' && Object.keys(device.interfaces).length > 0) {
+        Object.entries(device.interfaces).forEach(([ifName, iface]) => {
+            const ip = iface.ip || '0.0.0.0';
+            const mask = iface.subnetMask || '0.0.0.0';
+            const gateway = iface.gateway || device.gateway || '0.0.0.0';
+            const mac = iface.mac ? iface.mac.replace(/:/g, '-').toUpperCase() : '00-00-00-00-00-00';
+            lines.push(`Ethernet adapter ${ifName}:`);
+            lines.push('');
+            lines.push('   Connection-specific DNS Suffix  . :');
+            lines.push(`   Physical Address. . . . . . . . . : ${mac}`);
+            lines.push(`   DHCP Enabled. . . . . . . . . . . : ${isDhcp ? 'Yes' : 'No'}`);
+            lines.push('   Autoconfiguration Enabled . . . . : Yes');
+            lines.push('   Link-local IPv6 Address . . . . . : fe80::1');
+            lines.push(`   IPv4 Address. . . . . . . . . . . : ${ip}`);
+            lines.push(`   Subnet Mask . . . . . . . . . . . : ${mask}`);
+            lines.push(`   Default Gateway . . . . . . . . . : ${gateway}`);
+            lines.push(`   DHCP Server . . . . . . . . . . . : ${dhcpServer}`);
+            lines.push(`   DNS Servers . . . . . . . . . . . : ${dns}`);
+            lines.push(`   Lease Obtained. . . . . . . . . . : ${lease.obtainedAt ? new Date(lease.obtainedAt).toLocaleString() : 'N/A'}`);
+            lines.push(`   Lease Expires . . . . . . . . . . : ${lease.expiresAt ? new Date(lease.expiresAt).toLocaleString() : 'N/A'}`);
+            lines.push('');
+        });
+    } else {
+        const ip = device.ip || '0.0.0.0';
+        const mask = device.subnetMask || '0.0.0.0';
+        const gateway = device.gateway || '0.0.0.0';
+        const mac = device.mac ? device.mac.replace(/:/g, '-').toUpperCase() : '00-00-00-00-00-00';
+        lines.push('Ethernet adapter Local Area Connection:');
+        lines.push('');
+        lines.push('   Connection-specific DNS Suffix  . :');
+        lines.push(`   Physical Address. . . . . . . . . : ${mac}`);
+        lines.push(`   DHCP Enabled. . . . . . . . . . . : ${isDhcp ? 'Yes' : 'No'}`);
+        lines.push('   Autoconfiguration Enabled . . . . : Yes');
+        lines.push('   Link-local IPv6 Address . . . . . : fe80::1');
+        lines.push(`   IPv4 Address. . . . . . . . . . . : ${ip}`);
+        lines.push(`   Subnet Mask . . . . . . . . . . . : ${mask}`);
+        lines.push(`   Default Gateway . . . . . . . . . : ${gateway}`);
+        lines.push(`   DHCP Server . . . . . . . . . . . : ${dhcpServer}`);
+        lines.push(`   DNS Servers . . . . . . . . . . . : ${dns}`);
+        lines.push(`   Lease Obtained. . . . . . . . . . : ${lease.obtainedAt ? new Date(lease.obtainedAt).toLocaleString() : 'N/A'}`);
+        lines.push(`   Lease Expires . . . . . . . . . . : ${lease.expiresAt ? new Date(lease.expiresAt).toLocaleString() : 'N/A'}`);
     }
     return lines.join('\n').trimEnd();
 }
@@ -10585,7 +10875,106 @@ function formatCliRouterInterfaces(router) {
     return blocks.join('\n\n');
 }
 
+function formatCliDhcpBindings(device) {
+
+    ensureDeviceDhcpServerState(device);
+    const bindings = getDhcpBindings(device);
+    const lines = [
+        'Bindings from all pools :',
+        'IP address          Client-ID/              Lease expiration        Type',
+        '                    Hardware address/'
+    ];
+    if (!bindings || bindings.length === 0) {
+        return lines.join('\n');
+    }
+    bindings.forEach(b => {
+        const ipCol = (b.ip || '').padEnd(20, ' ');
+        const normMac = (b.mac || '').toLowerCase().replace(/[:-]/g, '');
+        const ciscoMac = normMac.length === 12
+            ? `${normMac.slice(0, 4)}.${normMac.slice(4, 8)}.${normMac.slice(8, 12)}`
+            : (b.mac || '');
+        const macCol = ciscoMac.padEnd(24, ' ');
+        const expCol = 'Automatic'.padEnd(24, ' ');
+        const typeCol = 'Automatic';
+        lines.push(`${ipCol}${macCol}${expCol}${typeCol}`);
+    });
+    return lines.join('\n');
+}
+
+function formatCliDhcpPools(device, poolFilter = null) {
+    ensureDeviceDhcpServerState(device);
+    const pools = getDhcpPools(device);
+    if (!pools || pools.length === 0) {
+        return '% No DHCP pools configured.';
+    }
+    const filtered = poolFilter
+        ? pools.filter(p => p.name.toLowerCase() === String(poolFilter).toLowerCase().trim())
+        : pools;
+    if (filtered.length === 0) {
+        return `% DHCP pool "${poolFilter}" not found.`;
+    }
+    const lines = [];
+    filtered.forEach(pool => {
+        const total = pool.subnetMask ? getDhcpPoolTotalAddresses(pool) : 0;
+        const leased = getDhcpBindings(device).filter(b => b.poolName === pool.name).length;
+        const excluded = (device.dhcpServer?.excludedRanges || []).length;
+        lines.push(`Pool ${pool.name} :`);
+        lines.push(` Total addresses                : ${total}`);
+        lines.push(` Leased addresses               : ${leased}`);
+        lines.push(` Excluded addresses             : ${excluded}`);
+        lines.push(` Pending event                  : none`);
+        lines.push(`1 subnet is currently in the pool :`);
+        lines.push(` Current index        IP address range                    Leased/Excluded/Total`);
+        const firstIp = pool.network && pool.subnetMask ? integerToIPv4(ipv4ToInteger(pool.network) + 1) : '0.0.0.0';
+        const lastIp = pool.network && pool.subnetMask ? integerToIPv4((ipv4ToInteger(pool.network) | (~ipv4ToInteger(pool.subnetMask) >>> 0)) - 1) : '0.0.0.0';
+        const rangeStr = `${firstIp}     -- ${lastIp}`.padEnd(36, ' ');
+        lines.push(` ${firstIp.padEnd(21, ' ')}${rangeStr}${String(leased).padEnd(5, ' ')}/ ${String(excluded).padEnd(9, ' ')}/ ${total}`);
+    });
+    return lines.join('\n');
+}
+
+function formatCliRouterIpInterfaceDetail(router, ifaceName = null) {
+    if (!router.interfaces || Object.keys(router.interfaces).length === 0) {
+        return 'No interfaces configured.';
+    }
+    const targetIfs = ifaceName
+        ? [normalizeRouterInterfaceName(ifaceName)].filter(Boolean)
+        : Object.keys(router.interfaces);
+
+    if (targetIfs.length === 0) {
+        return `% Invalid interface name "${ifaceName}".`;
+    }
+
+    const blocks = [];
+    targetIfs.forEach(name => {
+        const iface = router.interfaces[name];
+        if (!iface) return;
+        const isDown = getEffectiveInterfaceStatus(router, name) === 'down';
+        const status = isDown ? 'administratively down' : 'up';
+        const lineProto = isDown ? 'down' : 'up';
+        const helpers = getDhcpHelperAddresses(router, name);
+        const helperText = helpers.length > 0
+            ? helpers.map(h => `  Helper address is ${h}`).join('\n')
+            : '  Helper address is not set';
+
+        const lines = [
+            `${name} is ${status}, line protocol is ${lineProto}`,
+            iface.ip ? `  Internet address is ${iface.ip}/${getPrefixLengthFromMask(iface.subnetMask || '255.255.255.0')}` : '  Internet protocol processing disabled',
+            '  Broadcast address is 255.255.255.255',
+            '  Address determined by setup command',
+            '  MTU is 1500 bytes',
+            helperText,
+            '  Directed broadcast forwarding is disabled',
+            '  Outgoing access list is not set',
+            '  Inbound access list is not set'
+        ];
+        blocks.push(lines.join('\n'));
+    });
+    return blocks.join('\n\n');
+}
+
 function formatCliRouterIpInterfaceBrief(router) {
+
     if (!router.interfaces || Object.keys(router.interfaces).length === 0) {
         return 'No interfaces configured.';
     }
@@ -11579,7 +11968,7 @@ function executeCliTraceroute(sourceDev, targetIpArg) {
 }
 
 function executeCliCommand(deviceId, rawInput) {
-    const dev = getDeviceById(deviceId) || (networkState.devices && networkState.devices.find((d) => d.name === deviceId || d.id === deviceId));
+    const dev = (typeof deviceId === 'object' && deviceId) ? deviceId : (getDeviceById(deviceId) || (networkState.devices && networkState.devices.find((d) => d.name === deviceId || d.id === deviceId)));
     if (!dev) {
         return {
             success: false,
@@ -11620,6 +12009,7 @@ function executeCliCommand(deviceId, rawInput) {
     const isSwitch = dev.type === 'switch';
     const lowerCmd = command.toLowerCase();
     const tokens = lowerCmd.split(/\s+/);
+    const rawTokens = command.split(/\s+/);
     const mainCmd = tokens[0];
 
     // 0. DO <command> (execute operational command from any config mode)
@@ -11672,8 +12062,21 @@ function executeCliCommand(deviceId, rawInput) {
   hostname <name>               - Set device system name
   interface <name>              - Enter interface configuration mode (alias: int)
   ip route <net> <mask> <next-hop> [ad] [metric] - Configure a static route
-  no ip route <net> <mask> [next-hop]            - Delete a static route
+   no ip route <net> <mask> [next-hop]            - Delete a static route
+  ip dhcp pool <name>           - Configure DHCP pool (enters DHCP config mode)
+  ip dhcp excluded-address <low> [high] - Configure excluded IP addresses
   exit                          - Return to Privileged EXEC mode
+  end                           - Return to Privileged EXEC mode
+  do <command>                  - Execute an operational command
+  help, ?                       - Show available commands`;
+            } else if (session.mode === 'dhcp-config' || session.mode === 'config-dhcp') {
+                helpText = `Commands available in DHCP Pool Configuration mode on ${dev.name}:
+  network <network> <mask/prefix> - Set network and subnet mask for pool
+  default-router <ip>           - Set default router IP address
+  dns-server <ip>               - Set DNS server IP address
+  domain-name <domain>          - Set domain name
+  lease <days> [hours] [minutes]- Set lease duration (or 'lease infinite')
+  exit                          - Return to Global Configuration mode
   end                           - Return to Privileged EXEC mode
   do <command>                  - Execute an operational command
   help, ?                       - Show available commands`;
@@ -11685,6 +12088,8 @@ function executeCliCommand(deviceId, rawInput) {
   show ip route          - Display current IPv4 routing table
   show interfaces        - Display router interfaces and status (alias: show int)
   show ip interface brief- Display summary table of IP interfaces (alias: show ip int brief)
+  show ip dhcp binding   - Display DHCP server active address leases
+  show ip dhcp pool      - Display DHCP server pool status
   show arp               - Display router ARP table and interface bindings
   show access-lists      - Display configured Access Control Lists (ACLs) and hit counts
   route                  - Display current routing table
@@ -11724,6 +12129,17 @@ function executeCliCommand(deviceId, rawInput) {
   end                           - Return to Privileged EXEC mode
   do <command>                  - Execute an operational command
   help, ?                       - Show available commands`;
+            } else if (session.mode === 'dhcp-config' || session.mode === 'config-dhcp') {
+                helpText = `Commands available in DHCP Pool Configuration mode on ${dev.name}:
+  network <network> <mask/prefix> - Set network and subnet mask for pool
+  default-router <ip>           - Set default router IP address
+  dns-server <ip>               - Set DNS server IP address
+  domain-name <domain>          - Set domain name
+  lease <days> [hours] [minutes]- Set lease duration (or 'lease infinite')
+  exit                          - Return to Global Configuration mode
+  end                           - Return to Privileged EXEC mode
+  do <command>                  - Execute an operational command
+  help, ?                       - Show available commands`;
             } else {
                 helpText = `Commands available on ${dev.name} (Cisco IOS-style Switch):
   configure terminal            - Enter global configuration mode (alias: conf t)
@@ -11742,6 +12158,8 @@ function executeCliCommand(deviceId, rawInput) {
   hostname <name>   - Set device system name
   ipconfig          - Display IP configuration, Subnet Mask, Gateway, and MAC
   ipconfig /all     - Display detailed IP and interface configuration
+  ipconfig /renew   - Renew DHCP IP lease from server
+  ipconfig /release - Release active DHCP IP lease
   ifconfig          - Display network interface configuration
   arp, arp -a       - Display the current ARP cache entries
   route, route print- Display current IPv4 routing table
@@ -11789,6 +12207,7 @@ function executeCliCommand(deviceId, rawInput) {
             session.mode = 'config';
             session.selectedInterface = null;
             session.selectedVlan = null;
+            session.selectedPool = null;
             return {
                 success: true,
                 output: 'Enter configuration commands, one per line. End with CNTL/Z or "end".',
@@ -11802,6 +12221,11 @@ function executeCliCommand(deviceId, rawInput) {
 
     // 4. EXIT
     if (mainCmd === 'exit') {
+        if (session.mode === 'dhcp-config' || session.mode === 'config-dhcp') {
+            session.mode = 'config';
+            session.selectedPool = null;
+            return { success: true, output: '', clear: false, status: 'info', command, device: dev };
+        }
         if (session.mode === 'config-vlan') {
             session.mode = 'config';
             session.selectedVlan = null;
@@ -11821,6 +12245,7 @@ function executeCliCommand(deviceId, rawInput) {
             session.mode = 'exec';
             session.selectedInterface = null;
             session.selectedVlan = null;
+            session.selectedPool = null;
             return { success: true, output: '', clear: false, status: 'info', command, device: dev };
         }
         return { success: true, output: '', clear: false, status: 'info', command, device: dev };
@@ -11832,10 +12257,247 @@ function executeCliCommand(deviceId, rawInput) {
             session.mode = 'exec';
             session.selectedInterface = null;
             session.selectedVlan = null;
+            session.selectedPool = null;
             return { success: true, output: '', clear: false, status: 'info', command, device: dev };
         }
         return { success: true, output: '', clear: false, status: 'info', command, device: dev };
     }
+
+    // 5b. DHCP POOL CONFIGURATION MODE COMMANDS
+    if (session.mode === 'dhcp-config' || session.mode === 'config-dhcp') {
+        const poolName = session.selectedPool;
+        const pool = getDhcpPool(dev, poolName);
+        if (!pool) {
+            session.mode = 'config';
+            session.selectedPool = null;
+        } else {
+            // network <network> <mask/prefix>
+            if (mainCmd === 'network' || mainCmd === 'net') {
+                const rawNet = tokens[1];
+                let netIp = '';
+                let netMask = '';
+                if (!rawNet) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: network <network-number> [mask | /prefix]',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (rawNet.includes('/')) {
+                    const parts = rawNet.split('/');
+                    netIp = parts[0].trim();
+                    const prefix = parseInt(parts[1], 10);
+                    if (isNaN(prefix) || prefix < 0 || prefix > 32) {
+                        return {
+                            success: false,
+                            output: '% Invalid CIDR prefix length.',
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    netMask = getMaskFromPrefixLength(prefix);
+                } else {
+                    const rawMask = tokens[2];
+                    if (!rawMask) {
+                        return {
+                            success: false,
+                            output: '% Incomplete command: network <network-number> <subnet-mask>',
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    if (rawMask.startsWith('/')) {
+                        const prefix = parseInt(rawMask.slice(1), 10);
+                        if (isNaN(prefix) || prefix < 0 || prefix > 32) {
+                            return {
+                                success: false,
+                                output: '% Invalid CIDR prefix length.',
+                                clear: false,
+                                status: 'error',
+                                command,
+                                device: dev
+                            };
+                        }
+                        netMask = getMaskFromPrefixLength(prefix);
+                    } else {
+                        netMask = normalizeSubnetMask(rawMask);
+                    }
+                    netIp = rawNet.trim();
+                }
+
+                if (!isValidIPv4(netIp)) {
+                    return {
+                        success: false,
+                        output: `% Invalid network IP address: "${netIp}"`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (!netMask || !isValidSubnetMask(netMask)) {
+                    return {
+                        success: false,
+                        output: `% Invalid subnet mask: "${netMask}"`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                const calcNet = calculateNetworkAddress(netIp, netMask);
+                pushHistory();
+                pool.network = calcNet;
+                pool.subnetMask = netMask;
+                pool.prefixLength = getPrefixLengthFromMask(netMask);
+                render();
+                return { success: true, output: '', clear: false, status: 'success', command, device: dev };
+            }
+
+            // default-router <ip>
+            if (mainCmd === 'default-router' || mainCmd === 'default-gw') {
+                const gwIp = tokens[1] ? tokens[1].trim() : '';
+                if (!gwIp) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: default-router <ip-address>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (!isValidIPv4(gwIp)) {
+                    return {
+                        success: false,
+                        output: `% Invalid default-router IP address: "${gwIp}"`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                pool.defaultRouter = gwIp;
+                render();
+                return { success: true, output: '', clear: false, status: 'success', command, device: dev };
+            }
+
+            // dns-server <ip>
+            if (mainCmd === 'dns-server') {
+                const dnsIp = tokens[1] ? tokens[1].trim() : '';
+                if (!dnsIp) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: dns-server <ip-address>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (!isValidIPv4(dnsIp)) {
+                    return {
+                        success: false,
+                        output: `% Invalid DNS server IP address: "${dnsIp}"`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                pool.dnsServer = dnsIp;
+                render();
+                return { success: true, output: '', clear: false, status: 'success', command, device: dev };
+            }
+
+            // domain-name <domain>
+            if (mainCmd === 'domain-name') {
+                const dom = tokens[1] ? tokens[1].trim() : '';
+                if (!dom) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: domain-name <domain-name>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                pool.domainName = dom;
+                render();
+                return { success: true, output: '', clear: false, status: 'success', command, device: dev };
+            }
+
+            // lease <days> [hours] [minutes] | lease infinite
+            if (mainCmd === 'lease') {
+                if (tokens[1] === 'infinite') {
+                    pushHistory();
+                    pool.leaseTime = 0;
+                    render();
+                    return { success: true, output: '', clear: false, status: 'success', command, device: dev };
+                }
+                const days = parseInt(tokens[1] || '0', 10);
+                const hours = parseInt(tokens[2] || '0', 10);
+                const minutes = parseInt(tokens[3] || '0', 10);
+                if (isNaN(days) || isNaN(hours) || isNaN(minutes) || (days === 0 && hours === 0 && minutes === 0)) {
+                    return {
+                        success: false,
+                        output: '% Incomplete or invalid lease format: lease <days> [hours] [minutes] or lease infinite',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                const totalSeconds = (days * 86400) + (hours * 3600) + (minutes * 60);
+                pushHistory();
+                pool.leaseTime = totalSeconds;
+                render();
+                return { success: true, output: '', clear: false, status: 'success', command, device: dev };
+            }
+
+            // no commands in dhcp-config mode (no default-router, no dns-server, no domain-name, no lease)
+            if (mainCmd === 'no') {
+                const sub1 = tokens[1] || '';
+                if (sub1 === 'default-router') {
+                    pushHistory();
+                    pool.defaultRouter = '';
+                    render();
+                    return { success: true, output: '', clear: false, status: 'success', command, device: dev };
+                }
+                if (sub1 === 'dns-server') {
+                    pushHistory();
+                    pool.dnsServer = '';
+                    render();
+                    return { success: true, output: '', clear: false, status: 'success', command, device: dev };
+                }
+                if (sub1 === 'domain-name') {
+                    pushHistory();
+                    pool.domainName = '';
+                    render();
+                    return { success: true, output: '', clear: false, status: 'success', command, device: dev };
+                }
+                if (sub1 === 'lease') {
+                    pushHistory();
+                    pool.leaseTime = DEFAULT_DHCP_LEASE_SECONDS;
+                    render();
+                    return { success: true, output: '', clear: false, status: 'success', command, device: dev };
+                }
+            }
+        }
+    }
+
+
 
     // 6. HOSTNAME
     if (mainCmd === 'hostname') {
@@ -12848,7 +13510,149 @@ function executeCliCommand(deviceId, rawInput) {
             };
         }
 
+        // no ip dhcp pool <name>
+        if (sub1 === 'ip' && sub2 === 'dhcp' && tokens[3] === 'pool') {
+            if (!isRouter && !(isSwitch && dev.ipRouting)) {
+                return {
+                    success: false,
+                    output: "% 'no ip dhcp pool' is a router or Layer-3 switch command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const poolName = (rawTokens[4] || tokens[4] || '').trim();
+            if (!poolName) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: no ip dhcp pool <pool-name>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            pushHistory();
+            removeDhcpPool(dev, poolName);
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // no ip dhcp excluded-address <low> [high]
+        if (sub1 === 'ip' && sub2 === 'dhcp' && (tokens[3] === 'excluded-address' || tokens[3] === 'excluded')) {
+            if (!isRouter && !(isSwitch && dev.ipRouting)) {
+                return {
+                    success: false,
+                    output: "% 'no ip dhcp excluded-address' is a router or Layer-3 switch command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const low = tokens[4] ? tokens[4].trim() : '';
+            const high = tokens[5] ? tokens[5].trim() : null;
+            if (!low) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: no ip dhcp excluded-address <low-address> [high-address]',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            try {
+                pushHistory();
+                removeDhcpExcludedRange(dev, low, high);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            } catch (err) {
+                return {
+                    success: false,
+                    output: `% ${err.message}`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+        }
+
+        // no ip helper-address <ip>
+        if (sub1 === 'ip' && (sub2 === 'helper-address' || sub2 === 'helper')) {
+            if (!isRouter && !isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'no ip helper-address' is a Cisco IOS router/switch interface command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if ((session.mode !== 'config-if' && session.mode !== 'config-subif') || !session.selectedInterface) {
+                return {
+                    success: false,
+                    output: '% "no ip helper-address" must be executed inside interface configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const helperIp = tokens[3] ? tokens[3].trim() : '';
+            if (!helperIp) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: no ip helper-address <ip-address>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            try {
+                pushHistory();
+                removeDhcpHelperAddress(dev, session.selectedInterface, helperIp);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            } catch (err) {
+                return {
+                    success: false,
+                    output: `% ${err.message}`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+        }
+
         // no ip route <network> <mask/prefix> [next-hop/interface]
+
         if (sub1 === 'ip' && (sub2 === 'route' || sub2 === 'routes')) {
             if (isSwitch && !dev.ipRouting) {
                 return {
@@ -13195,10 +13999,179 @@ function executeCliCommand(deviceId, rawInput) {
         }
     }
 
-    // 13. IP ROUTING / IP DEFAULT-GATEWAY / IP ADDRESS
+    // 13. IP ROUTING / IP DEFAULT-GATEWAY / IP ADDRESS / IP DHCP / IP HELPER-ADDRESS
     if (mainCmd === 'ip') {
+        // ip dhcp pool <name>
+        if (tokens[1] === 'dhcp' && tokens[2] === 'pool') {
+            if (!isRouter && !(isSwitch && dev.ipRouting)) {
+                return {
+                    success: false,
+                    output: "% 'ip dhcp pool' is a router or Layer-3 switch command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode !== 'config') {
+                return {
+                    success: false,
+                    output: '% "ip dhcp pool" must be executed in global configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const poolName = (rawTokens[3] || tokens[3] || '').trim();
+            if (!poolName) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: ip dhcp pool <pool-name>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            ensureDeviceDhcpServerState(dev);
+            let pool = getDhcpPool(dev, poolName);
+            if (!pool) {
+                pushHistory();
+                createDhcpPool(dev, { name: poolName });
+            }
+            session.prevMode = session.mode;
+            session.mode = 'dhcp-config';
+            session.selectedPool = poolName;
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // ip dhcp excluded-address <low> [high]
+        if (tokens[1] === 'dhcp' && (tokens[2] === 'excluded-address' || tokens[2] === 'excluded')) {
+            if (!isRouter && !(isSwitch && dev.ipRouting)) {
+                return {
+                    success: false,
+                    output: "% 'ip dhcp excluded-address' is a router or Layer-3 switch command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode !== 'config') {
+                return {
+                    success: false,
+                    output: '% "ip dhcp excluded-address" must be executed in global configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const low = tokens[3] ? tokens[3].trim() : '';
+            const high = tokens[4] ? tokens[4].trim() : null;
+            if (!low) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: ip dhcp excluded-address <low-address> [high-address]',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            try {
+                pushHistory();
+                addDhcpExcludedRange(dev, low, high);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            } catch (err) {
+                return {
+                    success: false,
+                    output: `% ${err.message}`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+        }
+
+        // ip helper-address <ip>
+        if (tokens[1] === 'helper-address' || tokens[1] === 'helper') {
+            if (!isRouter && !isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'ip helper-address' is a Cisco IOS router/switch interface command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if ((session.mode !== 'config-if' && session.mode !== 'config-subif') || !session.selectedInterface) {
+                return {
+                    success: false,
+                    output: '% "ip helper-address" must be executed inside interface configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const helperIp = tokens[2] ? tokens[2].trim() : '';
+            if (!helperIp) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: ip helper-address <ip-address>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            try {
+                pushHistory();
+                addDhcpHelperAddress(dev, session.selectedInterface, helperIp);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            } catch (err) {
+                return {
+                    success: false,
+                    output: `% ${err.message}`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+        }
+
         // ip routing
         if (tokens[1] === 'routing') {
+
             if (!isSwitch && !isRouter) {
                 return {
                     success: false,
@@ -13709,6 +14682,46 @@ function executeCliCommand(deviceId, rawInput) {
                 device: dev
             };
         }
+        if (tokens[1] === '/renew' || lowerCmd.includes('/renew')) {
+            ensureDeviceDhcpClientState(dev);
+            dev.dhcpClient.enabled = true;
+            const doraRes = simulateDhcpDora(dev.id);
+            render();
+            if (doraRes.success) {
+                const output = [
+                    'Windows IP Configuration',
+                    '',
+                    'Ethernet adapter FastEthernet0:',
+                    '',
+                    '   Connection-specific DNS Suffix  . :',
+                    `   IPv4 Address. . . . . . . . . . . : ${dev.ip || doraRes.assignedIp || '0.0.0.0'}`,
+                    `   Subnet Mask . . . . . . . . . . . : ${dev.subnetMask || doraRes.subnetMask || '0.0.0.0'}`,
+                    `   Default Gateway . . . . . . . . . : ${dev.gateway || doraRes.defaultRouter || '0.0.0.0'}`
+                ].join('\n');
+                return { success: true, output, clear: false, status: 'success', command, device: dev };
+            } else {
+                return { success: false, output: `% DHCP renewal failed: ${doraRes.reason || 'NO_DHCP_SERVER_REACHABLE'}`, clear: false, status: 'error', command, device: dev };
+            }
+        }
+        if (tokens[1] === '/release' || lowerCmd.includes('/release')) {
+            const relRes = simulateDhcpRelease(dev.id);
+            render();
+            if (relRes.success) {
+                return { success: true, output: `IP address ${relRes.releasedIp} for FastEthernet0 successfully released.`, clear: false, status: 'success', command, device: dev };
+            } else {
+                return { success: false, output: `% DHCP release failed: ${relRes.reason || 'NO_ACTIVE_LEASE'}`, clear: false, status: 'error', command, device: dev };
+            }
+        }
+        if (tokens[1] === '/all' || lowerCmd.includes('/all')) {
+            return {
+                success: true,
+                output: formatCliIpconfigAll(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
         return {
             success: true,
             output: formatCliIpconfig(dev),
@@ -13718,6 +14731,7 @@ function executeCliCommand(deviceId, rawInput) {
             device: dev
         };
     }
+
 
     // 16. IFCONFIG
     if (mainCmd === 'ifconfig') {
@@ -14015,6 +15029,51 @@ function executeCliCommand(deviceId, rawInput) {
             };
         }
 
+        // show ip dhcp binding
+        if (sub1 === 'ip' && sub2 === 'dhcp' && tokens[3] === 'binding') {
+            if (!isRouter && !(isSwitch && dev.ipRouting)) {
+                return {
+                    success: false,
+                    output: `% 'show ip dhcp binding' is a router or Layer-3 switch command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: formatCliDhcpBindings(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // show ip dhcp pool [name]
+        if (sub1 === 'ip' && sub2 === 'dhcp' && (tokens[3] === 'pool' || tokens[3] === 'pools')) {
+            if (!isRouter && !(isSwitch && dev.ipRouting)) {
+                return {
+                    success: false,
+                    output: `% 'show ip dhcp pool' is a router or Layer-3 switch command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const poolFilter = tokens[4] || null;
+            return {
+                success: true,
+                output: formatCliDhcpPools(dev, poolFilter),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
         // show ip interface brief / show ip int brief / show ip int br
         if (sub1 === 'ip' && (sub2 === 'interface' || sub2 === 'interfaces' || sub2 === 'int') && (tokens[3] === 'brief' || tokens[3] === 'br')) {
             if (isSwitch) {
@@ -14046,6 +15105,22 @@ function executeCliCommand(deviceId, rawInput) {
                 device: dev
             };
         }
+
+        // show ip interface [interface] / show ip int [interface]
+        if (sub1 === 'ip' && (sub2 === 'interface' || sub2 === 'interfaces' || sub2 === 'int')) {
+            if (isRouter) {
+                const targetIf = tokens[3] || null;
+                return {
+                    success: true,
+                    output: formatCliRouterIpInterfaceDetail(dev, targetIf),
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+        }
+
 
         // show interfaces [vlan <id> | Vlan<id>] / show interface / show ip interface / show int
         if (sub1 === 'interfaces' || sub1 === 'interface' || sub1 === 'int' || (sub1 === 'ip' && (sub2 === 'interface' || sub2 === 'interfaces' || sub2 === 'int'))) {
@@ -14528,17 +15603,23 @@ function createDhcpPool(deviceOrId, poolConfig) {
     }
 
     const network = String(poolConfig.network || '').trim();
-    if (!isValidIPv4(network)) {
-        throw new Error(`Invalid network address "${network}".`);
-    }
-
     const rawMask = String(poolConfig.subnetMask || '').trim();
-    const subnetMask = normalizeSubnetMask(rawMask);
-    if (!subnetMask) {
-        throw new Error(`Invalid subnet mask "${rawMask}".`);
+    let subnetMask = '';
+    let calculatedNet = '';
+    let prefixLength = 0;
+
+    if (network || rawMask) {
+        if (!isValidIPv4(network)) {
+            throw new Error(`Invalid network address "${network}".`);
+        }
+        subnetMask = normalizeSubnetMask(rawMask);
+        if (!subnetMask) {
+            throw new Error(`Invalid subnet mask "${rawMask}".`);
+        }
+        calculatedNet = calculateNetworkAddress(network, subnetMask);
+        prefixLength = getPrefixLengthFromMask(subnetMask);
     }
 
-    const calculatedNet = calculateNetworkAddress(network, subnetMask);
     const defaultRouter = poolConfig.defaultRouter ? String(poolConfig.defaultRouter).trim() : '';
     if (defaultRouter && !isValidIPv4(defaultRouter)) {
         throw new Error(`Invalid default router IP "${defaultRouter}".`);
@@ -14549,7 +15630,7 @@ function createDhcpPool(deviceOrId, poolConfig) {
         throw new Error(`Invalid DNS server IP "${dnsServer}".`);
     }
 
-    const leaseTime = typeof poolConfig.leaseTime === 'number' && poolConfig.leaseTime > 0
+    const leaseTime = typeof poolConfig.leaseTime === 'number' && poolConfig.leaseTime >= 0
         ? poolConfig.leaseTime
         : DEFAULT_DHCP_LEASE_SECONDS;
 
@@ -14557,7 +15638,7 @@ function createDhcpPool(deviceOrId, poolConfig) {
         name,
         network: calculatedNet || network,
         subnetMask,
-        prefixLength: getPrefixLengthFromMask(subnetMask),
+        prefixLength,
         defaultRouter,
         dnsServer,
         domainName: poolConfig.domainName ? String(poolConfig.domainName).trim() : '',
@@ -14568,6 +15649,24 @@ function createDhcpPool(deviceOrId, poolConfig) {
     return pool;
 }
 
+function getDhcpPoolTotalAddresses(pool) {
+    if (!pool || !pool.subnetMask) return 0;
+    const prefix = getPrefixLengthFromMask(pool.subnetMask);
+    if (prefix >= 31) return 0;
+    return Math.max(0, Math.pow(2, 32 - prefix) - 2);
+}
+
+
+/**
+ * Retrieves all DHCP pools on a device.
+ */
+function getDhcpPools(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return [];
+    ensureDeviceDhcpServerState(dev);
+    return Object.values(dev.dhcpServer.pools || {});
+}
+
 /**
  * Retrieves a DHCP pool by name.
  */
@@ -14576,7 +15675,9 @@ function getDhcpPool(deviceOrId, poolName) {
     if (!dev) return null;
     ensureDeviceDhcpServerState(dev);
     const name = String(poolName || '').trim();
-    return dev.dhcpServer.pools[name] || null;
+    if (dev.dhcpServer.pools[name]) return dev.dhcpServer.pools[name];
+    const match = Object.values(dev.dhcpServer.pools).find(p => p.name.toLowerCase() === name.toLowerCase());
+    return match || null;
 }
 
 /**
@@ -14587,14 +15688,17 @@ function removeDhcpPool(deviceOrId, poolName) {
     if (!dev) return false;
     ensureDeviceDhcpServerState(dev);
     const name = String(poolName || '').trim();
-    if (!dev.dhcpServer.pools[name]) return false;
+    const existingKey = dev.dhcpServer.pools[name] ? name : Object.keys(dev.dhcpServer.pools).find(k => k.toLowerCase() === name.toLowerCase());
+    if (!existingKey) return false;
 
-    delete dev.dhcpServer.pools[name];
+    delete dev.dhcpServer.pools[existingKey];
 
     // Clean up active bindings for this pool
-    for (const [ip, binding] of Object.entries(dev.dhcpServer.bindings)) {
-        if (binding && binding.poolName === name) {
-            delete dev.dhcpServer.bindings[ip];
+    if (dev.dhcpServer.bindings) {
+        for (const [ip, binding] of Object.entries(dev.dhcpServer.bindings)) {
+            if (binding && (binding.poolName === existingKey || binding.poolName?.toLowerCase() === name.toLowerCase())) {
+                delete dev.dhcpServer.bindings[ip];
+            }
         }
     }
 
@@ -14734,7 +15838,7 @@ function findMatchingDhcpPool(deviceOrId, ipOrSubnet) {
  * 4. Excluded IP ranges
  * 5. Already actively leased IP addresses
  */
-function getNextAvailableDhcpIp(deviceOrId, poolName, clientMacToIgnore = null) {
+function getNextAvailableDhcpIp(deviceOrId, poolName, clientMacToIgnore = null, options = {}) {
     const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
     if (!dev) return null;
     ensureDeviceDhcpServerState(dev);
@@ -14746,10 +15850,14 @@ function getNextAvailableDhcpIp(deviceOrId, poolName, clientMacToIgnore = null) 
     const maskInt = ipv4ToInteger(pool.subnetMask);
     const broadcastInt = (netInt | (~maskInt >>> 0)) >>> 0;
 
-    // Collect reserved local interface IPs on the server
+    // Collect reserved local interface IPs on the server or relay gateway
     const localServerIps = new Set();
     if (pool.defaultRouter) {
         localServerIps.add(pool.defaultRouter);
+    }
+    const giaddr = options && (options.giaddr || options.gatewayIp);
+    if (giaddr && isValidIPv4(giaddr) && giaddr !== '0.0.0.0') {
+        localServerIps.add(giaddr);
     }
     if (dev.interfaces) {
         for (const iface of Object.values(dev.interfaces)) {
@@ -14765,6 +15873,7 @@ function getNextAvailableDhcpIp(deviceOrId, poolName, clientMacToIgnore = null) 
             }
         }
     }
+
 
     const firstHostInt = netInt + 1;
     const lastHostInt = broadcastInt - 1;
@@ -15071,10 +16180,145 @@ function clearDhcpTransactions() {
     networkState.dhcpTransactions = {};
 }
 
+// ==========================================
+// V5.12 PHASE 3A: DHCP RELAY MODULE
+// ==========================================
+
+/**
+ * Ensures an interface, subinterface, or SVI has a dhcpRelay configuration structure.
+ */
+function ensureInterfaceDhcpRelayState(deviceOrId, interfaceName) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return null;
+
+    const trimmed = String(interfaceName || '').trim();
+    let target = null;
+
+    if (dev.svis) {
+        const vlanMatch = trimmed.match(/^vlan\s*(\d+)$/i) || trimmed.match(/^(\d+)$/);
+        if (vlanMatch) {
+            const vlanId = parseInt(vlanMatch[1], 10);
+            if (!isNaN(vlanId) && dev.svis[vlanId]) {
+                target = dev.svis[vlanId];
+            }
+        }
+    }
+
+    if (!target && dev.interfaces) {
+        const normName = typeof normalizeRouterInterfaceName === 'function'
+            ? normalizeRouterInterfaceName(trimmed)
+            : null;
+        if (normName && dev.interfaces[normName]) {
+            target = dev.interfaces[normName];
+        } else if (dev.interfaces[trimmed]) {
+            target = dev.interfaces[trimmed];
+        }
+    }
+
+    if (!target) return null;
+
+    if (!target.dhcpRelay || typeof target.dhcpRelay !== 'object') {
+        target.dhcpRelay = {
+            helperAddresses: []
+        };
+    }
+    if (!Array.isArray(target.dhcpRelay.helperAddresses)) {
+        target.dhcpRelay.helperAddresses = [];
+    }
+
+    return target.dhcpRelay;
+}
+
+
+/**
+ * Adds an IP helper-address (DHCP server destination) to a router interface, subinterface, or switch SVI.
+ */
+function addDhcpHelperAddress(deviceOrId, interfaceName, helperIp) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) throw new Error('Device not found.');
+
+    const rawIp = String(helperIp || '').trim();
+    if (!isValidIPv4(rawIp)) {
+        throw new Error(`Invalid helper IP address "${rawIp}".`);
+    }
+
+    const relay = ensureInterfaceDhcpRelayState(dev, interfaceName);
+    if (!relay) {
+        throw new Error(`Interface "${interfaceName}" not found on device.`);
+    }
+
+    if (!relay.helperAddresses.includes(rawIp)) {
+        relay.helperAddresses.push(rawIp);
+    }
+    return true;
+}
+
+/**
+ * Removes an IP helper-address from an interface.
+ */
+function removeDhcpHelperAddress(deviceOrId, interfaceName, helperIp) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return false;
+
+    const rawIp = String(helperIp || '').trim();
+    const relay = ensureInterfaceDhcpRelayState(dev, interfaceName);
+    if (!relay) return false;
+
+    const idx = relay.helperAddresses.indexOf(rawIp);
+    if (idx !== -1) {
+        relay.helperAddresses.splice(idx, 1);
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Returns an array of configured helper IP addresses on an interface.
+ */
+function getDhcpHelperAddresses(deviceOrId, interfaceName) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return [];
+
+    const relay = ensureInterfaceDhcpRelayState(dev, interfaceName);
+    return relay ? [...relay.helperAddresses] : [];
+}
+
+/**
+ * Checks whether an interface has any DHCP helper addresses configured.
+ */
+function hasDhcpHelperConfigured(deviceOrId, interfaceName) {
+    const helpers = getDhcpHelperAddresses(deviceOrId, interfaceName);
+    return helpers.length > 0;
+}
+
+/**
+ * Finds a DHCP server device in the topology having a specific IP address configured on an interface or SVI.
+ */
+function findDhcpServerByIp(targetIp) {
+    const rawIp = String(targetIp || '').trim();
+    if (!isValidIPv4(rawIp)) return null;
+
+    for (const dev of (networkState.devices || [])) {
+        if (!dev.dhcpServer || !dev.dhcpServer.enabled) continue;
+
+        if (dev.interfaces) {
+            for (const iface of Object.values(dev.interfaces)) {
+                if (iface && iface.ip === rawIp) return dev;
+            }
+        }
+        if (dev.svis) {
+            for (const svi of Object.values(dev.svis)) {
+                if (svi && svi.ip === rawIp) return dev;
+            }
+        }
+    }
+    return null;
+}
+
 /**
  * Traverses the Layer-2 broadcast domain starting from an endpoint to discover reachable DHCP servers.
+ * Supports direct Layer-2 DHCP servers as well as Layer-3 DHCP Relay Agents (ip helper-address).
  * Respects physical connectivity, VLAN membership (Access/Trunk), and STP port blocking states.
- * Stops at Layer-3 router interfaces / SVI boundaries.
  */
 function findReachableDhcpServers(clientDeviceId, options = {}) {
     const clientDev = typeof clientDeviceId === 'object' && clientDeviceId ? clientDeviceId : getDeviceById(clientDeviceId);
@@ -15147,23 +16391,57 @@ function findReachableDhcpServers(clientDeviceId, options = {}) {
                     }
                 }
 
-                // Check if switch itself is a Multilayer Switch acting as DHCP server
-                if (neighborDev.ipRouting && neighborDev.dhcpServer && neighborDev.dhcpServer.enabled) {
+                // Check if switch itself is a Multilayer Switch acting as DHCP server or DHCP Relay
+                if (neighborDev.ipRouting) {
                     const effectiveVlan = nextVlan || 1;
                     const svi = neighborDev.svis?.[effectiveVlan];
                     if (svi && svi.ip && getEffectiveSviStatus(neighborDev, effectiveVlan) === 'up') {
-                        const pool = findMatchingDhcpPool(neighborDev, svi.ip);
-                        if (pool) {
-                            reachableServers.push({
-                                serverDevice: neighborDev,
-                                serverId: neighborDev.id,
-                                serverIp: svi.ip,
-                                serverMac: svi.mac || neighborDev.mac,
-                                interfaceName: `Vlan${effectiveVlan}`,
-                                pool,
-                                topologyPath: [...path, neighborDev.id],
-                                vlan: effectiveVlan
-                            });
+                        // Check local DHCP server on MLS
+                        if (neighborDev.dhcpServer && neighborDev.dhcpServer.enabled) {
+                            const pool = findMatchingDhcpPool(neighborDev, svi.ip);
+                            if (pool) {
+                                reachableServers.push({
+                                    serverDevice: neighborDev,
+                                    serverId: neighborDev.id,
+                                    serverIp: svi.ip,
+                                    serverMac: svi.mac || neighborDev.mac,
+                                    interfaceName: `Vlan${effectiveVlan}`,
+                                    isRelay: false,
+                                    pool,
+                                    topologyPath: [...path, neighborDev.id],
+                                    vlan: effectiveVlan
+                                });
+                            }
+                        }
+
+                        // Check DHCP Relay on MLS SVI
+                        const sviHelpers = getDhcpHelperAddresses(neighborDev, `Vlan${effectiveVlan}`);
+                        for (const helperIp of sviHelpers) {
+                            const routeRes = lookupRoute(neighborDev, helperIp);
+                            if (routeRes && routeRes.success && routeRes.route) {
+                                const targetServer = findDhcpServerByIp(helperIp);
+                                if (targetServer) {
+                                    const pool = findMatchingDhcpPool(targetServer, svi.ip);
+                                    if (pool) {
+                                        reachableServers.push({
+                                            serverDevice: targetServer,
+                                            serverId: targetServer.id,
+                                            serverIp: helperIp,
+                                            serverMac: targetServer.mac,
+                                            interfaceName: `Vlan${effectiveVlan}`,
+                                            isRelay: true,
+                                            relayDevice: neighborDev,
+                                            relayId: neighborDev.id,
+                                            relayInterface: `Vlan${effectiveVlan}`,
+                                            giaddr: svi.ip,
+                                            egressRoute: routeRes.route,
+                                            pool,
+                                            topologyPath: [...path, neighborDev.id, targetServer.id],
+                                            vlan: effectiveVlan
+                                        });
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -15182,37 +16460,70 @@ function findReachableDhcpServers(clientDeviceId, options = {}) {
                 const effectiveVlan = currentVlan || 1;
 
                 ensureDeviceDhcpServerState(neighborDev);
-                if (neighborDev.dhcpServer && neighborDev.dhcpServer.enabled) {
-                    let targetIface = null;
+                let targetIface = null;
 
-                    // Check for dot1q subinterface matching VLAN
-                    if (effectiveVlan && neighborDev.interfaces) {
-                        for (const iface of Object.values(neighborDev.interfaces)) {
-                            if (iface && iface.isSubinterface && iface.parentInterface === rPort && iface.encapsulation === 'dot1q' && iface.vlan === effectiveVlan) {
-                                targetIface = iface;
-                                break;
-                            }
+                // Check for dot1q subinterface matching VLAN
+                if (effectiveVlan && neighborDev.interfaces) {
+                    for (const iface of Object.values(neighborDev.interfaces)) {
+                        if (iface && iface.isSubinterface && iface.parentInterface === rPort && iface.encapsulation === 'dot1q' && iface.vlan === effectiveVlan) {
+                            targetIface = iface;
+                            break;
                         }
                     }
+                }
 
-                    // Fallback to main interface
-                    if (!targetIface && rPort && neighborDev.interfaces?.[rPort]) {
-                        targetIface = neighborDev.interfaces[rPort];
-                    }
+                // Fallback to main interface
+                if (!targetIface && rPort && neighborDev.interfaces?.[rPort]) {
+                    targetIface = neighborDev.interfaces[rPort];
+                }
 
-                    if (targetIface && targetIface.ip && getEffectiveInterfaceStatus(neighborDev, targetIface.name) === 'up') {
-                        const pool = findMatchingDhcpPool(neighborDev, targetIface.ip);
-                        if (pool) {
+                if (targetIface && targetIface.ip && getEffectiveInterfaceStatus(neighborDev, targetIface.name) === 'up') {
+                    // 1. Check local DHCP server on router
+                    if (neighborDev.dhcpServer && neighborDev.dhcpServer.enabled) {
+                        const localPool = findMatchingDhcpPool(neighborDev, targetIface.ip);
+                        if (localPool) {
                             reachableServers.push({
                                 serverDevice: neighborDev,
                                 serverId: neighborDev.id,
                                 serverIp: targetIface.ip,
                                 serverMac: targetIface.mac,
                                 interfaceName: targetIface.name,
-                                pool,
+                                isRelay: false,
+                                pool: localPool,
                                 topologyPath: [...path, neighborDev.id],
                                 vlan: effectiveVlan
                             });
+                        }
+                    }
+
+                    // 2. Check DHCP Relay (ip helper-address) on router interface/subinterface
+                    const helpers = getDhcpHelperAddresses(neighborDev, targetIface.name);
+                    for (const helperIp of helpers) {
+                        const routeRes = lookupRoute(neighborDev, helperIp);
+                        if (routeRes && routeRes.success && routeRes.route) {
+                            const targetServer = findDhcpServerByIp(helperIp);
+                            if (targetServer) {
+                                // Match pool on remote server using giaddr (targetIface.ip)
+                                const pool = findMatchingDhcpPool(targetServer, targetIface.ip);
+                                if (pool) {
+                                    reachableServers.push({
+                                        serverDevice: targetServer,
+                                        serverId: targetServer.id,
+                                        serverIp: helperIp,
+                                        serverMac: targetServer.mac,
+                                        interfaceName: targetIface.name,
+                                        isRelay: true,
+                                        relayDevice: neighborDev,
+                                        relayId: neighborDev.id,
+                                        relayInterface: targetIface.name,
+                                        giaddr: targetIface.ip,
+                                        egressRoute: routeRes.route,
+                                        pool,
+                                        topologyPath: [...path, neighborDev.id, targetServer.id],
+                                        vlan: effectiveVlan
+                                    });
+                                }
+                            }
                         }
                     }
                 }
@@ -15225,9 +16536,7 @@ function findReachableDhcpServers(clientDeviceId, options = {}) {
 }
 
 /**
- * Simulates the DHCP DISCOVER step of the DORA transaction.
- * Broadcasts DISCOVER on the client's Layer-2 domain, locates reachable DHCP servers,
- * allocates a candidate IP, and generates an OFFER response without committing an active lease.
+ * Simulates the DHCP DISCOVER step of the DORA transaction (supports local and relayed).
  */
 function simulateDhcpDiscover(clientDeviceId, options = {}) {
     const clientDev = typeof clientDeviceId === 'object' && clientDeviceId ? clientDeviceId : getDeviceById(clientDeviceId);
@@ -15258,7 +16567,7 @@ function simulateDhcpDiscover(clientDeviceId, options = {}) {
 
     const reachableServers = findReachableDhcpServers(clientDev.id, options);
     if (reachableServers.length === 0) {
-        events.push('No DHCP server reachable on client broadcast domain');
+        events.push('No DHCP server or relay reachable on client broadcast domain');
         return {
             success: false,
             reason: 'NO_DHCP_SERVER_REACHABLE',
@@ -15277,12 +16586,22 @@ function simulateDhcpDiscover(clientDeviceId, options = {}) {
 
     const serverDev = selectedServer.serverDevice;
     const pool = selectedServer.pool;
+    const isRelay = Boolean(selectedServer.isRelay);
+    const giaddr = isRelay ? selectedServer.giaddr : '0.0.0.0';
 
-    events.push(`DHCP DISCOVER delivered to server ${serverDev.name} on interface ${selectedServer.interfaceName}`);
-    events.push(`Server ${serverDev.name} matched pool "${pool.name}" (${pool.network}/${pool.prefixLength})`);
+    if (isRelay) {
+        const relayDev = selectedServer.relayDevice;
+        events.push(`DHCP DISCOVER intercepted by Relay Agent ${relayDev.name} on interface ${selectedServer.relayInterface}`);
+        events.push(`Relay Agent ${relayDev.name} set giaddr = ${selectedServer.giaddr} and relayed packet to helper ${selectedServer.serverIp} via ${selectedServer.egressRoute?.interface || 'routed interface'}`);
+        events.push(`Server ${serverDev.name} received relayed DHCP DISCOVER (giaddr: ${selectedServer.giaddr})`);
+        events.push(`Server ${serverDev.name} matched pool "${pool.name}" (${pool.network}/${pool.prefixLength}) for giaddr ${selectedServer.giaddr}`);
+    } else {
+        events.push(`DHCP DISCOVER delivered to server ${serverDev.name} on interface ${selectedServer.interfaceName}`);
+        events.push(`Server ${serverDev.name} matched pool "${pool.name}" (${pool.network}/${pool.prefixLength})`);
+    }
 
     // Allocate candidate IP without creating active binding
-    const candidateIp = getNextAvailableDhcpIp(serverDev, pool.name, clientDev.mac);
+    const candidateIp = getNextAvailableDhcpIp(serverDev, pool.name, clientDev.mac, { giaddr });
     if (!candidateIp) {
         events.push(`Server ${serverDev.name} has no available IP addresses in pool "${pool.name}"`);
         return {
@@ -15298,21 +16617,30 @@ function simulateDhcpDiscover(clientDeviceId, options = {}) {
         };
     }
 
+    const defaultGateway = pool.defaultRouter || (isRelay ? selectedServer.giaddr : selectedServer.serverIp);
+
     const offerPacket = createDhcpPacket('OFFER', {
         transactionId: txId,
         clientMac: clientDev.mac,
         offeredIp: candidateIp,
         serverIdentifier: selectedServer.serverIp,
         serverIp: selectedServer.serverIp,
+        gatewayIp: giaddr,
         subnetMask: pool.subnetMask,
-        defaultRouter: pool.defaultRouter || selectedServer.serverIp,
+        defaultRouter: defaultGateway,
         dnsServer: pool.dnsServer || '',
         domainName: pool.domainName || '',
         leaseTime: pool.leaseTime || DEFAULT_DHCP_LEASE_SECONDS
     });
 
-    events.push(`Server ${serverDev.name} generated DHCP OFFER with IP ${candidateIp}`);
-    events.push(`Server ${serverDev.name} sent DHCP OFFER to ${clientDev.name}`);
+    if (isRelay) {
+        const relayDev = selectedServer.relayDevice;
+        events.push(`Server ${serverDev.name} generated DHCP OFFER with IP ${candidateIp} (giaddr: ${selectedServer.giaddr})`);
+        events.push(`Relay Agent ${relayDev.name} received DHCP OFFER and forwarded to client on ${selectedServer.relayInterface}`);
+    } else {
+        events.push(`Server ${serverDev.name} generated DHCP OFFER with IP ${candidateIp}`);
+        events.push(`Server ${serverDev.name} sent DHCP OFFER to ${clientDev.name}`);
+    }
 
     if (!networkState.dhcpTransactions) {
         networkState.dhcpTransactions = {};
@@ -15324,10 +16652,14 @@ function simulateDhcpDiscover(clientDeviceId, options = {}) {
         clientMac: clientDev.mac,
         serverId: serverDev.id,
         serverIp: selectedServer.serverIp,
+        isRelay,
+        relayDeviceId: isRelay ? selectedServer.relayId : null,
+        relayInterface: isRelay ? selectedServer.relayInterface : null,
+        giaddr,
         poolName: pool.name,
         offeredIp: candidateIp,
         subnetMask: pool.subnetMask,
-        defaultRouter: pool.defaultRouter || selectedServer.serverIp,
+        defaultRouter: defaultGateway,
         dnsServer: pool.dnsServer || '',
         domainName: pool.domainName || '',
         leaseTime: pool.leaseTime || DEFAULT_DHCP_LEASE_SECONDS,
@@ -15341,7 +16673,7 @@ function simulateDhcpDiscover(clientDeviceId, options = {}) {
     clientDev.dhcpClient.lastOffer = offerPacket;
     clientDev.dhcpClient.lastServerId = selectedServer.serverIp;
 
-    events.push(`${clientDev.name} received DHCP OFFER (Offered IP: ${candidateIp}, Server: ${selectedServer.serverIp})`);
+    events.push(`${clientDev.name} received DHCP OFFER (Offered IP: ${candidateIp}, Server: ${selectedServer.serverIp}, Gateway: ${defaultGateway})`);
 
     return {
         success: true,
@@ -15350,11 +16682,13 @@ function simulateDhcpDiscover(clientDeviceId, options = {}) {
         clientMac: clientDev.mac,
         server: serverDev.id,
         serverIp: selectedServer.serverIp,
+        isRelay,
+        giaddr,
         offeredIp: candidateIp,
         poolName: pool.name,
         leaseParameters: {
             subnetMask: pool.subnetMask,
-            defaultRouter: pool.defaultRouter || selectedServer.serverIp,
+            defaultRouter: defaultGateway,
             dnsServer: pool.dnsServer || '',
             leaseTime: pool.leaseTime || DEFAULT_DHCP_LEASE_SECONDS
         },
@@ -15364,8 +16698,14 @@ function simulateDhcpDiscover(clientDeviceId, options = {}) {
 }
 
 /**
- * Simulates the DHCP REQUEST and server ACK/NAK processing of the DORA transaction.
- * Requests the offered IP, commits the lease on the server, and transitions the client to BOUND.
+ * Dedicated helper simulating a DHCP DISCOVER through a DHCP Relay Agent.
+ */
+function simulateDhcpRelayDiscover(clientDeviceId, options = {}) {
+    return simulateDhcpDiscover(clientDeviceId, options);
+}
+
+/**
+ * Simulates the DHCP REQUEST and server ACK/NAK processing of the DORA transaction (supports local and relayed).
  */
 function simulateDhcpRequest(clientDeviceId, offeredIp = null, serverId = null, transactionId = null, options = {}) {
     const clientDev = typeof clientDeviceId === 'object' && clientDeviceId ? clientDeviceId : getDeviceById(clientDeviceId);
@@ -15414,11 +16754,15 @@ function simulateDhcpRequest(clientDeviceId, offeredIp = null, serverId = null, 
         return { success: false, reason: 'SERVER_NOT_FOUND', events: ['DHCP Server device not found'] };
     }
 
+    const isRelay = Boolean(tx.isRelay);
+    const giaddr = tx.giaddr || '0.0.0.0';
+
     const requestPacket = createDhcpPacket('REQUEST', {
         transactionId: txId,
         clientMac: clientDev.mac,
         requestedIp: reqIp,
         serverIdentifier: tx.serverIp,
+        gatewayIp: giaddr,
         sourceIp: '0.0.0.0',
         destinationIp: '255.255.255.255'
     });
@@ -15426,18 +16770,33 @@ function simulateDhcpRequest(clientDeviceId, offeredIp = null, serverId = null, 
     clientDev.dhcpClient.state = 'REQUESTING';
     events.push(`${clientDev.name} broadcast DHCP REQUEST for IP ${reqIp} (Server: ${tx.serverIp})`);
 
+    if (isRelay) {
+        const relayDev = getDeviceById(tx.relayDeviceId);
+        const relayName = relayDev ? relayDev.name : 'Relay';
+        events.push(`Relay Agent ${relayName} intercepted DHCP REQUEST and forwarded to helper ${tx.serverIp} (giaddr: ${giaddr})`);
+    }
+
     // Verify if IP is still available or already assigned to someone else
     ensureDeviceDhcpServerState(serverDev);
     if (isDhcpIpLeased(serverDev, reqIp, clientDev.mac) || isDhcpIpExcluded(serverDev, reqIp)) {
         const nakPacket = createDhcpPacket('NAK', {
             transactionId: txId,
             clientMac: clientDev.mac,
-            serverIdentifier: tx.serverIp
+            serverIdentifier: tx.serverIp,
+            gatewayIp: giaddr
         });
 
         tx.state = 'FAILED';
         clientDev.dhcpClient.state = 'INIT';
-        events.push(`Server ${serverDev.name} rejected request and sent DHCP NAK for IP ${reqIp}`);
+
+        if (isRelay) {
+            const relayDev = getDeviceById(tx.relayDeviceId);
+            const relayName = relayDev ? relayDev.name : 'Relay';
+            events.push(`Server ${serverDev.name} sent DHCP NAK for IP ${reqIp}`);
+            events.push(`Relay Agent ${relayName} forwarded DHCP NAK to client`);
+        } else {
+            events.push(`Server ${serverDev.name} rejected request and sent DHCP NAK for IP ${reqIp}`);
+        }
 
         return {
             success: false,
@@ -15454,8 +16813,10 @@ function simulateDhcpRequest(clientDeviceId, offeredIp = null, serverId = null, 
     const leaseRes = createDhcpLease(serverDev, tx.poolName, clientDev.mac, reqIp, {
         now: typeof opts.now === 'number' ? opts.now : Date.now(),
         leaseDuration: tx.leaseTime,
-        hostname: clientDev.name
+        hostname: clientDev.name,
+        giaddr: isRelay ? giaddr : null
     });
+
 
     if (!leaseRes.success) {
         tx.state = 'FAILED';
@@ -15479,14 +16840,22 @@ function simulateDhcpRequest(clientDeviceId, offeredIp = null, serverId = null, 
         clientMac: clientDev.mac,
         yourIp: committedLease.ip,
         serverIdentifier: tx.serverIp,
+        gatewayIp: giaddr,
         subnetMask: committedLease.subnetMask,
-        defaultRouter: committedLease.defaultRouter,
+        defaultRouter: committedLease.defaultRouter || (isRelay ? tx.giaddr : tx.serverIp),
         dnsServer: committedLease.dnsServer,
         domainName: committedLease.domainName,
         leaseTime: committedLease.leaseDuration
     });
 
-    events.push(`Server ${serverDev.name} committed lease and sent DHCP ACK for IP ${committedLease.ip}`);
+    if (isRelay) {
+        const relayDev = getDeviceById(tx.relayDeviceId);
+        const relayName = relayDev ? relayDev.name : 'Relay';
+        events.push(`Server ${serverDev.name} committed lease and sent DHCP ACK for IP ${committedLease.ip} (giaddr: ${giaddr})`);
+        events.push(`Relay Agent ${relayName} received DHCP ACK and forwarded to client on ${tx.relayInterface}`);
+    } else {
+        events.push(`Server ${serverDev.name} committed lease and sent DHCP ACK for IP ${committedLease.ip}`);
+    }
 
     // Apply lease to client endpoint
     applyDhcpLeaseToClient(clientDev, committedLease);
@@ -15501,6 +16870,8 @@ function simulateDhcpRequest(clientDeviceId, offeredIp = null, serverId = null, 
         clientMac: clientDev.mac,
         server: serverDev.id,
         serverIp: tx.serverIp,
+        isRelay,
+        giaddr,
         assignedIp: committedLease.ip,
         lease: committedLease,
         packets: [requestPacket, ackPacket],
@@ -15540,6 +16911,8 @@ function simulateDhcpDora(clientDeviceId, options = {}) {
         clientMac: discoverRes.clientMac,
         server: discoverRes.server,
         serverIp: discoverRes.serverIp,
+        isRelay: discoverRes.isRelay,
+        giaddr: discoverRes.giaddr,
         assignedIp: requestRes.assignedIp,
         lease: requestRes.lease,
         packets: [...discoverRes.packets, ...requestRes.packets],

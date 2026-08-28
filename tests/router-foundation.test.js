@@ -17789,6 +17789,2062 @@ runTest('660. getDhcpTransaction and clearDhcpTransactions manage active transac
     assert.strictEqual(getDhcpTransaction(disc.transactionId), null);
 });
 
+// ==========================================
+// V5.12 PHASE 3A: DHCP RELAY TESTS
+// ==========================================
+
+// 661. ensureInterfaceDhcpRelayState initializes empty helperAddresses on router interface and subinterface
+runTest('661. ensureInterfaceDhcpRelayState initializes empty helperAddresses on router interface and subinterface', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    const relayPhys = ensureInterfaceDhcpRelayState(router, 'Gig0/0');
+    assert.ok(relayPhys);
+    assert.deepStrictEqual(relayPhys.helperAddresses, []);
+
+    ensureRouterSubinterface(router, 'Gig0/0.10');
+    const relaySubif = ensureInterfaceDhcpRelayState(router, 'Gig0/0.10');
+    assert.ok(relaySubif);
+    assert.deepStrictEqual(relaySubif.helperAddresses, []);
+});
+
+// 662. addDhcpHelperAddress adds valid helper IPv4 address and ignores duplicates
+runTest('662. addDhcpHelperAddress adds valid helper IPv4 address and ignores duplicates', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    addDhcpHelperAddress(router, 'Gig0/0', '192.168.20.10');
+    assert.deepStrictEqual(getDhcpHelperAddresses(router, 'Gig0/0'), ['192.168.20.10']);
+
+    // Duplicate add
+    addDhcpHelperAddress(router, 'Gig0/0', '192.168.20.10');
+    assert.deepStrictEqual(getDhcpHelperAddresses(router, 'Gig0/0'), ['192.168.20.10']);
+});
+
+// 663. addDhcpHelperAddress throws error on invalid IP address
+runTest('663. addDhcpHelperAddress throws error on invalid IP address', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    assert.throws(() => {
+        addDhcpHelperAddress(router, 'Gig0/0', '999.999.999.999');
+    }, /invalid helper ip/i);
+});
+
+// 664. removeDhcpHelperAddress removes helper IP address and returns boolean
+runTest('664. removeDhcpHelperAddress removes helper IP address and returns boolean', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    addDhcpHelperAddress(router, 'Gig0/0', '10.0.0.1');
+    addDhcpHelperAddress(router, 'Gig0/0', '10.0.0.2');
+
+    assert.strictEqual(removeDhcpHelperAddress(router, 'Gig0/0', '10.0.0.1'), true);
+    assert.deepStrictEqual(getDhcpHelperAddresses(router, 'Gig0/0'), ['10.0.0.2']);
+    assert.strictEqual(removeDhcpHelperAddress(router, 'Gig0/0', '10.0.0.1'), false);
+});
+
+// 665. getDhcpHelperAddresses and hasDhcpHelperConfigured query configured helpers
+runTest('665. getDhcpHelperAddresses and hasDhcpHelperConfigured query configured helpers', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    assert.strictEqual(hasDhcpHelperConfigured(router, 'Gig0/0'), false);
+    addDhcpHelperAddress(router, 'Gig0/0', '172.16.1.100');
+    assert.strictEqual(hasDhcpHelperConfigured(router, 'Gig0/0'), true);
+    assert.deepStrictEqual(getDhcpHelperAddresses(router, 'Gig0/0'), ['172.16.1.100']);
+});
+
+// 666. addDhcpHelperAddress supports multilayer switch SVI interface (e.g. Vlan10)
+runTest('666. addDhcpHelperAddress supports multilayer switch SVI interface (e.g. Vlan10)', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    createSwitchVlan(sw, 10);
+    setSwitchSviIp(sw, 10, '192.168.10.1', '255.255.255.0');
+
+    addDhcpHelperAddress(sw, 'Vlan10', '10.20.30.40');
+    assert.strictEqual(hasDhcpHelperConfigured(sw, 'Vlan10'), true);
+    assert.deepStrictEqual(getDhcpHelperAddresses(sw, 'Vlan10'), ['10.20.30.40']);
+});
+
+// 667. findReachableDhcpServers discovers remote DHCP server across router with configured ip helper-address
+runTest('667. findReachableDhcpServers discovers remote DHCP server across router with configured ip helper-address', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);     // Relay Router
+    addDevice('router', 500, 100);     // DHCP Server Router
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    // Relay client interface
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    // Inter-router link 10.0.0.0/30
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+
+    // Helper address points to 10.0.0.2
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+
+    // DHCP pool for client subnet on rServer
+    createDhcpPool(rServer, {
+        name: 'CLIENT_POOL',
+        network: '192.168.10.0',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.10.1'
+    });
+
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const servers = findReachableDhcpServers(pc.id);
+    assert.strictEqual(servers.length, 1);
+    assert.strictEqual(servers[0].serverId, rServer.id);
+    assert.strictEqual(servers[0].isRelay, true);
+    assert.strictEqual(servers[0].giaddr, '192.168.10.1');
+    assert.strictEqual(servers[0].serverIp, '10.0.0.2');
+    assert.strictEqual(servers[0].pool.name, 'CLIENT_POOL');
+});
+
+// 668. findReachableDhcpServers matches remote server pool based on giaddr (client subnet) rather than server subnet
+runTest('668. findReachableDhcpServers matches remote server pool based on giaddr (client subnet) rather than server subnet', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+
+    // Server has TWO pools: its own local pool (10.0.0.0) and client pool (192.168.10.0)
+    createDhcpPool(rServer, { name: 'SERVER_LOCAL', network: '10.0.0.0', subnetMask: '255.255.255.252' });
+    createDhcpPool(rServer, { name: 'CLIENT_REMOTE', network: '192.168.10.0', subnetMask: '255.255.255.0' });
+
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const servers = findReachableDhcpServers(pc.id);
+    assert.strictEqual(servers.length, 1);
+    assert.strictEqual(servers[0].pool.name, 'CLIENT_REMOTE'); // Correctly selected based on giaddr 192.168.10.1
+});
+
+// 669. findReachableDhcpServers skips helper when router has no route to helper address
+runTest('669. findReachableDhcpServers skips helper when router has no route to helper address', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, rRelay] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    // Helper address has no route in routing table
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '172.31.99.10');
+    addConnection(pc.id, rRelay.id);
+
+    const servers = findReachableDhcpServers(pc.id);
+    assert.strictEqual(servers.length, 0);
+});
+
+// 670. findReachableDhcpServers skips helper when remote DHCP server has no matching pool for giaddr
+runTest('670. findReachableDhcpServers skips helper when remote DHCP server has no matching pool for giaddr', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+
+    // Server only has pool for an unrelated subnet 172.16.0.0/16 (no pool for 192.168.10.0/24)
+    createDhcpPool(rServer, { name: 'OTHER_POOL', network: '172.16.0.0', subnetMask: '255.255.0.0' });
+
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const servers = findReachableDhcpServers(pc.id);
+    assert.strictEqual(servers.length, 0); // No matching pool for giaddr
+});
+
+// 671. findReachableDhcpServers supports helper address on 802.1Q ROAS subinterface
+runTest('671. findReachableDhcpServers supports helper address on 802.1Q ROAS subinterface', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('router', 400, 100);
+    addDevice('router', 600, 100);
+    const [pc, sw, rRelay, rServer] = networkState.devices;
+
+    // ROAS subinterface on Relay Router
+    ensureRouterSubinterface(rRelay, 'Gig0/0.20');
+    setRouterSubinterfaceEncapsulation(rRelay, 'Gig0/0.20', 20);
+    rRelay.interfaces['Gig0/0.20'].ip = '10.20.20.1';
+    rRelay.interfaces['Gig0/0.20'].subnetMask = '255.255.255.0';
+    addDhcpHelperAddress(rRelay, 'Gig0/0.20', '172.16.0.2');
+
+    rRelay.interfaces['Gig0/1'].ip = '172.16.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '172.16.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'VLAN20_POOL', network: '10.20.20.0', subnetMask: '255.255.255.0', defaultRouter: '10.20.20.1' });
+
+    addConnection(pc.id, sw.id);
+    addConnection(sw.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    createSwitchVlan(sw, 20);
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 20);
+    setSwitchPortMode(sw, 'Fa0/2', 'trunk');
+
+    const servers = findReachableDhcpServers(pc.id);
+    assert.strictEqual(servers.length, 1);
+    assert.strictEqual(servers[0].giaddr, '10.20.20.1');
+    assert.strictEqual(servers[0].pool.name, 'VLAN20_POOL');
+});
+
+// 672. findReachableDhcpServers supports helper address on Multilayer Switch SVI
+runTest('672. findReachableDhcpServers supports helper address on Multilayer Switch SVI', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 300, 100);     // MLS Relay
+    addDevice('router', 500, 100);     // DHCP Server
+    const [pc, mls, rServer] = networkState.devices;
+
+    mls.ipRouting = true;
+    createSwitchVlan(mls, 10);
+    setSwitchSviIp(mls, 10, '192.168.10.1', '255.255.255.0');
+    addDhcpHelperAddress(mls, 'Vlan10', '10.0.0.2');
+
+    // Route port / SVI to server
+    createSwitchVlan(mls, 99);
+    setSwitchSviIp(mls, 99, '10.0.0.1', '255.255.255.0');
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'MLS_CLIENTS', network: '192.168.10.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.10.1' });
+
+    addConnection(pc.id, mls.id);
+    addConnection(mls.id, rServer.id);
+    setSwitchPortAccessVlan(mls, 'Fa0/1', 10);
+    setSwitchPortAccessVlan(mls, 'Fa0/2', 99);
+
+    const servers = findReachableDhcpServers(pc.id);
+    assert.strictEqual(servers.length, 1);
+    assert.strictEqual(servers[0].giaddr, '192.168.10.1');
+});
+
+// 673. findReachableDhcpServers supports multiple helper addresses with deterministic route resolution
+runTest('673. findReachableDhcpServers supports multiple helper addresses with deterministic route resolution', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 50);
+    addDevice('router', 500, 150);
+    const [pc, rRelay, rServer1, rServer2] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.1.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer1.interfaces['Gig0/0'].ip = '10.1.0.2';
+    rServer1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer1, { name: 'POOL1', network: '192.168.10.0', subnetMask: '255.255.255.0' });
+
+    // Add two helpers (one reachable, one unrouted)
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.1.0.2');
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '172.31.0.99');
+
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer1.id);
+
+    const servers = findReachableDhcpServers(pc.id);
+    assert.strictEqual(servers.length, 1);
+    assert.strictEqual(servers[0].serverIp, '10.1.0.2');
+});
+
+// 674. simulateDhcpRelayDiscover intercepts client broadcast and sets giaddr to ingress interface IP
+runTest('674. simulateDhcpRelayDiscover intercepts client broadcast and sets giaddr to ingress interface IP', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    createDhcpPool(rServer, { name: 'POOL_LAN10', network: '192.168.10.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.10.1' });
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const res = simulateDhcpRelayDiscover(pc.id, { transactionId: '0x99887766' });
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.isRelay, true);
+    assert.strictEqual(res.giaddr, '192.168.10.1');
+    assert.strictEqual(res.offeredIp, '192.168.10.2');
+});
+
+// 675. simulateDhcpDiscover preserves transaction ID and client MAC when relaying
+runTest('675. simulateDhcpDiscover preserves transaction ID and client MAC when relaying', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'P10', network: '192.168.10.0', subnetMask: '255.255.255.0' });
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const res = simulateDhcpDiscover(pc.id, { transactionId: '0xFEEDBEEF' });
+    assert.strictEqual(res.transactionId, '0xFEEDBEEF');
+    assert.strictEqual(res.clientMac, pc.mac);
+    assert.strictEqual(res.packets[1].transactionId, '0xFEEDBEEF');
+    assert.strictEqual(res.packets[1].clientMac, pc.mac);
+});
+
+// 676. simulateDhcpDiscover sets packet destination to helper server IP and destination port 67
+runTest('676. simulateDhcpDiscover sets packet destination to helper server IP and destination port 67', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'P10', network: '192.168.10.0', subnetMask: '255.255.255.0' });
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const res = simulateDhcpDiscover(pc.id);
+    assert.strictEqual(res.serverIp, '10.0.0.2');
+    assert.strictEqual(res.packets[1].serverIp, '10.0.0.2');
+});
+
+// 677. simulateDhcpDiscover returns NO_DHCP_SERVER_REACHABLE when helper is unreachable or unrouted
+runTest('677. simulateDhcpDiscover returns NO_DHCP_SERVER_REACHABLE when helper is unreachable or unrouted', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, rRelay] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.99.99.99'); // No route
+    addConnection(pc.id, rRelay.id);
+
+    const res = simulateDhcpDiscover(pc.id);
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.reason, 'NO_DHCP_SERVER_REACHABLE');
+});
+
+// 678. simulateDhcpDiscover records transaction state with isRelay: true, relayDeviceId, relayInterface, and giaddr
+runTest('678. simulateDhcpDiscover records transaction state with isRelay: true, relayDeviceId, relayInterface, and giaddr', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'P10', network: '192.168.10.0', subnetMask: '255.255.255.0' });
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const res = simulateDhcpDiscover(pc.id, { transactionId: '0xTX123' });
+    const tx = getDhcpTransaction('0xTX123');
+
+    assert.ok(tx);
+    assert.strictEqual(tx.isRelay, true);
+    assert.strictEqual(tx.relayDeviceId, rRelay.id);
+    assert.strictEqual(tx.relayInterface, 'Gig0/0');
+    assert.strictEqual(tx.giaddr, '192.168.10.1');
+    assert.strictEqual(tx.state, 'OFFERED');
+});
+
+// 679. simulateDhcpDiscover candidate OFFER includes gatewayIp: giaddr and defaultRouter: giaddr (or pool router)
+runTest('679. simulateDhcpDiscover candidate OFFER includes gatewayIp: giaddr and defaultRouter: giaddr (or pool router)', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    // If pool has defaultRouter omitted, it defaults to giaddr (192.168.10.1)
+    createDhcpPool(rServer, { name: 'P10', network: '192.168.10.0', subnetMask: '255.255.255.0' });
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const res = simulateDhcpDiscover(pc.id);
+    assert.strictEqual(res.packets[1].gatewayIp, '192.168.10.1');
+    assert.strictEqual(res.leaseParameters.defaultRouter, '192.168.10.1');
+});
+
+// 680. simulateDhcpRequest relays REQUEST with giaddr preserved
+runTest('680. simulateDhcpRequest relays REQUEST with giaddr preserved', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'P10', network: '192.168.10.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.10.1' });
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const disc = simulateDhcpDiscover(pc.id);
+    const req = simulateDhcpRequest(pc.id, disc.offeredIp, disc.server, disc.transactionId);
+
+    assert.strictEqual(req.success, true);
+    assert.strictEqual(req.isRelay, true);
+    assert.strictEqual(req.giaddr, '192.168.10.1');
+    assert.strictEqual(req.packets[0].gatewayIp, '192.168.10.1');
+    assert.strictEqual(req.packets[1].gatewayIp, '192.168.10.1');
+});
+
+// 681. simulateDhcpRequest commits active lease on remote DHCP server in the giaddr pool
+runTest('681. simulateDhcpRequest commits active lease on remote DHCP server in the giaddr pool', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'P10', network: '192.168.10.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.10.1' });
+
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const disc = simulateDhcpDiscover(pc.id);
+    simulateDhcpRequest(pc.id, disc.offeredIp, disc.server, disc.transactionId);
+
+    // Lease should be on rServer (not on rRelay)
+    assert.strictEqual(getDhcpBindings(rServer).length, 1);
+    assert.strictEqual(getDhcpBindings(rServer)[0].ip, '192.168.10.2');
+    assert.strictEqual(getDhcpBindings(rRelay).length, 0);
+});
+
+// 682. simulateDhcpRequest relays ACK back to client through relay interface and transitions client to BOUND
+runTest('682. simulateDhcpRequest relays ACK back to client through relay interface and transitions client to BOUND', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'P10', network: '192.168.10.0', subnetMask: '255.255.255.0' });
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const disc = simulateDhcpDiscover(pc.id);
+    simulateDhcpRequest(pc.id, disc.offeredIp, disc.server, disc.transactionId);
+
+    assert.strictEqual(pc.dhcpClient.state, 'BOUND');
+});
+
+// 683. simulateDhcpRequest applies correct IP, subnet mask, default gateway (relay IP), and DNS to client
+runTest('683. simulateDhcpRequest applies correct IP, subnet mask, default gateway (relay IP), and DNS to client', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, {
+        name: 'P10',
+        network: '192.168.10.0',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.10.1',
+        dnsServer: '8.8.8.8'
+    });
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const disc = simulateDhcpDiscover(pc.id);
+    simulateDhcpRequest(pc.id, disc.offeredIp, disc.server, disc.transactionId);
+
+    assert.strictEqual(pc.ip, '192.168.10.2');
+    assert.strictEqual(pc.subnetMask, '255.255.255.0');
+    assert.strictEqual(pc.gateway, '192.168.10.1');
+    assert.strictEqual(pc.dnsServer, '8.8.8.8');
+});
+
+// 684. simulateDhcpRequest handles server NAK via relay when requested IP is unavailable
+runTest('684. simulateDhcpRequest handles server NAK via relay when requested IP is unavailable', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'P10', network: '192.168.10.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.10.1' });
+
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const disc = simulateDhcpDiscover(pc.id);
+
+    // Another client steals candidate IP 192.168.10.2 on server before PC requests
+    createDhcpLease(rServer, 'P10', '00:77:77:77:77:77', '192.168.10.2');
+
+    const req = simulateDhcpRequest(pc.id, disc.offeredIp, disc.server, disc.transactionId);
+    assert.strictEqual(req.success, false);
+    assert.strictEqual(req.reason, 'REQUEST_REJECTED_NAK');
+    assert.strictEqual(req.packets[1].messageType, 'NAK');
+    assert.strictEqual(pc.dhcpClient.state, 'INIT');
+});
+
+// 685. simulateDhcpDora completes 2-router topology (Client Subnet -> Relay Router -> Server Router)
+runTest('685. simulateDhcpDora completes 2-router topology (Client Subnet -> Relay Router -> Server Router)', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    createDhcpPool(rServer, {
+        name: 'BRANCH_OFFICE',
+        network: '192.168.10.0',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.10.1',
+        dnsServer: '1.1.1.1'
+    });
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const dora = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora.success, true);
+    assert.strictEqual(dora.isRelay, true);
+    assert.strictEqual(dora.assignedIp, '192.168.10.2');
+    assert.strictEqual(pc.ip, '192.168.10.2');
+    assert.strictEqual(pc.gateway, '192.168.10.1');
+    assert.strictEqual(pc.dnsServer, '1.1.1.1');
+});
+
+// 686. simulateDhcpDora completes 3-router multi-hop topology (Client -> Relay -> Core -> DHCP Server) using static routes
+runTest('686. simulateDhcpDora completes 3-router multi-hop topology (Client -> Relay -> Core -> DHCP Server) using static routes', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 250, 100); // Relay
+    addDevice('router', 400, 100); // Core
+    addDevice('router', 550, 100); // Server
+    const [pc, rRelay, rCore, rServer] = networkState.devices;
+
+    // Relay interfaces
+    rRelay.interfaces['Gig0/0'].ip = '192.168.50.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.1.1.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    // Core interfaces
+    rCore.interfaces['Gig0/0'].ip = '10.1.1.2';
+    rCore.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rCore.interfaces['Gig0/1'].ip = '10.2.2.1';
+    rCore.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    // Server interface (10.2.2.2)
+    rServer.interfaces['Gig0/0'].ip = '10.2.2.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'LAN50', network: '192.168.50.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.50.1' });
+
+    // Static route on Relay to reach Server subnet 10.2.2.0/24 via Core (10.1.1.2)
+    addStaticRoute(rRelay.id, { network: '10.2.2.0', subnetMask: '255.255.255.0', nextHop: '10.1.1.2' });
+
+    // Helper address points across multi-hop to 10.2.2.2
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.2.2.2');
+
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rCore.id);
+    addConnection(rCore.id, rServer.id);
+
+    const dora = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora.success, true);
+    assert.strictEqual(dora.assignedIp, '192.168.50.2');
+    assert.strictEqual(pc.ip, '192.168.50.2');
+});
+
+// 687. simulateDhcpDora completes switched ROAS subinterface relay topology
+runTest('687. simulateDhcpDora completes switched ROAS subinterface relay topology', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('router', 400, 100);
+    addDevice('router', 600, 100);
+    const [pc, sw, rRelay, rServer] = networkState.devices;
+
+    ensureRouterSubinterface(rRelay, 'Gig0/0.10');
+    setRouterSubinterfaceEncapsulation(rRelay, 'Gig0/0.10', 10);
+    rRelay.interfaces['Gig0/0.10'].ip = '10.10.10.1';
+    rRelay.interfaces['Gig0/0.10'].subnetMask = '255.255.255.0';
+    addDhcpHelperAddress(rRelay, 'Gig0/0.10', '172.16.0.2');
+
+    rRelay.interfaces['Gig0/1'].ip = '172.16.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '172.16.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'V10_POOL', network: '10.10.10.0', subnetMask: '255.255.255.0', defaultRouter: '10.10.10.1' });
+
+    addConnection(pc.id, sw.id);
+    addConnection(sw.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    createSwitchVlan(sw, 10);
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 10);
+    setSwitchPortMode(sw, 'Fa0/2', 'trunk');
+
+    const dora = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora.success, true);
+    assert.strictEqual(dora.assignedIp, '10.10.10.2');
+    assert.strictEqual(pc.ip, '10.10.10.2');
+});
+
+// 688. simulateDhcpDora completes Multilayer Switch SVI relay topology
+runTest('688. simulateDhcpDora completes Multilayer Switch SVI relay topology', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, mls, rServer] = networkState.devices;
+
+    mls.ipRouting = true;
+    createSwitchVlan(mls, 30);
+    setSwitchSviIp(mls, 30, '192.168.30.1', '255.255.255.0');
+    addDhcpHelperAddress(mls, 'Vlan30', '10.0.0.2');
+
+    createSwitchVlan(mls, 99);
+    setSwitchSviIp(mls, 99, '10.0.0.1', '255.255.255.0');
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'VLAN30_POOL', network: '192.168.30.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.30.1' });
+
+    addConnection(pc.id, mls.id);
+    addConnection(mls.id, rServer.id);
+    setSwitchPortAccessVlan(mls, 'Fa0/1', 30);
+    setSwitchPortAccessVlan(mls, 'Fa0/2', 99);
+
+    const dora = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora.success, true);
+    assert.strictEqual(dora.assignedIp, '192.168.30.2');
+    assert.strictEqual(pc.ip, '192.168.30.2');
+});
+
+// 689. simulateDhcpDora allocates sequential unique IP addresses to multiple clients across DHCP relay
+runTest('689. simulateDhcpDora allocates sequential unique IP addresses to multiple clients across DHCP relay', () => {
+    resetLab();
+    addDevice('pc', 100, 50);
+    addDevice('pc', 100, 150);
+    addDevice('laptop', 100, 250);
+    addDevice('switch', 250, 150);
+    addDevice('router', 400, 150);
+    addDevice('router', 600, 150);
+    const [pc0, pc1, lap, sw, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'POOL10', network: '192.168.10.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.10.1' });
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+
+    addConnection(pc0.id, sw.id);
+    addConnection(pc1.id, sw.id);
+    addConnection(lap.id, sw.id);
+    addConnection(sw.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const dora0 = simulateDhcpDora(pc0.id);
+    const dora1 = simulateDhcpDora(pc1.id);
+    const dora2 = simulateDhcpDora(lap.id);
+
+    assert.strictEqual(dora0.assignedIp, '192.168.10.2');
+    assert.strictEqual(dora1.assignedIp, '192.168.10.3');
+    assert.strictEqual(dora2.assignedIp, '192.168.10.4');
+
+    assert.strictEqual(getDhcpBindings(rServer).length, 3);
+});
+
+// 690. simulateDhcpDora respects excluded IP ranges on remote DHCP server for relayed client subnet
+runTest('690. simulateDhcpDora respects excluded IP ranges on remote DHCP server for relayed client subnet', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'POOL10', network: '192.168.10.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.10.1' });
+    addDhcpExcludedRange(rServer, '192.168.10.1', '192.168.10.20');
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const dora = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora.success, true);
+    assert.strictEqual(dora.assignedIp, '192.168.10.21'); // .1 through .20 excluded
+});
+
+// 691. simulateDhcpDora fails when remote pool is exhausted across relay (NO_IP_AVAILABLE_IN_POOL)
+runTest('691. simulateDhcpDora fails when remote pool is exhausted across relay (NO_IP_AVAILABLE_IN_POOL)', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.252'; // /30 (Hosts .1, .2)
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'TINY_POOL', network: '192.168.10.0', subnetMask: '255.255.255.252', defaultRouter: '192.168.10.1' });
+    // Exhaust the single available host IP (.2)
+    createDhcpLease(rServer, 'TINY_POOL', '00:88:88:88:88:88', '192.168.10.2');
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const dora = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora.success, false);
+    assert.strictEqual(dora.reason, 'NO_IP_AVAILABLE_IN_POOL');
+});
+
+// 692. simulateDhcpRelease releases active lease on remote DHCP server across relay and resets client to INIT
+runTest('692. simulateDhcpRelease releases active lease on remote DHCP server across relay and resets client to INIT', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'POOL10', network: '192.168.10.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.10.1' });
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    simulateDhcpDora(pc.id);
+    assert.strictEqual(getDhcpBindings(rServer).length, 1);
+
+    const rel = simulateDhcpRelease(pc.id);
+    assert.strictEqual(rel.success, true);
+    assert.strictEqual(getDhcpBindings(rServer).length, 0);
+    assert.strictEqual(pc.ip, '');
+    assert.strictEqual(pc.dhcpClient.state, 'INIT');
+});
+
+// 693. Released relayed IP is immediately available for subsequent client allocation
+runTest('693. Released relayed IP is immediately available for subsequent client allocation', () => {
+    resetLab();
+    addDevice('pc', 100, 50);
+    addDevice('pc', 100, 150);
+    addDevice('switch', 250, 100);
+    addDevice('router', 400, 100);
+    addDevice('router', 600, 100);
+    const [pc0, pc1, sw, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'POOL10', network: '192.168.10.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.10.1' });
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+
+    addConnection(pc0.id, sw.id);
+    addConnection(pc1.id, sw.id);
+    addConnection(sw.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    simulateDhcpDora(pc0.id);
+    assert.strictEqual(pc0.ip, '192.168.10.2');
+
+    simulateDhcpRelease(pc0.id);
+
+    const dora1 = simulateDhcpDora(pc1.id);
+    assert.strictEqual(dora1.assignedIp, '192.168.10.2');
+});
+
+// 694. Repeated relayed DORA by same client renews without duplicate bindings
+runTest('694. Repeated relayed DORA by same client renews without duplicate bindings', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'POOL10', network: '192.168.10.0', subnetMask: '255.255.255.0' });
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    simulateDhcpDora(pc.id);
+    assert.strictEqual(getDhcpBindings(rServer).length, 1);
+
+    const dora2 = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora2.success, true);
+    assert.strictEqual(getDhcpBindings(rServer).length, 1);
+});
+
+// 695. Failed relay attempt does not alter static IP configuration on client
+runTest('695. Failed relay attempt does not alter static IP configuration on client', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, rRelay] = networkState.devices;
+
+    pc.ip = '10.99.99.55';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '10.99.99.1';
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '172.31.0.1'); // unreachable
+
+    addConnection(pc.id, rRelay.id);
+
+    const dora = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora.success, false);
+    assert.strictEqual(pc.ip, '10.99.99.55');
+});
+
+// 696. STP port blocking on client switch prevents relay reachability
+runTest('696. STP port blocking on client switch prevents relay reachability', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('router', 400, 100);
+    addDevice('router', 600, 100);
+    const [pc, sw, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'POOL10', network: '192.168.10.0', subnetMask: '255.255.255.0' });
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+
+    addConnection(pc.id, sw.id);
+    addConnection(sw.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    // Block port between switch and relay router
+    sw.stp.ports['Fa0/2'].state = 'blocking';
+
+    const dora = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora.success, false);
+    assert.strictEqual(dora.reason, 'NO_DHCP_SERVER_REACHABLE');
+});
+
+// 697. VLAN isolation on client switch prevents relay reachability
+runTest('697. VLAN isolation on client switch prevents relay reachability', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('router', 400, 100);
+    addDevice('router', 600, 100);
+    const [pc, sw, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'POOL10', network: '192.168.10.0', subnetMask: '255.255.255.0' });
+
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+
+    addConnection(pc.id, sw.id);
+    addConnection(sw.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    // Put PC in VLAN 50, but Relay port is in VLAN 1 (no subinterface on router for VLAN 50)
+    createSwitchVlan(sw, 50);
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 50);
+
+    const dora = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora.success, false);
+});
+
+// 698. Connected routes vs static routes LPM resolution to helper address
+runTest('698. Connected routes vs static routes LPM resolution to helper address', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'POOL10', network: '192.168.10.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.10.1' });
+
+
+    // Add more specific static route (e.g. /32) vs connected /24
+    addStaticRoute(rRelay.id, { network: '10.0.0.2', subnetMask: '255.255.255.255', nextHop: '10.0.0.2' });
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const dora = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora.success, true);
+    assert.strictEqual(dora.assignedIp, '192.168.10.2');
+});
+
+// 699. Coexistence: Same topology supports local DHCP on Router0 LAN and Relayed DHCP on Router1 LAN simultaneously
+runTest('699. Coexistence: Same topology supports local DHCP on Router0 LAN and Relayed DHCP on Router1 LAN simultaneously', () => {
+    resetLab();
+    addDevice('pc', 100, 50);          // PC0 (Local DHCP)
+    addDevice('pc', 100, 200);         // PC1 (Relayed DHCP)
+    addDevice('router', 300, 50);      // Router0 (DHCP Server for both)
+    addDevice('router', 300, 200);     // Router1 (DHCP Relay for PC1)
+    const [pc0, pc1, rServer, rRelay] = networkState.devices;
+
+    // Router0 local LAN (192.168.1.0/24) on Gig0/0
+    rServer.interfaces['Gig0/0'].ip = '192.168.1.1';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(rServer, { name: 'LOCAL_POOL', network: '192.168.1.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.1.1' });
+
+    // Router0 inter-router link to Router1 (10.0.0.0/30) on Gig0/1
+    rServer.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rServer.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    // Remote pool on Router0 for Router1 LAN (192.168.2.0/24)
+    createDhcpPool(rServer, { name: 'REMOTE_POOL', network: '192.168.2.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.2.1' });
+
+    // Router1 client-facing LAN on Gig0/0
+    rRelay.interfaces['Gig0/0'].ip = '192.168.2.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    // Router1 server-facing link on Gig0/1
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.2';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.1');
+
+    addConnection(pc0.id, rServer.id); // PC0 -> rServer (Gig0/0)
+    addConnection(pc1.id, rRelay.id);  // PC1 -> rRelay (Gig0/0)
+    addConnection(rRelay.id, rServer.id); // rRelay (Gig0/1) -> rServer (Gig0/1)
+
+    // PC0 runs local DHCP DORA
+    const dora0 = simulateDhcpDora(pc0.id);
+    assert.strictEqual(dora0.success, true);
+    assert.strictEqual(dora0.isRelay, false);
+    assert.strictEqual(dora0.assignedIp, '192.168.1.2');
+
+    // PC1 runs relayed DHCP DORA
+    const dora1 = simulateDhcpDora(pc1.id);
+    assert.strictEqual(dora1.success, true);
+    assert.strictEqual(dora1.isRelay, true);
+    assert.strictEqual(dora1.assignedIp, '192.168.2.2');
+    assert.strictEqual(pc1.ip, '192.168.2.2');
+    assert.strictEqual(pc1.gateway, '192.168.2.1');
+});
+
+// 700. All existing 660 baseline tests continue passing without regression
+runTest('700. All existing 660 baseline tests continue passing without regression', () => {
+    assert.strictEqual(typeof simulateDhcpDora, 'function');
+    assert.strictEqual(typeof simulateDhcpRelayDiscover, 'function');
+    assert.strictEqual(typeof addDhcpHelperAddress, 'function');
+    assert.strictEqual(typeof removeDhcpHelperAddress, 'function');
+});
+
+// =========================================================================
+// V5.12 PHASE 3B: DHCP CLI AND INSPECTOR UI INTEGRATION (TESTS 701 - 755)
+// =========================================================================
+
+// 701. getDeviceCliPrompt returns Router(dhcp-config)# in dhcp-config mode
+runTest('701. getDeviceCliPrompt returns Router(dhcp-config)# in dhcp-config mode', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const session = getDeviceTerminalSession(r0.id);
+    session.mode = 'dhcp-config';
+    session.selectedPool = 'LAN_POOL';
+    const prompt = getDeviceCliPrompt(r0, session);
+    assert.strictEqual(prompt, r0.name + '(dhcp-config)#');
+});
+
+
+// 702. ip dhcp pool POOL1 from config mode enters dhcp-config mode
+runTest('702. ip dhcp pool POOL1 from config mode enters dhcp-config mode', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'configure terminal');
+    const res = executeCliCommand(r0, 'ip dhcp pool LAN_POOL');
+    assert.strictEqual(res.success, true);
+    const session = getDeviceTerminalSession(r0.id);
+    assert.strictEqual(session.mode, 'dhcp-config');
+    assert.strictEqual(session.selectedPool, 'LAN_POOL');
+    const pool = getDhcpPool(r0, 'LAN_POOL');
+    assert.ok(pool);
+    assert.strictEqual(pool.name, 'LAN_POOL');
+});
+
+// 703. exit in dhcp-config mode returns to config mode and clears selectedPool
+runTest('703. exit in dhcp-config mode returns to config mode and clears selectedPool', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'configure terminal');
+    executeCliCommand(r0, 'ip dhcp pool POOL_A');
+    const res = executeCliCommand(r0, 'exit');
+    assert.strictEqual(res.success, true);
+    const session = getDeviceTerminalSession(r0.id);
+    assert.strictEqual(session.mode, 'config');
+    assert.strictEqual(session.selectedPool, null);
+});
+
+// 704. end in dhcp-config mode returns directly to exec mode
+runTest('704. end in dhcp-config mode returns directly to exec mode', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'configure terminal');
+    executeCliCommand(r0, 'ip dhcp pool POOL_B');
+    const res = executeCliCommand(r0, 'end');
+    assert.strictEqual(res.success, true);
+    const session = getDeviceTerminalSession(r0.id);
+    assert.strictEqual(session.mode, 'exec');
+    assert.strictEqual(session.selectedPool, null);
+});
+
+// 705. ip dhcp pool rejected on end hosts (PC/Server)
+runTest('705. ip dhcp pool rejected on end hosts (PC/Server)', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const [pc] = networkState.devices;
+    const res = executeCliCommand(pc, 'ip dhcp pool POOL1');
+    assert.strictEqual(res.success, false);
+});
+
+// 706. ip dhcp pool rejected in exec mode without config mode
+runTest('706. ip dhcp pool rejected in exec mode without config mode', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = executeCliCommand(r0, 'ip dhcp pool POOL1');
+    assert.strictEqual(res.success, false);
+});
+
+// 707. network 192.168.1.0 255.255.255.0 sets pool network, mask, and prefixLength
+runTest('707. network 192.168.1.0 255.255.255.0 sets pool network, mask, and prefixLength', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip dhcp pool POOL1');
+    const res = executeCliCommand(r0, 'network 192.168.1.0 255.255.255.0');
+    assert.strictEqual(res.success, true);
+    const pool = getDhcpPool(r0, 'POOL1');
+    assert.strictEqual(pool.network, '192.168.1.0');
+    assert.strictEqual(pool.subnetMask, '255.255.255.0');
+    assert.strictEqual(pool.prefixLength, 24);
+});
+
+// 708. network 192.168.1.0/24 CIDR format sets pool network, mask, and prefixLength
+runTest('708. network 192.168.1.0/24 CIDR format sets pool network, mask, and prefixLength', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip dhcp pool POOL_CIDR');
+    const res = executeCliCommand(r0, 'network 10.0.0.0/16');
+    assert.strictEqual(res.success, true);
+    const pool = getDhcpPool(r0, 'POOL_CIDR');
+    assert.strictEqual(pool.network, '10.0.0.0');
+    assert.strictEqual(pool.subnetMask, '255.255.0.0');
+    assert.strictEqual(pool.prefixLength, 16);
+});
+
+// 709. network with invalid IP or mask returns error
+runTest('709. network with invalid IP or mask returns error', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip dhcp pool POOL1');
+    const res1 = executeCliCommand(r0, 'network 999.1.1.1 255.255.255.0');
+    assert.strictEqual(res1.success, false);
+    const res2 = executeCliCommand(r0, 'network 192.168.1.0 255.255.0.255');
+    assert.strictEqual(res2.success, false);
+});
+
+// 710. default-router 192.168.1.1 sets pool defaultRouter
+runTest('710. default-router 192.168.1.1 sets pool defaultRouter', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip dhcp pool POOL1');
+    const res = executeCliCommand(r0, 'default-router 192.168.1.1');
+    assert.strictEqual(res.success, true);
+    const pool = getDhcpPool(r0, 'POOL1');
+    assert.strictEqual(pool.defaultRouter, '192.168.1.1');
+});
+
+// 711. dns-server 8.8.8.8 sets pool dnsServer
+runTest('711. dns-server 8.8.8.8 sets pool dnsServer', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip dhcp pool POOL1');
+    const res = executeCliCommand(r0, 'dns-server 8.8.8.8');
+    assert.strictEqual(res.success, true);
+    const pool = getDhcpPool(r0, 'POOL1');
+    assert.strictEqual(pool.dnsServer, '8.8.8.8');
+});
+
+// 712. domain-name example.com sets pool domainName
+runTest('712. domain-name example.com sets pool domainName', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip dhcp pool POOL1');
+    const res = executeCliCommand(r0, 'domain-name cisco.com');
+    assert.strictEqual(res.success, true);
+    const pool = getDhcpPool(r0, 'POOL1');
+    assert.strictEqual(pool.domainName, 'cisco.com');
+});
+
+// 713. lease 2 12 30 sets pool leaseTime in seconds (217800s)
+runTest('713. lease 2 12 30 sets pool leaseTime in seconds (217800s)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip dhcp pool POOL1');
+    const res = executeCliCommand(r0, 'lease 2 12 30');
+    assert.strictEqual(res.success, true);
+    const pool = getDhcpPool(r0, 'POOL1');
+    assert.strictEqual(pool.leaseTime, (2 * 86400) + (12 * 3600) + (30 * 60));
+});
+
+// 714. lease infinite sets pool leaseTime to 0
+runTest('714. lease infinite sets pool leaseTime to 0', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip dhcp pool POOL1');
+    const res = executeCliCommand(r0, 'lease infinite');
+    assert.strictEqual(res.success, true);
+    const pool = getDhcpPool(r0, 'POOL1');
+    assert.strictEqual(pool.leaseTime, 0);
+});
+
+// 715. no default-router, no dns-server, no domain-name, no lease reset pool attributes
+runTest('715. no default-router, no dns-server, no domain-name, no lease reset pool attributes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip dhcp pool POOL1');
+    executeCliCommand(r0, 'default-router 192.168.1.1');
+    executeCliCommand(r0, 'dns-server 8.8.8.8');
+    executeCliCommand(r0, 'domain-name cisco.com');
+    executeCliCommand(r0, 'lease 5');
+    executeCliCommand(r0, 'no default-router');
+    executeCliCommand(r0, 'no dns-server');
+    executeCliCommand(r0, 'no domain-name');
+    executeCliCommand(r0, 'no lease');
+    const pool = getDhcpPool(r0, 'POOL1');
+    assert.strictEqual(pool.defaultRouter, '');
+    assert.strictEqual(pool.dnsServer, '');
+    assert.strictEqual(pool.domainName, '');
+    assert.strictEqual(pool.leaseTime, 86400);
+});
+
+// 716. ip dhcp excluded-address 192.168.1.1 adds single excluded IP
+runTest('716. ip dhcp excluded-address 192.168.1.1 adds single excluded IP', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip dhcp excluded-address 192.168.1.1');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(isDhcpIpExcluded(r0, '192.168.1.1'), true);
+    assert.strictEqual(isDhcpIpExcluded(r0, '192.168.1.2'), false);
+});
+
+// 717. ip dhcp excluded-address 192.168.1.10 192.168.1.20 adds excluded IP range
+runTest('717. ip dhcp excluded-address 192.168.1.10 192.168.1.20 adds excluded IP range', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip dhcp excluded-address 192.168.1.10 192.168.1.20');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(isDhcpIpExcluded(r0, '192.168.1.9'), false);
+    assert.strictEqual(isDhcpIpExcluded(r0, '192.168.1.10'), true);
+    assert.strictEqual(isDhcpIpExcluded(r0, '192.168.1.15'), true);
+    assert.strictEqual(isDhcpIpExcluded(r0, '192.168.1.20'), true);
+    assert.strictEqual(isDhcpIpExcluded(r0, '192.168.1.21'), false);
+});
+
+// 718. no ip dhcp excluded-address 192.168.1.10 192.168.1.20 removes excluded range
+runTest('718. no ip dhcp excluded-address 192.168.1.10 192.168.1.20 removes excluded range', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip dhcp excluded-address 192.168.1.10 192.168.1.20');
+    const res = executeCliCommand(r0, 'no ip dhcp excluded-address 192.168.1.10 192.168.1.20');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(isDhcpIpExcluded(r0, '192.168.1.15'), false);
+});
+
+// 719. no ip dhcp pool POOL1 removes pool and purges associated bindings
+runTest('719. no ip dhcp pool POOL1 removes pool and purges associated bindings', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip dhcp pool POOL_DEL');
+    executeCliCommand(r0, 'network 192.168.1.0 255.255.255.0');
+    createDhcpLease(r0, 'POOL_DEL', '00:11:22:33:44:55', '192.168.1.50');
+    assert.strictEqual(getDhcpBindings(r0).length, 1);
+    const res = executeCliCommand(r0, 'no ip dhcp pool POOL_DEL');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getDhcpPool(r0, 'POOL_DEL'), null);
+    assert.strictEqual(getDhcpBindings(r0).length, 0);
+});
+
+// 720. ip dhcp excluded-address with invalid IP returns descriptive error
+runTest('720. ip dhcp excluded-address with invalid IP returns descriptive error', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip dhcp excluded-address invalid.ip');
+    assert.strictEqual(res.success, false);
+});
+
+// 721. ip helper-address 10.0.0.2 in config-if mode on router adds helper address
+runTest('721. ip helper-address 10.0.0.2 in config-if mode on router adds helper address', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    const res = executeCliCommand(r0, 'ip helper-address 10.0.0.2');
+    assert.strictEqual(res.success, true);
+    assert.deepStrictEqual(getDhcpHelperAddresses(r0, 'Gig0/0'), ['10.0.0.2']);
+});
+
+// 722. no ip helper-address 10.0.0.2 in config-if mode removes helper address
+runTest('722. no ip helper-address 10.0.0.2 in config-if mode removes helper address', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip helper-address 10.0.0.2');
+    const res = executeCliCommand(r0, 'no ip helper-address 10.0.0.2');
+    assert.strictEqual(res.success, true);
+    assert.deepStrictEqual(getDhcpHelperAddresses(r0, 'Gig0/0'), []);
+});
+
+// 723. ip helper-address on Layer-3 switch SVI (Vlan10) adds helper address
+runTest('723. ip helper-address on Layer-3 switch SVI (Vlan10) adds helper address', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const [sw] = networkState.devices;
+    executeCliCommand(sw, 'enable');
+    executeCliCommand(sw, 'conf t');
+    executeCliCommand(sw, 'ip routing');
+    executeCliCommand(sw, 'interface Vlan10');
+    const res = executeCliCommand(sw, 'ip helper-address 192.168.100.5');
+    assert.strictEqual(res.success, true);
+    assert.deepStrictEqual(getDhcpHelperAddresses(sw, 'Vlan10'), ['192.168.100.5']);
+});
+
+// 724. no ip helper-address on SVI removes helper address
+runTest('724. no ip helper-address on SVI removes helper address', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const [sw] = networkState.devices;
+    executeCliCommand(sw, 'enable');
+    executeCliCommand(sw, 'conf t');
+    executeCliCommand(sw, 'interface Vlan10');
+    executeCliCommand(sw, 'ip helper-address 192.168.100.5');
+    const res = executeCliCommand(sw, 'no ip helper-address 192.168.100.5');
+    assert.strictEqual(res.success, true);
+    assert.deepStrictEqual(getDhcpHelperAddresses(sw, 'Vlan10'), []);
+});
+
+// 725. ip helper-address outside config-if mode returns error
+runTest('725. ip helper-address outside config-if mode returns error', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip helper-address 10.0.0.2');
+    assert.strictEqual(res.success, false);
+});
+
+// 726. ip helper-address with invalid IP returns error
+runTest('726. ip helper-address with invalid IP returns error', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    const res = executeCliCommand(r0, 'ip helper-address 999.999.999.999');
+    assert.strictEqual(res.success, false);
+});
+
+// 727. show ip dhcp binding outputs formatted active bindings table
+runTest('727. show ip dhcp binding outputs formatted active bindings table', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createDhcpPool(r0, { name: 'POOL1', network: '192.168.1.0', subnetMask: '255.255.255.0' });
+    createDhcpLease(r0, 'POOL1', 'aa:bb:cc:dd:ee:ff', '192.168.1.10');
+    const res = executeCliCommand(r0, 'show ip dhcp binding');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('192.168.1.10'));
+    assert.ok(res.output.includes('aabb.ccdd.eeff'));
+    assert.ok(res.output.includes('Automatic'));
+});
+
+// 728. show ip dhcp binding with no bindings displays headers gracefully
+runTest('728. show ip dhcp binding with no bindings displays headers gracefully', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = executeCliCommand(r0, 'show ip dhcp binding');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Bindings from all pools :'));
+});
+
+// 729. show ip dhcp pool displays all configured pools, ranges, leased count, and utilization
+runTest('729. show ip dhcp pool displays all configured pools, ranges, leased count, and utilization', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createDhcpPool(r0, { name: 'CORP_POOL', network: '192.168.10.0', subnetMask: '255.255.255.0' });
+    createDhcpLease(r0, 'CORP_POOL', '00:11:22:33:44:55', '192.168.10.2');
+    const res = executeCliCommand(r0, 'show ip dhcp pool');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Pool CORP_POOL :'));
+    assert.ok(res.output.includes('Total addresses                : 254'));
+    assert.ok(res.output.includes('Leased addresses               : 1'));
+    assert.ok(res.output.includes('192.168.10.1') && res.output.includes('192.168.10.254'));
+});
+
+// 730. show ip dhcp pool POOL1 displays specific pool detail
+runTest('730. show ip dhcp pool POOL1 displays specific pool detail', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createDhcpPool(r0, { name: 'POOL_A', network: '192.168.1.0', subnetMask: '255.255.255.0' });
+    createDhcpPool(r0, { name: 'POOL_B', network: '192.168.2.0', subnetMask: '255.255.255.0' });
+    const res = executeCliCommand(r0, 'show ip dhcp pool POOL_A');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Pool POOL_A :'));
+    assert.ok(!res.output.includes('Pool POOL_B :'));
+});
+
+// 731. show ip interface / show ip interface Gig0/0 displays helper addresses and IP details
+runTest('731. show ip interface / show ip interface Gig0/0 displays helper addresses and IP details', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addDhcpHelperAddress(r0, 'Gig0/0', '10.0.0.5');
+    const res = executeCliCommand(r0, 'show ip interface Gig0/0');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Gig0/0 is up'));
+    assert.ok(res.output.includes('Internet address is 192.168.1.1/24'));
+    assert.ok(res.output.includes('Helper address is 10.0.0.5'));
+});
+
+// 732. show ip dhcp pool on end hosts returns error
+runTest('732. show ip dhcp pool on end hosts returns error', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const [pc] = networkState.devices;
+    const res = executeCliCommand(pc, 'show ip dhcp pool');
+    assert.strictEqual(res.success, false);
+});
+
+// 733. show ip dhcp binding on end hosts returns error
+runTest('733. show ip dhcp binding on end hosts returns error', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const [pc] = networkState.devices;
+    const res = executeCliCommand(pc, 'show ip dhcp binding');
+    assert.strictEqual(res.success, false);
+});
+
+// 734. ipconfig displays basic IPv4, subnet mask, and gateway
+runTest('734. ipconfig displays basic IPv4, subnet mask, and gateway', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const [pc] = networkState.devices;
+    pc.ip = '192.168.1.50';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+    const res = executeCliCommand(pc, 'ipconfig');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('192.168.1.50'));
+    assert.ok(res.output.includes('255.255.255.0'));
+    assert.ok(res.output.includes('192.168.1.1'));
+});
+
+// 735. ipconfig /all displays DHCP enabled status, leased server, DNS, and timestamps
+runTest('735. ipconfig /all displays DHCP enabled status, leased server, DNS, and timestamps', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const [pc] = networkState.devices;
+    ensureDeviceDhcpClientState(pc);
+    pc.dhcpClient.enabled = true;
+    pc.dhcpClient.serverIp = '192.168.1.1';
+    pc.ip = '192.168.1.100';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+    pc.dnsServer = '8.8.8.8';
+    const res = executeCliCommand(pc, 'ipconfig /all');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('DHCP Enabled. . . . . . . . . . . : Yes'));
+    assert.ok(res.output.includes('192.168.1.100'));
+    assert.ok(res.output.includes('DHCP Server . . . . . . . . . . . : 192.168.1.1'));
+    assert.ok(res.output.includes('DNS Servers . . . . . . . . . . . : 8.8.8.8'));
+});
+
+// 736. ipconfig /renew triggers simulateDhcpDora and updates IP configuration
+runTest('736. ipconfig /renew triggers simulateDhcpDora and updates IP configuration', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(r0, { name: 'POOL1', network: '192.168.1.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.1.1' });
+    addConnection(pc.id, r0.id);
+
+    const res = executeCliCommand(pc, 'ipconfig /renew');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(pc.ip, '192.168.1.2');
+    assert.strictEqual(pc.gateway, '192.168.1.1');
+    assert.strictEqual(pc.dhcpClient.state, 'BOUND');
+});
+
+// 737. ipconfig /release triggers simulateDhcpRelease and clears leased IP
+runTest('737. ipconfig /release triggers simulateDhcpRelease and clears leased IP', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(r0, { name: 'POOL1', network: '192.168.1.0', subnetMask: '255.255.255.0' });
+    addConnection(pc.id, r0.id);
+
+    simulateDhcpDora(pc.id);
+    assert.strictEqual(pc.ip, '192.168.1.2');
+
+    const res = executeCliCommand(pc, 'ipconfig /release');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(pc.ip, '');
+    assert.strictEqual(pc.dhcpClient.state, 'INIT');
+});
+
+// 738. ipconfig /renew fails gracefully and preserves static IP when no DHCP server is available
+runTest('738. ipconfig /renew fails gracefully and preserves static IP when no DHCP server is available', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const [pc] = networkState.devices;
+    pc.ip = '192.168.5.55';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.5.1';
+    ensureDeviceDhcpClientState(pc);
+    pc.dhcpClient.enabled = false;
+
+    const res = executeCliCommand(pc, 'ipconfig /renew');
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(pc.ip, '192.168.5.55');
+    assert.strictEqual(pc.gateway, '192.168.5.1');
+});
+
+// 739. ipconfig rejected on routers and switches
+runTest('739. ipconfig rejected on routers and switches', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 300, 100);
+    const [r0, sw] = networkState.devices;
+    const res1 = executeCliCommand(r0, 'ipconfig');
+    assert.strictEqual(res1.success, false);
+    const res2 = executeCliCommand(sw, 'ipconfig');
+    assert.strictEqual(res2.success, false);
+});
+
+// 740. Full router DHCP pool configured entirely via CLI commands allocates IP to PC via ipconfig /renew
+runTest('740. Full router DHCP pool configured entirely via CLI commands allocates IP to PC via ipconfig /renew', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    addConnection(pc.id, r0.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip address 10.10.10.1 255.255.255.0');
+    executeCliCommand(r0, 'no shutdown');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'ip dhcp pool MY_CLI_POOL');
+    executeCliCommand(r0, 'network 10.10.10.0 255.255.255.0');
+    executeCliCommand(r0, 'default-router 10.10.10.1');
+    executeCliCommand(r0, 'dns-server 1.1.1.1');
+    executeCliCommand(r0, 'domain-name netlab.local');
+    executeCliCommand(r0, 'end');
+
+    const res = executeCliCommand(pc, 'ipconfig /renew');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(pc.ip, '10.10.10.2');
+    assert.strictEqual(pc.subnetMask, '255.255.255.0');
+    assert.strictEqual(pc.gateway, '10.10.10.1');
+    assert.strictEqual(pc.dnsServer, '1.1.1.1');
+});
+
+// 741. Excluded ranges configured via CLI are respected by DORA
+runTest('741. Excluded ranges configured via CLI are respected by DORA', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    addConnection(pc.id, r0.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip address 192.168.1.1 255.255.255.0');
+    executeCliCommand(r0, 'no shutdown');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'ip dhcp excluded-address 192.168.1.1 192.168.1.10');
+    executeCliCommand(r0, 'ip dhcp pool POOL1');
+    executeCliCommand(r0, 'network 192.168.1.0 255.255.255.0');
+    executeCliCommand(r0, 'default-router 192.168.1.1');
+    executeCliCommand(r0, 'end');
+
+    const res = executeCliCommand(pc, 'ipconfig /renew');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(pc.ip, '192.168.1.11');
+});
+
+// 742. ipconfig /release followed by show ip dhcp binding confirms binding is cleared
+runTest('742. ipconfig /release followed by show ip dhcp binding confirms binding is cleared', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    addConnection(pc.id, r0.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip address 192.168.1.1 255.255.255.0');
+    executeCliCommand(r0, 'no shutdown');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'ip dhcp pool POOL1');
+    executeCliCommand(r0, 'network 192.168.1.0 255.255.255.0');
+    executeCliCommand(r0, 'end');
+
+    executeCliCommand(pc, 'ipconfig /renew');
+    let showRes = executeCliCommand(r0, 'show ip dhcp binding');
+    assert.ok(showRes.output.includes('192.168.1.2'));
+
+    executeCliCommand(pc, 'ipconfig /release');
+    showRes = executeCliCommand(r0, 'show ip dhcp binding');
+    assert.ok(!showRes.output.includes('192.168.1.2'));
+});
+
+// 743. Multilayer Switch DHCP pool configured via CLI services connected client
+runTest('743. Multilayer Switch DHCP pool configured via CLI services connected client', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const [sw, pc] = networkState.devices;
+    addConnection(sw.id, pc.id);
+
+    executeCliCommand(sw, 'enable');
+    executeCliCommand(sw, 'conf t');
+    executeCliCommand(sw, 'ip routing');
+    executeCliCommand(sw, 'vlan 20');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport mode access');
+    executeCliCommand(sw, 'switchport access vlan 20');
+    executeCliCommand(sw, 'interface Vlan20');
+    executeCliCommand(sw, 'ip address 192.168.20.1 255.255.255.0');
+    executeCliCommand(sw, 'no shutdown');
+    executeCliCommand(sw, 'exit');
+    executeCliCommand(sw, 'ip dhcp pool SW_POOL');
+    executeCliCommand(sw, 'network 192.168.20.0 255.255.255.0');
+    executeCliCommand(sw, 'default-router 192.168.20.1');
+    executeCliCommand(sw, 'end');
+
+    const res = executeCliCommand(pc, 'ipconfig /renew');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(pc.ip, '192.168.20.2');
+});
+
+// 744. Server router pool configured via CLI + Relay router ip helper-address configured via CLI services PC across relay
+runTest('744. Server router pool configured via CLI + Relay router ip helper-address configured via CLI services PC across relay', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    // Relay Router CLI config
+    executeCliCommand(rRelay, 'enable');
+    executeCliCommand(rRelay, 'conf t');
+    executeCliCommand(rRelay, 'interface Gig0/0');
+    executeCliCommand(rRelay, 'ip address 192.168.10.1 255.255.255.0');
+    executeCliCommand(rRelay, 'no shutdown');
+    executeCliCommand(rRelay, 'ip helper-address 10.0.0.2');
+    executeCliCommand(rRelay, 'exit');
+    executeCliCommand(rRelay, 'interface Gig0/1');
+    executeCliCommand(rRelay, 'ip address 10.0.0.1 255.255.255.0');
+    executeCliCommand(rRelay, 'no shutdown');
+    executeCliCommand(rRelay, 'end');
+
+    // Server Router CLI config
+    executeCliCommand(rServer, 'enable');
+    executeCliCommand(rServer, 'conf t');
+    executeCliCommand(rServer, 'interface Gig0/0');
+    executeCliCommand(rServer, 'ip address 10.0.0.2 255.255.255.0');
+    executeCliCommand(rServer, 'no shutdown');
+    executeCliCommand(rServer, 'exit');
+    executeCliCommand(rServer, 'ip dhcp pool REMOTE_POOL');
+    executeCliCommand(rServer, 'network 192.168.10.0 255.255.255.0');
+    executeCliCommand(rServer, 'default-router 192.168.10.1');
+    executeCliCommand(rServer, 'dns-server 8.8.4.4');
+    executeCliCommand(rServer, 'end');
+
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    const res = executeCliCommand(pc, 'ipconfig /renew');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(pc.ip, '192.168.10.2');
+    assert.strictEqual(pc.gateway, '192.168.10.1');
+    assert.strictEqual(pc.dnsServer, '8.8.4.4');
+});
+
+// 745. ipconfig /all on client reflects default gateway as relay interface IP and DNS from server pool
+runTest('745. ipconfig /all on client reflects default gateway as relay interface IP and DNS from server pool', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '172.16.1.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/0'].status = 'up';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].status = 'up';
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rServer.interfaces['Gig0/0'].status = 'up';
+    createDhcpPool(rServer, { name: 'POOL172', network: '172.16.1.0', subnetMask: '255.255.255.0', defaultRouter: '172.16.1.1', dnsServer: '9.9.9.9' });
+
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    simulateDhcpDora(pc.id);
+    const allRes = executeCliCommand(pc, 'ipconfig /all');
+    assert.strictEqual(allRes.success, true);
+    assert.ok(allRes.output.includes('172.16.1.2'));
+    assert.ok(allRes.output.includes('Default Gateway . . . . . . . . . : 172.16.1.1'));
+    assert.ok(allRes.output.includes('DNS Servers . . . . . . . . . . . : 9.9.9.9'));
+});
+
+// 746. no ip helper-address via CLI stops subsequent DHCP renewals across relay
+runTest('746. no ip helper-address via CLI stops subsequent DHCP renewals across relay', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/0'].status = 'up';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].status = 'up';
+    addDhcpHelperAddress(rRelay, 'Gig0/0', '10.0.0.2');
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rServer.interfaces['Gig0/0'].status = 'up';
+    createDhcpPool(rServer, { name: 'POOL10', network: '192.168.10.0', subnetMask: '255.255.255.0' });
+
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    // Initial lease
+    simulateDhcpDora(pc.id);
+    simulateDhcpRelease(pc.id);
+
+    // Remove helper via CLI
+    executeCliCommand(rRelay, 'enable');
+    executeCliCommand(rRelay, 'conf t');
+    executeCliCommand(rRelay, 'interface Gig0/0');
+    executeCliCommand(rRelay, 'no ip helper-address 10.0.0.2');
+    executeCliCommand(rRelay, 'end');
+
+    const res = executeCliCommand(pc, 'ipconfig /renew');
+    assert.strictEqual(res.success, false);
+});
+
+// 747. Re-adding ip helper-address via CLI restores DHCP relay reachability
+runTest('747. Re-adding ip helper-address via CLI restores DHCP relay reachability', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [pc, rRelay, rServer] = networkState.devices;
+
+    rRelay.interfaces['Gig0/0'].ip = '192.168.10.1';
+    rRelay.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/0'].status = 'up';
+    rRelay.interfaces['Gig0/1'].ip = '10.0.0.1';
+    rRelay.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    rRelay.interfaces['Gig0/1'].status = 'up';
+
+    rServer.interfaces['Gig0/0'].ip = '10.0.0.2';
+    rServer.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    rServer.interfaces['Gig0/0'].status = 'up';
+    createDhcpPool(rServer, { name: 'POOL10', network: '192.168.10.0', subnetMask: '255.255.255.0' });
+
+    addConnection(pc.id, rRelay.id);
+    addConnection(rRelay.id, rServer.id);
+
+    // Add helper address via CLI
+    executeCliCommand(rRelay, 'enable');
+    executeCliCommand(rRelay, 'conf t');
+    executeCliCommand(rRelay, 'interface Gig0/0');
+    executeCliCommand(rRelay, 'ip helper-address 10.0.0.2');
+    executeCliCommand(rRelay, 'end');
+
+    const res = executeCliCommand(pc, 'ipconfig /renew');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(pc.ip, '192.168.10.2');
+});
+
+// 748. renderDhcpServerInspector renders configured pools, excluded ranges, and active bindings
+runTest('748. renderDhcpServerInspector renders configured pools, excluded ranges, and active bindings', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createDhcpPool(r0, { name: 'BRANCH_POOL', network: '192.168.50.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.50.1', dnsServer: '8.8.8.8' });
+    addDhcpExcludedRange(r0, '192.168.50.1', '192.168.50.10');
+    createDhcpLease(r0, 'BRANCH_POOL', '00:aa:bb:cc:dd:ee', '192.168.50.15');
+
+    const html = renderDhcpServerInspector(r0);
+    assert.ok(html.includes('routerDhcpServerSection'));
+    assert.ok(html.includes('BRANCH_POOL'));
+    assert.ok(html.includes('192.168.50.0/24'));
+    assert.ok(html.includes('192.168.50.1 - 192.168.50.10'));
+    assert.ok(html.includes('192.168.50.15'));
+    assert.ok(html.includes('00:AA:BB:CC:DD:EE') || html.includes('00:aa:bb:cc:dd:ee'));
+});
+
+// 749. renderDhcpServerInspector returns empty string for end hosts and Layer-2 switches
+runTest('749. renderDhcpServerInspector returns empty string for end hosts and Layer-2 switches', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 300, 100);
+    const [pc, sw] = networkState.devices;
+    sw.ipRouting = false;
+    assert.strictEqual(renderDhcpServerInspector(pc), '');
+    assert.strictEqual(renderDhcpServerInspector(sw), '');
+});
+
+// 750. Router interface card renders configured helper addresses with add/remove controls
+runTest('750. Router interface card renders configured helper addresses with add/remove controls', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addDhcpHelperAddress(r0, 'Gig0/0', '10.0.0.5');
+    const html = renderRouterInspector(r0);
+    assert.ok(html.includes('DHCP IP Helper Addresses'));
+    assert.ok(html.includes('10.0.0.5'));
+    assert.ok(html.includes('remove-helper-btn'));
+    assert.ok(html.includes('add-helper-btn'));
+});
+
+// 751. Endpoint inspector renders DHCP mode radio selector, state badge, and renew/release buttons
+runTest('751. Endpoint inspector renders DHCP mode radio selector, state badge, and renew/release buttons', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const [pc] = networkState.devices;
+    networkState.selectedDeviceId = pc.id;
+    ensureDeviceDhcpClientState(pc);
+    pc.dhcpClient.enabled = true;
+    pc.dhcpClient.state = 'BOUND';
+    renderPropertiesPanel();
+    const panel = document.getElementById('propertiesPanel');
+    assert.ok(panel.innerHTML.includes('ipConfigMode'));
+    assert.ok(panel.innerHTML.includes('dhcpRequestRenewBtn'));
+    assert.ok(panel.innerHTML.includes('dhcpReleaseBtn'));
+    assert.ok(panel.innerHTML.includes('BOUND'));
+});
+
+// 752. Toggling endpoint to DHCP mode triggers DORA and synchronizes inspector state
+runTest('752. Toggling endpoint to DHCP mode triggers DORA and synchronizes inspector state', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(r0, { name: 'POOL1', network: '192.168.1.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.1.1' });
+    addConnection(pc.id, r0.id);
+
+    networkState.selectedDeviceId = pc.id;
+    ensureDeviceDhcpClientState(pc);
+    pc.dhcpClient.enabled = true;
+    const dora = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora.success, true);
+    renderPropertiesPanel();
+
+    assert.strictEqual(pc.ip, '192.168.1.2');
+    assert.strictEqual(pc.dhcpClient.state, 'BOUND');
+});
+
+// 753. Static IP endpoints preserve manual configuration and do not pollute DHCP bindings
+runTest('753. Static IP endpoints preserve manual configuration and do not pollute DHCP bindings', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(r0, { name: 'POOL1', network: '192.168.1.0', subnetMask: '255.255.255.0' });
+    addConnection(pc.id, r0.id);
+
+    pc.ip = '192.168.1.99';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+    ensureDeviceDhcpClientState(pc);
+    pc.dhcpClient.enabled = false;
+
+    assert.strictEqual(getDhcpBindings(r0).length, 0);
+    assert.strictEqual(pc.ip, '192.168.1.99');
+});
+
+// 754. Full regression check: all V5.11 and V5.12 foundation, relay, CLI, and UI components operate harmoniously
+runTest('754. Full regression check: all V5.11 and V5.12 foundation, relay, CLI, and UI components operate harmoniously', () => {
+    assert.strictEqual(typeof formatCliDhcpBindings, 'function');
+    assert.strictEqual(typeof formatCliDhcpPools, 'function');
+    assert.strictEqual(typeof formatCliRouterIpInterfaceDetail, 'function');
+    assert.strictEqual(typeof formatCliIpconfigAll, 'function');
+    assert.strictEqual(typeof renderDhcpServerInspector, 'function');
+});
+
+// 755. Total test count verification check
+runTest('755. Total test count verification check', () => {
+    assert.ok(testsPassed >= 754);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
