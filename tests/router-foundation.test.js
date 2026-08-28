@@ -15515,6 +15515,948 @@ runTest('555. Backward compatibility: Legacy topology snapshots without svis loa
     assert.strictEqual(getSwitchRoutingTable(sw.id).length, 0);
 });
 
+// ==========================================
+// V5.13: SPANNING TREE PROTOCOL (IEEE 802.1D) TESTS
+// ==========================================
+
+// 556. formatBridgeId and parseBridgeId format priority and normalized MAC correctly
+runTest('556. formatBridgeId and parseBridgeId format priority and normalized MAC correctly', () => {
+    const bid = formatBridgeId(32768, '00:1A:2B:3C:4D:5E');
+    assert.strictEqual(bid, '32768.00:1A:2B:3C:4D:5E');
+
+    const parsed = parseBridgeId('4096.AA:BB:CC:DD:EE:FF');
+    assert.strictEqual(parsed.priority, 4096);
+    assert.strictEqual(parsed.mac, 'AA:BB:CC:DD:EE:FF');
+});
+
+// 557. compareBridgeIds correctly sorts by priority first, then MAC address
+runTest('557. compareBridgeIds correctly sorts by priority first, then MAC address', () => {
+    // Lower priority wins regardless of MAC
+    const bidLowPrio = formatBridgeId(4096, 'ff:ff:ff:ff:ff:ff');
+    const bidHighPrio = formatBridgeId(32768, '00:00:00:00:00:01');
+    assert.ok(compareBridgeIds(bidLowPrio, bidHighPrio) < 0);
+    assert.ok(compareBridgeIds(bidHighPrio, bidLowPrio) > 0);
+
+    // Equal priority: lower MAC address wins
+    const bidLowMac = formatBridgeId(32768, '00:11:22:33:44:55');
+    const bidHighMac = formatBridgeId(32768, '00:11:22:33:44:66');
+    assert.ok(compareBridgeIds(bidLowMac, bidHighMac) < 0);
+    assert.ok(compareBridgeIds(bidHighMac, bidLowMac) > 0);
+
+    // Equal priority and equal MAC
+    const bidSame1 = formatBridgeId(32768, '00:11:22:33:44:55');
+    const bidSame2 = formatBridgeId(32768, '00:11:22:33:44:55');
+    assert.strictEqual(compareBridgeIds(bidSame1, bidSame2), 0);
+});
+
+// 558. ensureSwitchStpState initializes default STP state (priority 32768, enabled true, rootCost 0)
+runTest('558. ensureSwitchStpState initializes default STP state (priority 32768, enabled true, rootCost 0)', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    ensureSwitchStpState(sw);
+
+    assert.strictEqual(sw.stp.enabled, true);
+    assert.strictEqual(sw.stp.priority, 32768);
+    assert.strictEqual(sw.stp.rootCost, 0);
+    assert.strictEqual(sw.stp.rootPort, null);
+    assert.ok(sw.stp.bridgeId.startsWith('32768.'));
+    assert.strictEqual(sw.stp.rootBridgeId, sw.stp.bridgeId);
+});
+
+// 559. Single standalone switch elects itself as Root Bridge with rootCost 0 and rootPort null
+runTest('559. Single standalone switch elects itself as Root Bridge with rootCost 0 and rootPort null', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    recalculateTopologyStp();
+
+    assert.strictEqual(sw.stp.rootBridgeId, sw.stp.bridgeId);
+    assert.strictEqual(sw.stp.rootCost, 0);
+    assert.strictEqual(sw.stp.rootPort, null);
+});
+
+// 560. Two connected switches: switch with lower bridge priority wins Root Bridge election
+runTest('560. Two connected switches: switch with lower bridge priority wins Root Bridge election', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const sw0 = networkState.devices[0];
+    const sw1 = networkState.devices[1];
+
+    setSwitchStpPriority(sw1, 4096);
+    addConnection(sw0.id, sw1.id);
+    recalculateTopologyStp();
+
+    assert.strictEqual(sw1.stp.rootBridgeId, sw1.stp.bridgeId); // Switch1 is Root Bridge
+    assert.strictEqual(sw0.stp.rootBridgeId, sw1.stp.bridgeId); // Switch0 points to Switch1
+    assert.strictEqual(sw1.stp.rootPort, null);
+    assert.strictEqual(sw0.stp.rootPort, 'Fa0/1');
+    assert.strictEqual(sw0.stp.rootCost, 19);
+});
+
+// 561. Two connected switches with equal priority: switch with lower MAC address wins Root Bridge election
+runTest('561. Two connected switches with equal priority: switch with lower MAC address wins Root Bridge election', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const sw0 = networkState.devices[0];
+    const sw1 = networkState.devices[1];
+
+    sw0.mac = '00:00:00:00:00:0A';
+    sw1.mac = '00:00:00:00:00:0B';
+    addConnection(sw0.id, sw1.id);
+    recalculateTopologyStp();
+
+    assert.strictEqual(sw0.stp.rootBridgeId, sw0.stp.bridgeId); // Switch0 is Root (lower MAC)
+    assert.strictEqual(sw1.stp.rootBridgeId, sw0.stp.bridgeId); // Switch1 recognizes Switch0 as Root
+});
+
+// 562. Root switch places all active switchports into Designated / Forwarding role and state
+runTest('562. Root switch places all active switchports into Designated / Forwarding role and state', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('switch', 300, 100); // Switch1
+    addDevice('switch', 100, 300); // Switch2
+    const sw0 = networkState.devices[0];
+    const sw1 = networkState.devices[1];
+    const sw2 = networkState.devices[2];
+
+    setSwitchStpPriority(sw0, 0); // Guarantee Switch0 is Root
+    addConnection(sw0.id, sw1.id);
+    addConnection(sw0.id, sw2.id);
+    recalculateTopologyStp();
+
+    const p1 = sw0.stp.ports['Fa0/1'];
+    const p2 = sw0.stp.ports['Fa0/2'];
+    assert.ok(p1);
+    assert.strictEqual(p1.role, 'designated');
+    assert.strictEqual(p1.state, 'forwarding');
+    assert.ok(p2);
+    assert.strictEqual(p2.role, 'designated');
+    assert.strictEqual(p2.state, 'forwarding');
+});
+
+// 563. Non-root switch designates upstream port facing root as Root Port (Role: root, State: forwarding)
+runTest('563. Non-root switch designates upstream port facing root as Root Port (Role: root, State: forwarding)', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('switch', 300, 100); // Switch1 (Non-root)
+    const sw0 = networkState.devices[0];
+    const sw1 = networkState.devices[1];
+
+    setSwitchStpPriority(sw0, 4096);
+    addConnection(sw0.id, sw1.id);
+    recalculateTopologyStp();
+
+    const p1 = sw1.stp.ports['Fa0/1'];
+    assert.strictEqual(p1.role, 'root');
+    assert.strictEqual(p1.state, 'forwarding');
+});
+
+// 564. Standard 3-switch triangle loop topology elects 1 Root, 2 Root Ports, 2 Designated Ports, and 1 Alternate (Blocking) Port
+runTest('564. Standard 3-switch triangle loop topology elects 1 Root, 2 Root Ports, 2 Designated Ports, and 1 Alternate (Blocking) Port', () => {
+    resetLab();
+    addDevice('switch', 200, 50);  // Switch0
+    addDevice('switch', 50, 250);  // Switch1
+    addDevice('switch', 350, 250); // Switch2
+    const sw0 = networkState.devices[0];
+    const sw1 = networkState.devices[1];
+    const sw2 = networkState.devices[2];
+
+    sw0.mac = '00:00:00:00:00:01';
+    sw1.mac = '00:00:00:00:00:02';
+    sw2.mac = '00:00:00:00:00:03';
+
+    // Connections:
+    // conn1: sw0 <-> sw1
+    // conn2: sw0 <-> sw2
+    // conn3: sw1 <-> sw2
+    addConnection(sw0.id, sw1.id);
+    addConnection(sw0.id, sw2.id);
+    addConnection(sw1.id, sw2.id);
+
+    recalculateTopologyStp();
+
+    // Switch0 is Root Bridge
+    assert.strictEqual(sw0.stp.rootBridgeId, sw0.stp.bridgeId);
+    assert.strictEqual(sw0.stp.ports['Fa0/1'].role, 'designated');
+    assert.strictEqual(sw0.stp.ports['Fa0/1'].state, 'forwarding');
+    assert.strictEqual(sw0.stp.ports['Fa0/2'].role, 'designated');
+    assert.strictEqual(sw0.stp.ports['Fa0/2'].state, 'forwarding');
+
+    // Switch1 is Non-Root (rootCost: 19)
+    assert.strictEqual(sw1.stp.rootCost, 19);
+    assert.strictEqual(sw1.stp.ports['Fa0/1'].role, 'root');
+    assert.strictEqual(sw1.stp.ports['Fa0/1'].state, 'forwarding');
+
+    // Switch2 is Non-Root (rootCost: 19)
+    assert.strictEqual(sw2.stp.rootCost, 19);
+    assert.strictEqual(sw2.stp.ports['Fa0/1'].role, 'root');
+    assert.strictEqual(sw2.stp.ports['Fa0/1'].state, 'forwarding');
+
+    // On segment between Switch1 and Switch2:
+    // Both have rootCost 19, but Switch1 has lower MAC (00:00:00:00:00:02 < 00:00:00:00:00:03)
+    // Switch1 Fa0/2 is Designated/Forwarding
+    // Switch2 Fa0/2 is Alternate/Blocking
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].role, 'designated');
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].state, 'forwarding');
+    assert.strictEqual(sw2.stp.ports['Fa0/2'].role, 'alternate');
+    assert.strictEqual(sw2.stp.ports['Fa0/2'].state, 'blocking');
+});
+
+// 565. 4-switch diamond topology breaks loop by placing redundant port into Alternate / Blocking state
+runTest('565. 4-switch diamond topology breaks loop by placing redundant port into Alternate / Blocking state', () => {
+    resetLab();
+    addDevice('switch', 200, 50);  // Sw0 (Root)
+    addDevice('switch', 50, 150);  // Sw1
+    addDevice('switch', 350, 150); // Sw2
+    addDevice('switch', 200, 300); // Sw3
+    const [sw0, sw1, sw2, sw3] = networkState.devices;
+
+    setSwitchStpPriority(sw0, 4096);
+    sw1.mac = '00:00:00:00:00:02';
+    sw2.mac = '00:00:00:00:00:03';
+    sw3.mac = '00:00:00:00:00:04';
+
+    addConnection(sw0.id, sw1.id); // Sw0 Fa0/1 <-> Sw1 Fa0/1
+    addConnection(sw0.id, sw2.id); // Sw0 Fa0/2 <-> Sw2 Fa0/1
+    addConnection(sw1.id, sw3.id); // Sw1 Fa0/2 <-> Sw3 Fa0/1
+    addConnection(sw2.id, sw3.id); // Sw2 Fa0/2 <-> Sw3 Fa0/2
+
+    recalculateTopologyStp();
+
+    assert.strictEqual(sw0.stp.rootBridgeId, sw0.stp.bridgeId);
+    assert.strictEqual(sw3.stp.rootCost, 38); // 19 + 19
+    // Sw3 connects to Sw1 (lower MAC) and Sw2 (higher MAC). Sw3 Fa0/1 facing Sw1 is Root Port.
+    assert.strictEqual(sw3.stp.rootPort, 'Fa0/1');
+    assert.strictEqual(sw3.stp.ports['Fa0/1'].role, 'root');
+    assert.strictEqual(sw3.stp.ports['Fa0/1'].state, 'forwarding');
+
+    // On segment Sw2-Sw3: Sw2 has rootCost 19, Sw3 has rootCost 38. Sw2 is Designated, Sw3 Fa0/2 is Alternate/Blocking.
+    assert.strictEqual(sw2.stp.ports['Fa0/2'].role, 'designated');
+    assert.strictEqual(sw2.stp.ports['Fa0/2'].state, 'forwarding');
+    assert.strictEqual(sw3.stp.ports['Fa0/2'].role, 'alternate');
+    assert.strictEqual(sw3.stp.ports['Fa0/2'].state, 'blocking');
+});
+
+// 566. Default port costs: FastEthernet ports default to cost 19, GigabitEthernet ports default to cost 4
+runTest('566. Default port costs: FastEthernet ports default to cost 19, GigabitEthernet ports default to cost 4', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    assert.strictEqual(getSwitchPortCost(sw, 'Fa0/1'), 19);
+    assert.strictEqual(getSwitchPortCost(sw, 'FastEthernet0/24'), 19);
+    assert.strictEqual(getSwitchPortCost(sw, 'Gi0/1'), 4);
+    assert.strictEqual(getSwitchPortCost(sw, 'GigabitEthernet0/2'), 4);
+});
+
+// 567. Root path cost accumulation: Multi-hop path calculates cumulative cost accurately (e.g. 19 + 19 = 38)
+runTest('567. Root path cost accumulation: Multi-hop path calculates cumulative cost accurately (e.g. 19 + 19 = 38)', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Sw0 (Root)
+    addDevice('switch', 250, 100); // Sw1
+    addDevice('switch', 400, 100); // Sw2
+    const [sw0, sw1, sw2] = networkState.devices;
+
+    setSwitchStpPriority(sw0, 0);
+    addConnection(sw0.id, sw1.id);
+    addConnection(sw1.id, sw2.id);
+
+    recalculateTopologyStp();
+
+    assert.strictEqual(sw0.stp.rootCost, 0);
+    assert.strictEqual(sw1.stp.rootCost, 19);
+    assert.strictEqual(sw2.stp.rootCost, 38);
+});
+
+// 568. Path cost tie-breaking: Switch prefers Gigabit (cost 4) link over FastEthernet (cost 19) link for Root Port
+runTest('568. Path cost tie-breaking: Switch prefers Gigabit (cost 4) link over FastEthernet (cost 19) link for Root Port', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Sw0 (Root)
+    addDevice('switch', 300, 100); // Sw1
+    const [sw0, sw1] = networkState.devices;
+
+    setSwitchStpPriority(sw0, 0);
+    // Add 2 connections between Sw0 and Sw1: Fa0/1 and Gi0/1
+    addConnection(sw0.id, sw1.id); // Fa0/1
+    setSwitchPortStpCost(sw1, 'Fa0/1', 19);
+
+    // Make second connection Gi0/1 by setting custom cost
+    const runtime1 = getSwitchRuntime(sw1.id);
+    const conn1 = networkState.connections[0];
+    runtime1.ports[conn1.id] = 'Fa0/1';
+
+    // Set port cost on Fa0/1 to 100 vs cost 19 on Fa0/2
+    addConnection(sw0.id, sw1.id); // Fa0/2
+    setSwitchPortStpCost(sw1, 'Fa0/1', 100);
+    setSwitchPortStpCost(sw1, 'Fa0/2', 19);
+
+    recalculateTopologyStp();
+
+    assert.strictEqual(sw1.stp.rootPort, 'Fa0/2');
+    assert.strictEqual(sw1.stp.rootCost, 19);
+});
+
+// 569. Upstream Bridge ID tie-breaking: Switch with two equal-cost paths to Root prefers lowest upstream Bridge ID
+runTest('569. Upstream Bridge ID tie-breaking: Switch with two equal-cost paths to Root prefers lowest upstream Bridge ID', () => {
+    resetLab();
+    addDevice('switch', 200, 50);  // Sw0 (Root)
+    addDevice('switch', 50, 200);  // Sw1 (Bridge ID 4096)
+    addDevice('switch', 350, 200); // Sw2 (Bridge ID 8192)
+    addDevice('switch', 200, 350); // Sw3 (Leaf)
+    const [sw0, sw1, sw2, sw3] = networkState.devices;
+
+    setSwitchStpPriority(sw0, 0);
+    setSwitchStpPriority(sw1, 4096);
+    setSwitchStpPriority(sw2, 8192);
+
+    addConnection(sw0.id, sw1.id);
+    addConnection(sw0.id, sw2.id);
+    addConnection(sw1.id, sw3.id); // Sw3 Fa0/1 facing Sw1 (4096)
+    addConnection(sw2.id, sw3.id); // Sw3 Fa0/2 facing Sw2 (8192)
+
+    recalculateTopologyStp();
+
+    // Sw3 has cost 38 via Sw1 and cost 38 via Sw2. Sw1 has lower Bridge ID (4096 < 8192).
+    assert.strictEqual(sw3.stp.rootPort, 'Fa0/1');
+    assert.strictEqual(sw3.stp.ports['Fa0/1'].role, 'root');
+    assert.strictEqual(sw3.stp.ports['Fa0/2'].role, 'alternate');
+    assert.strictEqual(sw3.stp.ports['Fa0/2'].state, 'blocking');
+});
+
+// 570. Upstream Port ID tie-breaking: Switch with dual links to same upstream switch prefers lowest upstream port
+runTest('570. Upstream Port ID tie-breaking: Switch with dual links to same upstream switch prefers lowest upstream port', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Sw0 (Root)
+    addDevice('switch', 300, 100); // Sw1
+    const [sw0, sw1] = networkState.devices;
+
+    setSwitchStpPriority(sw0, 0);
+
+    // conn1: Sw0 Fa0/1 <-> Sw1 Fa0/1
+    // conn2: Sw0 Fa0/2 <-> Sw1 Fa0/2
+    addConnection(sw0.id, sw1.id);
+    addConnection(sw0.id, sw1.id);
+
+    recalculateTopologyStp();
+
+    // Sw1 prefers upstream port Fa0/1 over Fa0/2
+    assert.strictEqual(sw1.stp.rootPort, 'Fa0/1');
+    assert.strictEqual(sw1.stp.ports['Fa0/1'].role, 'root');
+    assert.strictEqual(sw1.stp.ports['Fa0/1'].state, 'forwarding');
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].role, 'alternate');
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].state, 'blocking');
+});
+
+// 571. Local Port ID tie-breaking: Switch resolves tie using local port identifier when upstream attributes are equal
+runTest('571. Local Port ID tie-breaking: Switch resolves tie using local port identifier when upstream attributes are equal', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    ensureSwitchStpState(sw);
+
+    assert.strictEqual(sw.stp.rootCost, 0);
+    assert.strictEqual(sw.stp.rootPort, null);
+});
+
+// 572. Switch ports connected to end hosts (PCs, Servers) or Routers are automatically placed in Designated / Forwarding state
+runTest('572. Switch ports connected to end hosts (PCs, Servers) or Routers are automatically placed in Designated / Forwarding state', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    addDevice('pc', 50, 200);
+    addDevice('router', 350, 200);
+    const [sw, pc, r] = networkState.devices;
+
+    addConnection(sw.id, pc.id); // Fa0/1
+    addConnection(sw.id, r.id);  // Fa0/2
+
+    recalculateTopologyStp();
+
+    assert.strictEqual(sw.stp.ports['Fa0/1'].role, 'designated');
+    assert.strictEqual(sw.stp.ports['Fa0/1'].state, 'forwarding');
+    assert.strictEqual(sw.stp.ports['Fa0/2'].role, 'designated');
+    assert.strictEqual(sw.stp.ports['Fa0/2'].state, 'forwarding');
+});
+
+// 573. Unconnected switch ports are placed in Disabled / Blocking state
+runTest('573. Unconnected switch ports are placed in Disabled / Blocking state', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 1); // ensure Fa0/1 in switchports
+
+    recalculateTopologyStp();
+
+    assert.strictEqual(sw.stp.ports['Fa0/1'].role, 'disabled');
+    assert.strictEqual(sw.stp.ports['Fa0/1'].state, 'blocking');
+});
+
+// 574. findTopologyPath excludes physical links where either switchport is in STP blocking state
+runTest('574. findTopologyPath excludes physical links where either switchport is in STP blocking state', () => {
+    resetLab();
+    addDevice('switch', 200, 50);  // Sw0 (Root)
+    addDevice('switch', 50, 250);  // Sw1
+    addDevice('switch', 350, 250); // Sw2
+    const [sw0, sw1, sw2] = networkState.devices;
+
+    sw0.mac = '00:00:00:00:00:01';
+    sw1.mac = '00:00:00:00:00:02';
+    sw2.mac = '00:00:00:00:00:03';
+
+    addConnection(sw0.id, sw1.id);
+    addConnection(sw0.id, sw2.id);
+    addConnection(sw1.id, sw2.id);
+
+    recalculateTopologyStp();
+
+    // Direct path Sw1 <-> Sw2 has blocked port Sw2 Fa0/2.
+    // findTopologyPath from Sw1 to Sw2 must route via Sw0: [Sw1, Sw0, Sw2]
+    const path = findTopologyPath(sw1.id, sw2.id);
+    assert.deepStrictEqual(path, [sw1.id, sw0.id, sw2.id]);
+});
+
+// 575. Ingress filtering: simulatePathTransmission drops frame arriving on STP-blocked port with reason "stp-blocked"
+runTest('575. Ingress filtering: simulatePathTransmission drops frame arriving on STP-blocked port with reason "stp-blocked"', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    const [sw0, sw1] = networkState.devices;
+
+    addConnection(sw0.id, sw1.id);
+    recalculateTopologyStp();
+
+    // Manually force sw1 port to blocking
+    sw1.stp.ports['Fa0/1'].state = 'blocking';
+
+    const frame = {
+        sourceMac: '00:11:22:33:44:55',
+        destinationMac: '00:66:77:88:99:AA',
+        events: []
+    };
+
+    const res = simulatePathTransmission(frame, sw0, sw1, [sw0.id, sw1.id]);
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.action, 'DROP');
+    const blockedHop = res.hopActions.find(h => h.reason === 'stp-blocked');
+    assert.ok(blockedHop);
+    assert.strictEqual(blockedHop.deviceId, sw1.id);
+});
+
+// 576. Flooding enforcement: Broadcast frame flooding (FF:FF:FF:FF:FF:FF) excludes STP-blocked ports
+runTest('576. Flooding enforcement: Broadcast frame flooding (FF:FF:FF:FF:FF:FF) excludes STP-blocked ports', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    addDevice('pc', 50, 200);
+    addDevice('pc', 200, 50);
+    addDevice('pc', 350, 200);
+    const [sw, pc0, pc1, pc2] = networkState.devices;
+
+    addConnection(sw.id, pc0.id); // Fa0/1
+    addConnection(sw.id, pc1.id); // Fa0/2
+    addConnection(sw.id, pc2.id); // Fa0/3
+
+    recalculateTopologyStp();
+
+    // Block Fa0/3
+    sw.stp.ports['Fa0/3'].state = 'blocking';
+
+    const frame = {
+        sourceMac: pc0.mac,
+        destinationMac: 'FF:FF:FF:FF:FF:FF',
+        events: []
+    };
+
+    const res = simulatePathTransmission(frame, pc0, pc1, [pc0.id, sw.id, pc1.id]);
+    assert.strictEqual(res.success, true);
+    const floodHop = res.hopActions.find(h => h.action === 'FLOOD');
+    assert.ok(floodHop);
+    assert.ok(floodHop.egressPorts.includes('Fa0/2'));
+    assert.ok(!floodHop.egressPorts.includes('Fa0/3')); // Blocked port excluded
+});
+
+// 577. Flooding enforcement: Unknown unicast frame flooding excludes STP-blocked ports
+runTest('577. Flooding enforcement: Unknown unicast frame flooding excludes STP-blocked ports', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    addDevice('pc', 50, 200);
+    addDevice('pc', 200, 50);
+    addDevice('pc', 350, 200);
+    const [sw, pc0, pc1, pc2] = networkState.devices;
+
+    addConnection(sw.id, pc0.id); // Fa0/1
+    addConnection(sw.id, pc1.id); // Fa0/2
+    addConnection(sw.id, pc2.id); // Fa0/3
+
+    recalculateTopologyStp();
+
+    // Block Fa0/3
+    sw.stp.ports['Fa0/3'].state = 'blocking';
+
+    const frame = {
+        sourceMac: pc0.mac,
+        destinationMac: '00:AA:BB:CC:DD:EE', // Unknown unicast
+        events: []
+    };
+
+    const res = simulatePathTransmission(frame, pc0, pc1, [pc0.id, sw.id, pc1.id]);
+    assert.strictEqual(res.success, true);
+    const floodHop = res.hopActions.find(h => h.action === 'FLOOD' && h.reason === 'unknown-unicast');
+    assert.ok(floodHop);
+    assert.ok(floodHop.egressPorts.includes('Fa0/2'));
+    assert.ok(!floodHop.egressPorts.includes('Fa0/3')); // Blocked port excluded
+});
+
+// 578. Egress filtering: Unicast frame directed to destination across STP-blocked port is dropped
+runTest('578. Egress filtering: Unicast frame directed to destination across STP-blocked port is dropped', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    addDevice('pc', 50, 200);
+    addDevice('pc', 350, 200);
+    const [sw, pc0, pc1] = networkState.devices;
+
+    addConnection(sw.id, pc0.id); // Fa0/1
+    addConnection(sw.id, pc1.id); // Fa0/2
+
+    recalculateTopologyStp();
+
+    // Block Fa0/2
+    sw.stp.ports['Fa0/2'].state = 'blocking';
+
+    const frame = {
+        sourceMac: pc0.mac,
+        destinationMac: pc1.mac,
+        events: []
+    };
+
+    const res = simulatePathTransmission(frame, pc0, pc1, [pc0.id, sw.id, pc1.id]);
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.action, 'DROP');
+    const blockedHop = res.hopActions.find(h => h.reason === 'stp-blocked');
+    assert.ok(blockedHop);
+    assert.strictEqual(blockedHop.egressPort, 'Fa0/2');
+});
+
+// 579. MAC Learning inhibition: learnSwitchMac does NOT learn source MAC address on STP-blocked port
+runTest('579. MAC Learning inhibition: learnSwitchMac does NOT learn source MAC address on STP-blocked port', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    ensureSwitchStpState(sw);
+
+    sw.stp.ports['Fa0/1'] = { role: 'alternate', state: 'blocking', cost: 19 };
+
+    const entry = learnSwitchMac(sw.id, '00:11:22:33:44:55', 'dev1', 'Fa0/1', 1);
+    assert.strictEqual(entry, null);
+    assert.strictEqual(getSwitchMacEntry(sw.id, '00:11:22:33:44:55'), null);
+});
+
+// 580. ARP Resolution: simulateArpResolution broadcast excludes STP-blocked ports from flooding
+runTest('580. ARP Resolution: simulateArpResolution broadcast excludes STP-blocked ports from flooding', () => {
+    resetLab();
+    addDevice('pc', 50, 200);    // PC0
+    addDevice('switch', 200, 200); // Sw0
+    addDevice('pc', 350, 100);  // PC1
+    addDevice('pc', 350, 300);  // PC2
+    const [pc0, sw, pc1, pc2] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.11';
+    pc1.subnetMask = '255.255.255.0';
+    pc2.ip = '192.168.1.12';
+    pc2.subnetMask = '255.255.255.0';
+
+    addConnection(pc0.id, sw.id); // Fa0/1
+    addConnection(sw.id, pc1.id); // Fa0/2
+    addConnection(sw.id, pc2.id); // Fa0/3
+
+    recalculateTopologyStp();
+
+    // Block Fa0/3
+    sw.stp.ports['Fa0/3'].state = 'blocking';
+
+    const arpRes = simulateArpResolution(pc0, pc1.ip, [pc0.id, sw.id, pc1.id]);
+    assert.strictEqual(arpRes.success, true);
+    const floodHop = arpRes.hopActions.find(h => h.action === 'FLOOD');
+    assert.ok(floodHop);
+    assert.ok(floodHop.egressPorts.includes('Fa0/2'));
+    assert.ok(!floodHop.egressPorts.includes('Fa0/3')); // Blocked port excluded
+});
+
+// 581. ARP Resolution: simulateArpResolution drops request attempting to traverse STP-blocked port
+runTest('581. ARP Resolution: simulateArpResolution drops request attempting to traverse STP-blocked port', () => {
+    resetLab();
+    addDevice('pc', 50, 200);    // PC0
+    addDevice('switch', 200, 200); // Sw0
+    addDevice('pc', 350, 200);  // PC1
+    const [pc0, sw, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.11';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection(pc0.id, sw.id); // Fa0/1
+    addConnection(sw.id, pc1.id); // Fa0/2
+
+    recalculateTopologyStp();
+
+    // Block Fa0/2
+    sw.stp.ports['Fa0/2'].state = 'blocking';
+
+    const arpRes = simulateArpResolution(pc0, pc1.ip, [pc0.id, sw.id, pc1.id]);
+    assert.strictEqual(arpRes.success, false);
+    assert.ok(arpRes.reason.includes('STP blocking') || arpRes.reason.includes('blocked'));
+});
+
+// 582. Ping across 3-switch redundant triangle: PC0 pings PC1 successfully over active STP spanning tree without loop
+runTest('582. Ping across 3-switch redundant triangle: PC0 pings PC1 successfully over active STP spanning tree without loop', () => {
+    resetLab();
+    addDevice('pc', 50, 50);       // PC0
+    addDevice('pc', 450, 350);     // PC1
+    addDevice('switch', 200, 50);  // Sw0 (Root)
+    addDevice('switch', 100, 250); // Sw1
+    addDevice('switch', 350, 250); // Sw2
+    const [pc0, pc1, sw0, sw1, sw2] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    setSwitchStpPriority(sw0, 4096); // Sw0 is Root
+
+    addConnection(pc0.id, sw1.id);
+    addConnection(pc1.id, sw2.id);
+    addConnection(sw0.id, sw1.id);
+    addConnection(sw0.id, sw2.id);
+    addConnection(sw1.id, sw2.id); // Redundant link (Sw2 side will be blocked)
+
+    recalculateTopologyStp();
+
+    const pingRes = executeCliCommand('PC0', 'ping 192.168.1.20');
+    assert.strictEqual(pingRes.success, true);
+    assert.ok(pingRes.output.includes('Reply from 192.168.1.20'));
+});
+
+// 583. Topology Reconvergence: Disconnecting the active root link causes formerly blocked alternate port to transition to root/forwarding
+runTest('583. Topology Reconvergence: Disconnecting the active root link causes formerly blocked alternate port to transition to root/forwarding', () => {
+    resetLab();
+    addDevice('switch', 200, 50);  // Sw0 (Root)
+    addDevice('switch', 50, 250);  // Sw1
+    addDevice('switch', 350, 250); // Sw2
+    const [sw0, sw1, sw2] = networkState.devices;
+
+    sw0.mac = '00:00:00:00:00:01';
+    sw1.mac = '00:00:00:00:00:02';
+    sw2.mac = '00:00:00:00:00:03';
+
+    addConnection(sw0.id, sw1.id); // conn0: Sw0 <-> Sw1
+    addConnection(sw0.id, sw2.id); // conn1: Sw0 <-> Sw2
+    addConnection(sw1.id, sw2.id); // conn2: Sw1 <-> Sw2
+
+    recalculateTopologyStp();
+
+    // Before failure: Sw2 Fa0/2 is Alternate/Blocking
+    assert.strictEqual(sw2.stp.ports['Fa0/2'].role, 'alternate');
+    assert.strictEqual(sw2.stp.ports['Fa0/2'].state, 'blocking');
+
+    // Simulate link failure between Sw0 and Sw2
+    deleteConnection(networkState.connections[1].id);
+    recalculateTopologyStp();
+
+    // After failure: Sw2 reconverges through Sw1
+    assert.strictEqual(sw2.stp.rootBridgeId, sw0.stp.bridgeId);
+    assert.strictEqual(sw2.stp.rootPort, 'Fa0/2');
+    assert.strictEqual(sw2.stp.ports['Fa0/2'].role, 'root');
+    assert.strictEqual(sw2.stp.ports['Fa0/2'].state, 'forwarding');
+    assert.strictEqual(sw2.stp.rootCost, 38);
+});
+
+// 584. Topology Reconvergence: Lowering non-root switch priority (e.g. to 4096) immediately triggers root re-election and recalculates roles
+runTest('584. Topology Reconvergence: Lowering non-root switch priority (e.g. to 4096) immediately triggers root re-election and recalculates roles', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Sw0 (Default 32768)
+    addDevice('switch', 300, 100); // Sw1 (Default 32768)
+    const [sw0, sw1] = networkState.devices;
+
+    sw0.mac = '00:00:00:00:00:01'; // Sw0 was root
+    sw1.mac = '00:00:00:00:00:02';
+    addConnection(sw0.id, sw1.id);
+    recalculateTopologyStp();
+
+    assert.strictEqual(sw0.stp.rootBridgeId, sw0.stp.bridgeId);
+
+    // Make Sw1 the Root Bridge by setting priority to 4096
+    setSwitchStpPriority(sw1, 4096);
+
+    assert.strictEqual(sw1.stp.rootBridgeId, sw1.stp.bridgeId); // Sw1 is new Root
+    assert.strictEqual(sw0.stp.rootBridgeId, sw1.stp.bridgeId); // Sw0 now points to Sw1
+    assert.strictEqual(sw0.stp.rootPort, 'Fa0/1');
+});
+
+// 585. STP compatibility with Access VLANs: Broadcasts are contained within VLAN and pruned by STP topology
+runTest('585. STP compatibility with Access VLANs: Broadcasts are contained within VLAN and pruned by STP topology', () => {
+    resetLab();
+    addDevice('pc', 50, 50);       // PC0 (VLAN 10)
+    addDevice('pc', 450, 350);     // PC1 (VLAN 10)
+    addDevice('switch', 200, 50);  // Sw0
+    addDevice('switch', 100, 250); // Sw1
+    addDevice('switch', 350, 250); // Sw2
+    const [pc0, pc1, sw0, sw1, sw2] = networkState.devices;
+
+    pc0.ip = '10.10.10.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '10.10.10.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    createSwitchVlan(sw0, 10, 'Sales');
+    createSwitchVlan(sw1, 10, 'Sales');
+    createSwitchVlan(sw2, 10, 'Sales');
+
+    addConnection(pc0.id, sw1.id); // Sw1 Fa0/1
+    setSwitchPortAccessVlan(sw1, 'Fa0/1', 10);
+
+    addConnection(pc1.id, sw2.id); // Sw2 Fa0/1
+    setSwitchPortAccessVlan(sw2, 'Fa0/1', 10);
+
+    addConnection(sw0.id, sw1.id); // Trunk Sw0 Fa0/1 <-> Sw1 Fa0/2
+    setSwitchPortMode(sw0, 'Fa0/1', 'trunk');
+    setSwitchPortMode(sw1, 'Fa0/2', 'trunk');
+
+    addConnection(sw0.id, sw2.id); // Trunk Sw0 Fa0/2 <-> Sw2 Fa0/2
+    setSwitchPortMode(sw0, 'Fa0/2', 'trunk');
+    setSwitchPortMode(sw2, 'Fa0/2', 'trunk');
+
+    addConnection(sw1.id, sw2.id); // Trunk Sw1 Fa0/3 <-> Sw2 Fa0/3 (blocked by STP)
+    setSwitchPortMode(sw1, 'Fa0/3', 'trunk');
+    setSwitchPortMode(sw2, 'Fa0/3', 'trunk');
+
+    recalculateTopologyStp();
+
+    const pingRes = executeCliCommand('PC0', 'ping 10.10.10.20');
+    assert.strictEqual(pingRes.success, true);
+    assert.ok(pingRes.output.includes('Reply from 10.10.10.20'));
+});
+
+// 586. STP compatibility with 802.1Q Trunks: Trunk links carry tagged frames across non-blocked STP forwarding path
+runTest('586. STP compatibility with 802.1Q Trunks: Trunk links carry tagged frames across non-blocked STP forwarding path', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    const [sw0, sw1] = networkState.devices;
+
+    setSwitchPortMode(sw0, 'Fa0/1', 'trunk');
+    setSwitchPortMode(sw1, 'Fa0/1', 'trunk');
+    addConnection(sw0.id, sw1.id);
+
+    recalculateTopologyStp();
+
+    assert.strictEqual(sw0.stp.ports['Fa0/1'].state, 'forwarding');
+    assert.strictEqual(sw1.stp.ports['Fa0/1'].state, 'forwarding');
+});
+
+// 587. STP compatibility with Multilayer Switch SVIs: L3 routed frames traverse L2 STP forwarding topology correctly
+runTest('587. STP compatibility with Multilayer Switch SVIs: L3 routed frames traverse L2 STP forwarding topology correctly', () => {
+    resetLab();
+    addDevice('pc', 50, 50);       // PC0 (VLAN 10)
+    addDevice('pc', 450, 350);     // PC1 (VLAN 20)
+    addDevice('switch', 200, 50);  // Sw0 (L3 Multilayer Switch & Root)
+    addDevice('switch', 100, 250); // Sw1
+    addDevice('switch', 350, 250); // Sw2
+    const [pc0, pc1, sw0, sw1, sw2] = networkState.devices;
+
+    pc0.ip = '10.10.10.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '10.10.10.1';
+
+    pc1.ip = '10.20.20.20';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '10.20.20.1';
+
+    setSwitchStpPriority(sw0, 0); // Sw0 is Root
+
+    // Configure L3 switch
+    createSwitchVlan(sw0, 10, 'V10');
+    createSwitchVlan(sw0, 20, 'V20');
+    setSwitchSviIp(sw0, 10, '10.10.10.1', '255.255.255.0');
+    setSwitchSviIp(sw0, 20, '10.20.20.1', '255.255.255.0');
+    setSwitchIpRouting(sw0, true);
+
+    createSwitchVlan(sw1, 10, 'V10');
+    createSwitchVlan(sw2, 20, 'V20');
+
+    addConnection(pc0.id, sw1.id);
+    setSwitchPortAccessVlan(sw1, 'Fa0/1', 10);
+
+    addConnection(pc1.id, sw2.id);
+    setSwitchPortAccessVlan(sw2, 'Fa0/1', 20);
+
+    addConnection(sw0.id, sw1.id);
+    setSwitchPortMode(sw0, 'Fa0/1', 'trunk');
+    setSwitchPortMode(sw1, 'Fa0/2', 'trunk');
+
+    addConnection(sw0.id, sw2.id);
+    setSwitchPortMode(sw0, 'Fa0/2', 'trunk');
+    setSwitchPortMode(sw2, 'Fa0/2', 'trunk');
+
+    addConnection(sw1.id, sw2.id); // Redundant L2 link
+    setSwitchPortMode(sw1, 'Fa0/3', 'trunk');
+    setSwitchPortMode(sw2, 'Fa0/3', 'trunk');
+
+    recalculateTopologyStp();
+
+    const pingRes = executeCliCommand('PC0', 'ping 10.20.20.20');
+    assert.strictEqual(pingRes.success, true);
+    assert.ok(pingRes.output.includes('Reply from 10.20.20.20'));
+});
+
+// 588. Switch CLI: show spanning-tree displays formatted Cisco-style IEEE 802.1D bridge, root, and interface table
+runTest('588. Switch CLI: show spanning-tree displays formatted Cisco-style IEEE 802.1D bridge, root, and interface table', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    const res = executeCliCommand('Switch0', 'show spanning-tree');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Spanning tree enabled protocol ieee'));
+    assert.ok(res.output.includes('Root ID'));
+    assert.ok(res.output.includes('Bridge ID'));
+    assert.ok(res.output.includes('This bridge is the root'));
+    assert.ok(res.output.includes('Interface        Role Sts Cost      Prio.Nbr Type'));
+});
+
+// 589. Switch CLI: spanning-tree priority <value> sets priority in increments of 4096 and recalculates STP
+runTest('589. Switch CLI: spanning-tree priority <value> sets priority in increments of 4096 and recalculates STP', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    const res = executeCliCommand('Switch0', 'spanning-tree priority 4096');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(sw.stp.priority, 4096);
+    assert.ok(sw.stp.bridgeId.startsWith('4096.'));
+});
+
+// 590. Switch CLI: spanning-tree priority <value> rejects non-multiples of 4096 (e.g. 5000) or out of range values
+runTest('590. Switch CLI: spanning-tree priority <value> rejects non-multiples of 4096 (e.g. 5000) or out of range values', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    const resBad = executeCliCommand('Switch0', 'spanning-tree priority 5000');
+    assert.strictEqual(resBad.success, false);
+    assert.ok(resBad.output.includes('increments of 4096'));
+
+    const resOver = executeCliCommand('Switch0', 'spanning-tree priority 65536');
+    assert.strictEqual(resOver.success, false);
+});
+
+// 591. Switch CLI: no spanning-tree priority resets bridge priority to default 32768
+runTest('591. Switch CLI: no spanning-tree priority resets bridge priority to default 32768', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'spanning-tree priority 8192');
+    assert.strictEqual(sw.stp.priority, 8192);
+
+    const resNo = executeCliCommand('Switch0', 'no spanning-tree priority');
+    assert.strictEqual(resNo.success, true);
+    assert.strictEqual(sw.stp.priority, 32768);
+});
+
+// 592. Switch CLI: spanning-tree vlan 1 priority <val> configures priority and recalculates topology
+runTest('592. Switch CLI: spanning-tree vlan 1 priority <val> configures priority and recalculates topology', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    const res = executeCliCommand('Switch0', 'spanning-tree vlan 1 priority 16384');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(sw.stp.priority, 16384);
+});
+
+// 593. Switch CLI: Interface mode spanning-tree cost <val> sets port cost and re-evaluates root path selection
+runTest('593. Switch CLI: Interface mode spanning-tree cost <val> sets port cost and re-evaluates root path selection', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    const res = executeCliCommand('Switch0', 'spanning-tree cost 50');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(sw.switchports['Fa0/1'].stpCost, 50);
+});
+
+// 594. Switch CLI: Interface mode spanning-tree port-priority <val> sets port priority in multiples of 16
+runTest('594. Switch CLI: Interface mode spanning-tree port-priority <val> sets port priority in multiples of 16', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    const res = executeCliCommand('Switch0', 'spanning-tree port-priority 64');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(sw.switchports['Fa0/1'].stpPortPriority, 64);
+
+    const resBad = executeCliCommand('Switch0', 'spanning-tree port-priority 65');
+    assert.strictEqual(resBad.success, false);
+    assert.ok(resBad.output.includes('multiple of 16'));
+});
+
+// 595. Switch Inspector UI renders STP section with Bridge Role, Priority, Root Cost, Root Port, and STP Ports table
+runTest('595. Switch Inspector UI renders STP section with Bridge Role, Priority, Root Cost, Root Port, and STP Ports table', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    const html = renderSwitchInspector(sw);
+    assert.ok(html.includes('SPANNING TREE PROTOCOL (IEEE 802.1D)'));
+    assert.ok(html.includes('Root Bridge'));
+    assert.ok(html.includes('Bridge Priority'));
+    assert.ok(html.includes('32768'));
+    assert.ok(html.includes('Root Path Cost'));
+});
+
+// 596. Serialization / Snapshot: Topology snapshots save and restore STP priorities, costs, and recalculate tree upon load
+runTest('596. Serialization / Snapshot: Topology snapshots save and restore STP priorities, costs, and recalculate tree upon load', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    const [sw0, sw1] = networkState.devices;
+
+    setSwitchStpPriority(sw0, 4096);
+    setSwitchPortStpCost(sw0, 'Fa0/1', 25);
+    addConnection(sw0.id, sw1.id);
+    recalculateTopologyStp();
+
+    const snapshot = createLabSnapshot();
+    resetLab();
+    restoreSnapshot(snapshot);
+
+    const restoredSw0 = networkState.devices[0];
+    const restoredSw1 = networkState.devices[1];
+
+    assert.strictEqual(restoredSw0.stp.priority, 4096);
+    assert.strictEqual(restoredSw0.switchports['Fa0/1'].stpCost, 25);
+    assert.strictEqual(restoredSw1.stp.rootBridgeId, restoredSw0.stp.bridgeId);
+    assert.strictEqual(restoredSw1.stp.rootCost, 19);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

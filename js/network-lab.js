@@ -450,13 +450,23 @@ function addDevice(type, x, y) {
             }
         };
     } else if (type === 'switch') {
+        const swMac = generateMacAddress(networkState.devices);
         device = {
             id: `${DEVICE_DEFINITIONS[type].label}${counter}`,
             type,
             name: `${DEVICE_DEFINITIONS[type].label}${counter}`,
             x: clamp(x - 56, 24, safeWidth),
             y: clamp(y - 48, 24, safeHeight),
-            mac: generateMacAddress(networkState.devices),
+            mac: swMac,
+            stp: {
+                enabled: true,
+                priority: DEFAULT_STP_PRIORITY,
+                bridgeId: formatBridgeId(DEFAULT_STP_PRIORITY, swMac),
+                rootBridgeId: formatBridgeId(DEFAULT_STP_PRIORITY, swMac),
+                rootCost: 0,
+                rootPort: null,
+                ports: {}
+            },
             vlans: {
                 1: {
                     id: 1,
@@ -663,7 +673,12 @@ function addConnection(sourceId, targetId) {
         return;
     }
 
-    const existing = networkState.connections.some((connection) =>
+    const sourceDevice = getDeviceById(sourceId);
+    const targetDevice = getDeviceById(targetId);
+
+    const isSwitchToSwitch = sourceDevice?.type === 'switch' && targetDevice?.type === 'switch';
+
+    const existing = !isSwitchToSwitch && networkState.connections.some((connection) =>
         (connection.source === sourceId && connection.target === targetId) ||
         (connection.source === targetId && connection.target === sourceId)
     );
@@ -672,9 +687,6 @@ function addConnection(sourceId, targetId) {
         updateStatus('That connection already exists.');
         return;
     }
-
-    const sourceDevice = getDeviceById(sourceId);
-    const targetDevice = getDeviceById(targetId);
 
     if (sourceDevice?.type === 'router' && getRouterAvailablePortCount(sourceId) === 0) {
         updateStatus(`${sourceDevice.name} has no available interfaces (Gig0/0 and Gig0/1 are in use).`);
@@ -1041,9 +1053,16 @@ function restoreSnapshot(snapshot) {
     networkState.routerRuntime = cloned.routerRuntime || {};
     networkState.arpRuntime = cloned.arpRuntime || {};
     inspectorDrafts = {};
+    (networkState.devices || []).forEach((dev) => {
+        if (dev && dev.type === 'switch') {
+            ensureSwitchStpState(dev);
+        }
+    });
+    recalculateTopologyStp();
 }
 
 function render() {
+    recalculateTopologyStp();
     renderConnections();
     renderDevices();
     renderPropertiesPanel();
@@ -3549,6 +3568,7 @@ function renderSwitchInspector(selected) {
     const sw = getSwitchDevice(selected);
     const targetSw = sw || selected;
     ensureSwitchVlanState(targetSw);
+    recalculateTopologyStp();
     const runtime = getSwitchRuntime(selected.id);
     const portCount = getSwitchPortCount(selected.id);
     const vlanCount = Object.keys(targetSw.vlans || {}).length || 1;
@@ -3568,11 +3588,13 @@ function renderSwitchInspector(selected) {
         ...Object.values(runtime.ports || {}),
         ...Object.keys(targetSw.switchports || {})
     ]);
-    const portRows = Array.from(allPortNames).sort((a, b) => {
+    const sortedPortNames = Array.from(allPortNames).sort((a, b) => {
         const numA = parseInt(a.replace(/\D/g, ''), 10) || 0;
         const numB = parseInt(b.replace(/\D/g, ''), 10) || 0;
         return numA - numB;
-    }).map((pName) => {
+    });
+
+    const portRows = sortedPortNames.map((pName) => {
         const cfg = getSwitchPortConfig(targetSw, pName);
         const isTrunk = cfg.mode === 'trunk';
         const vlanCol = isTrunk ? `Native: ${cfg.nativeVlan || 1}` : `VLAN ${cfg.accessVlan || 1}`;
@@ -3583,6 +3605,40 @@ function renderSwitchInspector(selected) {
                 <td>${escapeHtml(cfg.mode || 'access')}</td>
                 <td>${escapeHtml(vlanCol)}</td>
                 <td>${escapeHtml(allowedCol)}</td>
+            </tr>
+        `;
+    }).join('');
+
+    const isRoot = targetSw.stp?.rootBridgeId === targetSw.stp?.bridgeId;
+    const stpPortRows = sortedPortNames.map((pName) => {
+        const pStp = targetSw.stp?.ports?.[pName] || { role: 'disabled', state: 'blocking', cost: 19 };
+        const roleLabel = pStp.role === 'root' ? 'Root' : pStp.role === 'designated' ? 'Desg' : pStp.role === 'alternate' ? 'Altn' : 'Disabled';
+        const isFwd = pStp.state === 'forwarding';
+        const stateBadge = `<span class="status-badge ${isFwd ? 'status-up' : 'status-down'}">${isFwd ? 'FORWARDING' : 'BLOCKING'}</span>`;
+        const connId = Object.keys(runtime.ports || {}).find(cId => runtime.ports[cId] === pName);
+        let neighborDesc = '-';
+        if (connId) {
+            const conn = getConnectionById(connId);
+            if (conn) {
+                const neighborId = conn.source === targetSw.id ? conn.target : conn.source;
+                const neighborDev = getDeviceById(neighborId);
+                if (neighborDev) {
+                    if (neighborDev.type === 'switch') {
+                        const neighborPort = getSwitchPortLabel(neighborDev.id, conn.id);
+                        neighborDesc = `${neighborDev.name} (${neighborPort})`;
+                    } else {
+                        neighborDesc = neighborDev.name;
+                    }
+                }
+            }
+        }
+        return `
+            <tr>
+                <td>${escapeHtml(pName)}</td>
+                <td>${escapeHtml(roleLabel)}</td>
+                <td>${stateBadge}</td>
+                <td>${escapeHtml(String(pStp.cost || 19))}</td>
+                <td>${escapeHtml(neighborDesc)}</td>
             </tr>
         `;
     }).join('');
@@ -3632,6 +3688,47 @@ function renderSwitchInspector(selected) {
                     Open Switch Console / CLI
                 </button>
             </div>
+        </div>
+        <div class="property-summary">
+            <h4>SPANNING TREE PROTOCOL (IEEE 802.1D)</h4>
+            <div class="property-summary-grid">
+                <div class="property-summary-item">
+                    <span>STP Status</span>
+                    <strong>Enabled (802.1D)</strong>
+                </div>
+                <div class="property-summary-item">
+                    <span>Bridge Role</span>
+                    <strong>${isRoot ? '<span class="status-badge status-up">Root Bridge</span>' : '<span class="status-badge" style="background: rgba(148, 163, 184, 0.2); color: #94a3b8;">Non-Root</span>'}</strong>
+                </div>
+                <div class="property-summary-item">
+                    <span>Bridge Priority</span>
+                    <strong>${targetSw.stp?.priority || 32768}</strong>
+                </div>
+                <div class="property-summary-item">
+                    <span>Root Path Cost</span>
+                    <strong>${targetSw.stp?.rootCost || 0}</strong>
+                </div>
+                <div class="property-summary-item">
+                    <span>Root Port</span>
+                    <strong>${targetSw.stp?.rootPort || 'None (Root)'}</strong>
+                </div>
+            </div>
+            ${allPortNames.size ? `
+                <table class="property-table" style="margin-top: 10px;">
+                    <thead>
+                        <tr>
+                            <th>Port</th>
+                            <th>Role</th>
+                            <th>State</th>
+                            <th>Cost</th>
+                            <th>Neighbor</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${stpPortRows}
+                    </tbody>
+                </table>
+            ` : ''}
         </div>
         ${sviCount ? `
             <div class="property-summary">
@@ -4540,6 +4637,8 @@ function findTopologyPath(sourceId, targetId) {
         return sourceId ? [sourceId] : [];
     }
 
+    recalculateTopologyStp();
+
     const adjacency = new Map();
     networkState.devices.forEach((device) => adjacency.set(device.id, []));
 
@@ -4549,6 +4648,25 @@ function findTopologyPath(sourceId, targetId) {
         if (!source || !target) {
             return;
         }
+
+        // Check if source switchport is in STP blocking state
+        if (source.type === 'switch') {
+            const port = getSwitchPortLabel(source.id, connection.id);
+            const stpPort = source.stp?.ports?.[port];
+            if (stpPort && stpPort.state === 'blocking') {
+                return;
+            }
+        }
+
+        // Check if target switchport is in STP blocking state
+        if (target.type === 'switch') {
+            const port = getSwitchPortLabel(target.id, connection.id);
+            const stpPort = target.stp?.ports?.[port];
+            if (stpPort && stpPort.state === 'blocking') {
+                return;
+            }
+        }
+
         adjacency.get(source.id).push(target.id);
         adjacency.get(target.id).push(source.id);
     });
@@ -4714,8 +4832,434 @@ function getSwitchDevice(switchOrId) {
     return dev && dev.type === 'switch' ? dev : null;
 }
 
+const DEFAULT_STP_PRIORITY = 32768;
+const DEFAULT_PORT_COST_FA = 19;
+const DEFAULT_PORT_COST_GI = 4;
+const DEFAULT_PORT_PRIORITY = 128;
+const VALID_STP_PRIORITIES = new Set([
+    0, 4096, 8192, 12288, 16384, 20480, 24576, 28672,
+    32768, 36864, 40960, 45056, 49152, 53248, 57344, 61440
+]);
+
+function formatBridgeId(priority, mac) {
+    const prio = typeof priority === 'number' ? priority : DEFAULT_STP_PRIORITY;
+    const normMac = normalizeMacAddress(mac) || '00:00:00:00:00:00';
+    return `${prio}.${normMac}`;
+}
+
+function parseBridgeId(bridgeId) {
+    if (!bridgeId || typeof bridgeId !== 'string') {
+        return { priority: DEFAULT_STP_PRIORITY, mac: '00:00:00:00:00:00' };
+    }
+    const parts = bridgeId.split('.');
+    const parsed = parseInt(parts[0], 10);
+    const priority = isNaN(parsed) ? DEFAULT_STP_PRIORITY : parsed;
+    const mac = parts.slice(1).join('.') || '00:00:00:00:00:00';
+    return { priority, mac };
+}
+
+function compareBridgeIds(bidA, bidB) {
+    const a = parseBridgeId(bidA);
+    const b = parseBridgeId(bidB);
+    if (a.priority !== b.priority) {
+        return a.priority - b.priority;
+    }
+    return a.mac.localeCompare(b.mac);
+}
+
+function ensureSwitchStpState(sw) {
+    if (!sw || sw.type !== 'switch') return;
+    if (!sw.stp || typeof sw.stp !== 'object') {
+        const baseMac = sw.mac || '00:00:00:00:00:00';
+        sw.stp = {
+            enabled: true,
+            priority: DEFAULT_STP_PRIORITY,
+            bridgeId: formatBridgeId(DEFAULT_STP_PRIORITY, baseMac),
+            rootBridgeId: formatBridgeId(DEFAULT_STP_PRIORITY, baseMac),
+            rootCost: 0,
+            rootPort: null,
+            ports: {}
+        };
+    }
+    if (typeof sw.stp.enabled !== 'boolean') {
+        sw.stp.enabled = true;
+    }
+    if (typeof sw.stp.priority !== 'number') {
+        sw.stp.priority = DEFAULT_STP_PRIORITY;
+    }
+    if (!sw.stp.bridgeId) {
+        sw.stp.bridgeId = formatBridgeId(sw.stp.priority, sw.mac);
+    }
+    if (!sw.stp.rootBridgeId) {
+        sw.stp.rootBridgeId = sw.stp.bridgeId;
+    }
+    if (typeof sw.stp.rootCost !== 'number') {
+        sw.stp.rootCost = 0;
+    }
+    if (sw.stp.rootPort === undefined) {
+        sw.stp.rootPort = null;
+    }
+    if (!sw.stp.ports || typeof sw.stp.ports !== 'object') {
+        sw.stp.ports = {};
+    }
+}
+
+function getSwitchStpState(switchOrId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return null;
+    ensureSwitchStpState(sw);
+    return sw.stp;
+}
+
+function getSwitchPortCost(switchOrId, portName) {
+    const sw = getSwitchDevice(switchOrId);
+    const normPort = normalizeSwitchPortName(portName) || portName || '';
+    if (!sw) {
+        return normPort.toLowerCase().startsWith('gi') ? DEFAULT_PORT_COST_GI : DEFAULT_PORT_COST_FA;
+    }
+    ensureSwitchVlanState(sw);
+    const cfg = sw.switchports?.[normPort];
+    if (cfg && typeof cfg.stpCost === 'number' && cfg.stpCost > 0) {
+        return cfg.stpCost;
+    }
+    return normPort.toLowerCase().startsWith('gi') ? DEFAULT_PORT_COST_GI : DEFAULT_PORT_COST_FA;
+}
+
+function setSwitchStpPriority(switchOrId, priority) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) throw new Error('Switch not found.');
+    ensureSwitchStpState(sw);
+
+    const prio = parseInt(priority, 10);
+    if (isNaN(prio) || !VALID_STP_PRIORITIES.has(prio)) {
+        throw new Error('Bridge priority must be in increments of 4096 (0, 4096, 8192, ..., 61440).');
+    }
+
+    sw.stp.priority = prio;
+    sw.stp.bridgeId = formatBridgeId(prio, sw.mac);
+    recalculateTopologyStp();
+    return sw.stp;
+}
+
+function setSwitchPortStpCost(switchOrId, portName, cost) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) throw new Error('Switch not found.');
+    ensureSwitchVlanState(sw);
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) throw new Error(`Invalid switch port "${portName}".`);
+
+    const c = parseInt(cost, 10);
+    if (isNaN(c) || c < 1 || c > 200000000) {
+        throw new Error('Path cost must be an integer between 1 and 200000000.');
+    }
+
+    if (!sw.switchports[normPort]) {
+        sw.switchports[normPort] = {
+            port: normPort,
+            name: normPort,
+            mode: 'access',
+            accessVlan: 1,
+            nativeVlan: 1,
+            allowedVlans: 'all'
+        };
+    }
+    sw.switchports[normPort].stpCost = c;
+    recalculateTopologyStp();
+    return sw.switchports[normPort];
+}
+
+function setSwitchPortStpPriority(switchOrId, portName, priority) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) throw new Error('Switch not found.');
+    ensureSwitchVlanState(sw);
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) throw new Error(`Invalid switch port "${portName}".`);
+
+    const p = parseInt(priority, 10);
+    if (isNaN(p) || p < 0 || p > 240 || p % 16 !== 0) {
+        throw new Error('Port priority must be a multiple of 16 between 0 and 240.');
+    }
+
+    if (!sw.switchports[normPort]) {
+        sw.switchports[normPort] = {
+            port: normPort,
+            name: normPort,
+            mode: 'access',
+            accessVlan: 1,
+            nativeVlan: 1,
+            allowedVlans: 'all'
+        };
+    }
+    sw.switchports[normPort].stpPortPriority = p;
+    recalculateTopologyStp();
+    return sw.switchports[normPort];
+}
+
+function recalculateTopologyStp() {
+    const switches = (networkState.devices || []).filter(d => d && d.type === 'switch');
+    if (switches.length === 0) return;
+
+    // 1. Ensure all switches have valid STP base state
+    switches.forEach(sw => {
+        ensureSwitchStpState(sw);
+        sw.stp.bridgeId = formatBridgeId(sw.stp.priority, sw.mac);
+        if (!sw.stp.ports) sw.stp.ports = {};
+    });
+
+    // 2. Identify switch-to-switch physical connections
+    const switchConnections = (networkState.connections || []).filter(conn => {
+        const src = getDeviceById(conn.source);
+        const tgt = getDeviceById(conn.target);
+        return src && tgt && src.type === 'switch' && tgt.type === 'switch';
+    });
+
+    const switchMap = new Map();
+    switches.forEach(sw => switchMap.set(sw.id, sw));
+
+    const adj = new Map();
+    switches.forEach(sw => adj.set(sw.id, []));
+
+    switchConnections.forEach(conn => {
+        adj.get(conn.source)?.push({ target: conn.target, connId: conn.id });
+        adj.get(conn.target)?.push({ target: conn.source, connId: conn.id });
+    });
+
+    // 3. Find connected switch clusters (connected components)
+    const visited = new Set();
+    const clusters = [];
+
+    switches.forEach(sw => {
+        if (!visited.has(sw.id)) {
+            const cluster = [];
+            const queue = [sw.id];
+            visited.add(sw.id);
+            while (queue.length > 0) {
+                const currId = queue.shift();
+                const currSw = switchMap.get(currId);
+                if (currSw) cluster.push(currSw);
+                const neighbors = adj.get(currId) || [];
+                neighbors.forEach(({ target }) => {
+                    if (!visited.has(target)) {
+                        visited.add(target);
+                        queue.push(target);
+                    }
+                });
+            }
+            clusters.push(cluster);
+        }
+    });
+
+    // 4. Process each switch cluster independently
+    clusters.forEach(cluster => {
+        if (cluster.length === 0) return;
+
+        // Elect Root Bridge: switch with lowest Bridge ID
+        const sortedSwitches = [...cluster].sort((a, b) => compareBridgeIds(a.stp.bridgeId, b.stp.bridgeId));
+        const rootSw = sortedSwitches[0];
+
+        // Root bridge base state
+        rootSw.stp.rootBridgeId = rootSw.stp.bridgeId;
+        rootSw.stp.rootCost = 0;
+        rootSw.stp.rootPort = null;
+
+        // For all switches in the cluster, calculate shortest path to root
+        const dist = new Map();
+        const parentInfo = new Map(); // node -> { parentNode, localPortOnNode, remotePortOnParent }
+        cluster.forEach(sw => dist.set(sw.id, Infinity));
+        dist.set(rootSw.id, 0);
+
+        const unvisited = new Set(cluster.map(sw => sw.id));
+
+        while (unvisited.size > 0) {
+            let currId = null;
+            let minDist = Infinity;
+            unvisited.forEach(id => {
+                const d = dist.get(id);
+                if (d < minDist) {
+                    minDist = d;
+                    currId = id;
+                }
+            });
+
+            if (currId === null || minDist === Infinity) break;
+            unvisited.delete(currId);
+
+            const currSw = switchMap.get(currId);
+            const neighbors = adj.get(currId) || [];
+
+            neighbors.forEach(({ target, connId }) => {
+                const targetSw = switchMap.get(target);
+                if (!targetSw) return;
+
+                const localPort = getSwitchPortLabel(targetSw.id, connId);
+                const remotePort = getSwitchPortLabel(currSw.id, connId);
+                const portCost = getSwitchPortCost(targetSw, localPort);
+                const newCost = dist.get(currId) + portCost;
+                const oldCost = dist.get(target);
+
+                let isBetter = false;
+                if (newCost < oldCost) {
+                    isBetter = true;
+                } else if (newCost === oldCost && oldCost !== Infinity) {
+                    const oldParentInfo = parentInfo.get(target);
+                    const oldParentSw = oldParentInfo ? switchMap.get(oldParentInfo.parentNode) : null;
+                    if (oldParentSw) {
+                        const bidComp = compareBridgeIds(currSw.stp.bridgeId, oldParentSw.stp.bridgeId);
+                        if (bidComp < 0) {
+                            isBetter = true;
+                        } else if (bidComp === 0) {
+                            const portComp = remotePort.localeCompare(oldParentInfo.remotePortOnParent, undefined, { numeric: true });
+                            if (portComp < 0) {
+                                isBetter = true;
+                            } else if (portComp === 0) {
+                                const localPortComp = localPort.localeCompare(oldParentInfo.localPortOnNode, undefined, { numeric: true });
+                                if (localPortComp < 0) {
+                                    isBetter = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (isBetter) {
+                    dist.set(target, newCost);
+                    parentInfo.set(target, {
+                        parentNode: currId,
+                        localPortOnNode: localPort,
+                        remotePortOnParent: remotePort
+                    });
+                }
+            });
+        }
+
+        // Assign rootBridgeId, rootCost, and rootPort to each switch
+        cluster.forEach(sw => {
+            sw.stp.rootBridgeId = rootSw.stp.bridgeId;
+            if (sw.id === rootSw.id) {
+                sw.stp.rootCost = 0;
+                sw.stp.rootPort = null;
+            } else {
+                sw.stp.rootCost = dist.get(sw.id) === Infinity ? 0 : dist.get(sw.id);
+                sw.stp.rootPort = parentInfo.get(sw.id)?.localPortOnNode || null;
+            }
+        });
+
+        // 5. Determine Port Roles & States for every switch in the cluster
+        cluster.forEach(sw => {
+            const runtime = getSwitchRuntime(sw.id);
+            const allPortNames = new Set([
+                ...Object.values(runtime.ports || {}),
+                ...Object.keys(sw.switchports || {})
+            ]);
+
+            allPortNames.forEach(portName => {
+                if (sw.stp.rootPort && sw.stp.rootPort === portName) {
+                    sw.stp.ports[portName] = {
+                        role: 'root',
+                        state: 'forwarding',
+                        cost: getSwitchPortCost(sw, portName),
+                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY
+                    };
+                    return;
+                }
+
+                const connId = Object.keys(runtime.ports || {}).find(cId => runtime.ports[cId] === portName);
+                if (!connId) {
+                    sw.stp.ports[portName] = {
+                        role: 'disabled',
+                        state: 'blocking',
+                        cost: getSwitchPortCost(sw, portName),
+                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY
+                    };
+                    return;
+                }
+
+                const conn = getConnectionById(connId);
+                if (!conn) {
+                    sw.stp.ports[portName] = {
+                        role: 'disabled',
+                        state: 'blocking',
+                        cost: getSwitchPortCost(sw, portName),
+                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY
+                    };
+                    return;
+                }
+
+                const neighborId = conn.source === sw.id ? conn.target : conn.source;
+                const neighborDev = getDeviceById(neighborId);
+
+                if (!neighborDev) {
+                    sw.stp.ports[portName] = {
+                        role: 'disabled',
+                        state: 'blocking',
+                        cost: getSwitchPortCost(sw, portName),
+                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY
+                    };
+                    return;
+                }
+
+                if (neighborDev.type !== 'switch') {
+                    sw.stp.ports[portName] = {
+                        role: 'designated',
+                        state: 'forwarding',
+                        cost: getSwitchPortCost(sw, portName),
+                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY
+                    };
+                    return;
+                }
+
+                const neighborPort = getSwitchPortLabel(neighborDev.id, conn.id);
+                ensureSwitchStpState(neighborDev);
+
+                if (neighborDev.stp?.rootPort === neighborPort) {
+                    sw.stp.ports[portName] = {
+                        role: 'designated',
+                        state: 'forwarding',
+                        cost: getSwitchPortCost(sw, portName),
+                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY
+                    };
+                    return;
+                }
+
+                let localWins = false;
+                if (sw.stp.rootCost < neighborDev.stp.rootCost) {
+                    localWins = true;
+                } else if (sw.stp.rootCost > neighborDev.stp.rootCost) {
+                    localWins = false;
+                } else {
+                    const bidComp = compareBridgeIds(sw.stp.bridgeId, neighborDev.stp.bridgeId);
+                    if (bidComp < 0) {
+                        localWins = true;
+                    } else if (bidComp > 0) {
+                        localWins = false;
+                    } else {
+                        localWins = portName.localeCompare(neighborPort, undefined, { numeric: true }) <= 0;
+                    }
+                }
+
+                if (localWins) {
+                    sw.stp.ports[portName] = {
+                        role: 'designated',
+                        state: 'forwarding',
+                        cost: getSwitchPortCost(sw, portName),
+                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY
+                    };
+                } else {
+                    sw.stp.ports[portName] = {
+                        role: 'alternate',
+                        state: 'blocking',
+                        cost: getSwitchPortCost(sw, portName),
+                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY
+                    };
+                }
+            });
+        });
+    });
+}
+
 function ensureSwitchVlanState(sw) {
     if (!sw || sw.type !== 'switch') return;
+    ensureSwitchStpState(sw);
     if (!sw.vlans || typeof sw.vlans !== 'object') {
         sw.vlans = {};
     }
@@ -5003,7 +5547,9 @@ function getSwitchPortConfig(switchOrId, portName) {
             mode: 'access',
             accessVlan: 1,
             nativeVlan: 1,
-            allowedVlans: 'all'
+            allowedVlans: 'all',
+            stpCost: normPort.toLowerCase().startsWith('gi') ? DEFAULT_PORT_COST_GI : DEFAULT_PORT_COST_FA,
+            stpPortPriority: DEFAULT_PORT_PRIORITY
         };
     }
     ensureSwitchVlanState(sw);
@@ -5014,7 +5560,9 @@ function getSwitchPortConfig(switchOrId, portName) {
             mode: 'access',
             accessVlan: 1,
             nativeVlan: 1,
-            allowedVlans: 'all'
+            allowedVlans: 'all',
+            stpCost: normPort.toLowerCase().startsWith('gi') ? DEFAULT_PORT_COST_GI : DEFAULT_PORT_COST_FA,
+            stpPortPriority: DEFAULT_PORT_PRIORITY
         };
     }
     const cfg = sw.switchports[normPort];
@@ -5024,7 +5572,9 @@ function getSwitchPortConfig(switchOrId, portName) {
         mode: cfg.mode === 'trunk' ? 'trunk' : 'access',
         accessVlan: cfg.accessVlan || 1,
         nativeVlan: cfg.nativeVlan || 1,
-        allowedVlans: cfg.allowedVlans !== undefined ? cfg.allowedVlans : 'all'
+        allowedVlans: cfg.allowedVlans !== undefined ? cfg.allowedVlans : 'all',
+        stpCost: typeof cfg.stpCost === 'number' && cfg.stpCost > 0 ? cfg.stpCost : (normPort.toLowerCase().startsWith('gi') ? DEFAULT_PORT_COST_GI : DEFAULT_PORT_COST_FA),
+        stpPortPriority: typeof cfg.stpPortPriority === 'number' ? cfg.stpPortPriority : DEFAULT_PORT_PRIORITY
     };
 }
 
@@ -6755,6 +7305,10 @@ function getSwitchMacEntry(switchId, mac, vlan = null) {
 }
 
 function learnSwitchMac(switchId, sourceMac, sourceDeviceId, portLabel, vlan = 1) {
+    const sw = getSwitchDevice(switchId);
+    if (sw && sw.stp?.ports?.[portLabel]?.state === 'blocking') {
+        return null;
+    }
     const runtime = getSwitchRuntime(switchId);
     const normalized = normalizeMacAddress(sourceMac);
     if (!normalized) {
@@ -7148,6 +7702,27 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
             cleanupStaleSwitchMacEntries(toDevice.id);
 
             const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
+            const ingressStp = toDevice.stp?.ports?.[ingressPort];
+            if (ingressStp && ingressStp.state === 'blocking') {
+                frame.events.push(`Switch ${toDevice.name} dropped frame on blocked port ${ingressPort} (STP blocking)`);
+                hopActions.push({
+                    deviceId: toDevice.id,
+                    deviceName: toDevice.name,
+                    type: 'switch',
+                    action: 'DROP',
+                    reason: 'stp-blocked',
+                    ingressPort,
+                    destinationMac: frame.destinationMac
+                });
+                return {
+                    success: false,
+                    reason: `Switch ${toDevice.name} dropped frame on blocked port ${ingressPort} (STP blocking).`,
+                    path: traversedPath,
+                    action: 'DROP',
+                    hopActions
+                };
+            }
+
             const ingressRes = classifyFrameIngress(toDevice, ingressPort, frame);
             if (!ingressRes.accepted) {
                 frame.events.push(ingressRes.reason);
@@ -7408,10 +7983,36 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                 const expectedEgressPort = nextHopId ? getPortForSwitchAndNeighbor(toDevice.id, nextHopId) : null;
                 const runtime = getSwitchRuntime(toDevice.id);
                 const allOtherPorts = Object.values(runtime.ports).filter(p => p !== ingressPort);
-                const egressPorts = allOtherPorts.filter(p => getEgressTagAction(getSwitchPortConfig(toDevice, p), ingressVlan).allowed);
+                const egressPorts = allOtherPorts.filter(p => {
+                    const stpP = toDevice.stp?.ports?.[p];
+                    if (stpP && stpP.state === 'blocking') return false;
+                    return getEgressTagAction(getSwitchPortConfig(toDevice, p), ingressVlan).allowed;
+                });
 
-                // Layer-2 VLAN Egress Check
+                // Layer-2 VLAN and STP Egress Check
                 if (expectedEgressPort) {
+                    const expectedStp = toDevice.stp?.ports?.[expectedEgressPort];
+                    if (expectedStp && expectedStp.state === 'blocking') {
+                        frame.events.push(`Switch ${toDevice.name} dropped frame: egress port ${expectedEgressPort} is in STP blocking state`);
+                        hopActions.push({
+                            deviceId: toDevice.id,
+                            deviceName: toDevice.name,
+                            type: 'switch',
+                            action: 'DROP',
+                            reason: 'stp-blocked',
+                            ingressPort,
+                            egressPort: expectedEgressPort,
+                            destinationMac: frame.destinationMac
+                        });
+                        return {
+                            success: false,
+                            reason: `Switch ${toDevice.name} dropped frame due to STP blocking on port ${expectedEgressPort}.`,
+                            path: traversedPath,
+                            action: 'DROP',
+                            hopActions
+                        };
+                    }
+
                     const egressPortConfig = getSwitchPortConfig(toDevice, expectedEgressPort);
                     const egressTagAction = getEgressTagAction(egressPortConfig, ingressVlan);
                     if (!egressTagAction.allowed) {
@@ -7492,6 +8093,27 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                         hopActions
                     };
                 } else if (expectedEgressPort && destEntry.port === expectedEgressPort) {
+                    const destStp = toDevice.stp?.ports?.[destEntry.port];
+                    if (destStp && destStp.state === 'blocking') {
+                        frame.events.push(`Switch ${toDevice.name} dropped frame: destination port ${destEntry.port} is blocked by STP`);
+                        hopActions.push({
+                            deviceId: toDevice.id,
+                            deviceName: toDevice.name,
+                            type: 'switch',
+                            action: 'DROP',
+                            reason: 'stp-blocked',
+                            ingressPort,
+                            egressPort: destEntry.port,
+                            destinationMac: frame.destinationMac
+                        });
+                        return {
+                            success: false,
+                            reason: `Switch ${toDevice.name} dropped frame (destination port ${destEntry.port} is in STP blocking state).`,
+                            path: traversedPath,
+                            action: 'DROP',
+                            hopActions
+                        };
+                    }
                     frame.events.push(`Destination MAC found in MAC table → ${destEntry.port}`);
                     frame.events.push(`Switch ${toDevice.name} forwarded frame through ${destEntry.port}`);
                     hopActions.push({
@@ -8258,6 +8880,18 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
 
         if (toDevice.type === 'switch') {
             const ingressPort = getPortForSwitchAndNeighbor(toDevice.id, fromId);
+            const ingressStp = toDevice.stp?.ports?.[ingressPort];
+            if (ingressStp && ingressStp.state === 'blocking') {
+                events.push(`Switch ${toDevice.name} dropped ARP request: received on blocked port ${ingressPort}`);
+                return {
+                    success: false,
+                    reason: `ARP resolution failed: Switch ${toDevice.name} dropped frame on blocked port ${ingressPort}.`,
+                    path: arpPath.slice(0, i + 1),
+                    events,
+                    hopActions
+                };
+            }
+
             const ingressPortConfig = getSwitchPortConfig(toDevice, ingressPort);
 
             if (fromDevice && fromDevice.type === 'switch') {
@@ -8303,10 +8937,33 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
             learnSwitchMac(toDevice.id, reqMac, requesterDevice.id, ingressPort, ingressVlan);
             events.push(`Switch ${toDevice.name} learned ${requesterDevice.name} MAC (${reqMac}) → ${ingressPort} (VLAN ${ingressVlan})`);
 
-            // Check if next hop port is in same VLAN / allowed on trunk
+            // Check if next hop port is in same VLAN / allowed on trunk / not blocked by STP
             const nextHopId = arpPath[i + 2];
             const nextPort = nextHopId ? getPortForSwitchAndNeighbor(toDevice.id, nextHopId) : null;
             if (nextPort) {
+                const nextStp = toDevice.stp?.ports?.[nextPort];
+                if (nextStp && nextStp.state === 'blocking') {
+                    events.push(`Switch ${toDevice.name} dropped broadcast frame: destination port ${nextPort} is blocked by STP`);
+                    hopActions.push({
+                        deviceId: toDevice.id,
+                        deviceName: toDevice.name,
+                        type: 'switch',
+                        action: 'DROP',
+                        reason: 'stp-blocked',
+                        ingressPort,
+                        egressPort: nextPort,
+                        ingressVlan,
+                        destinationMac: 'FF:FF:FF:FF:FF:FF'
+                    });
+                    return {
+                        success: false,
+                        reason: `ARP resolution failed: Switch ${toDevice.name} blocked ARP request on port ${nextPort} (STP blocking).`,
+                        path: arpPath.slice(0, i + 1),
+                        events,
+                        hopActions
+                    };
+                }
+
                 const nextPortConfig = getSwitchPortConfig(toDevice, nextPort);
                 const egressAction = getEgressTagAction(nextPortConfig, ingressVlan);
                 if (!egressAction.allowed) {
@@ -8339,7 +8996,12 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
 
             events.push(`Switch ${toDevice.name} flooded broadcast frame (FF:FF:FF:FF:FF:FF) on all ports except ${ingressPort}`);
             const runtime = getSwitchRuntime(toDevice.id);
-            const egressPorts = Object.values(runtime.ports).filter(p => p !== ingressPort && getEgressTagAction(getSwitchPortConfig(toDevice, p), ingressVlan).allowed);
+            const egressPorts = Object.values(runtime.ports).filter(p => {
+                if (p === ingressPort) return false;
+                const stpP = toDevice.stp?.ports?.[p];
+                if (stpP && stpP.state === 'blocking') return false;
+                return getEgressTagAction(getSwitchPortConfig(toDevice, p), ingressVlan).allowed;
+            });
             hopActions.push({
                 deviceId: toDevice.id,
                 deviceName: toDevice.name,
@@ -10361,6 +11023,69 @@ function formatCliSwitchSviDetail(switchOrId, vlanId) {
     return lines.join('\n');
 }
 
+function formatCliSwitchSpanningTree(switchOrId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return '% Switch not found.';
+    ensureSwitchVlanState(sw);
+    recalculateTopologyStp();
+
+    const stp = sw.stp || {};
+    const isRoot = stp.rootBridgeId === stp.bridgeId;
+    const rootPortStr = isRoot ? 'None (This is the Root Bridge)' : (stp.rootPort ? `${stp.rootPort}` : 'None');
+
+    const rootParts = parseBridgeId(stp.rootBridgeId);
+    const localParts = parseBridgeId(stp.bridgeId);
+
+    const lines = [
+        'VLAN0001',
+        '  Spanning tree enabled protocol ieee',
+        `  Root ID    Priority    ${rootParts.priority}`,
+        `             Address     ${rootParts.mac}`,
+        ...(isRoot ? ['             This bridge is the root'] : [
+            `             Cost        ${stp.rootCost || 0}`,
+            `             Port        ${rootPortStr}`
+        ]),
+        '             Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec',
+        '',
+        `  Bridge ID  Priority    ${localParts.priority}`,
+        `             Address     ${localParts.mac}`,
+        '             Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec',
+        '',
+        'Interface        Role Sts Cost      Prio.Nbr Type',
+        '---------------- ---- --- --------- -------- --------------------------------'
+    ];
+
+    const runtime = getSwitchRuntime(sw.id);
+    const allPortNames = new Set([
+        ...Object.values(runtime.ports || {}),
+        ...Object.keys(sw.switchports || {})
+    ]);
+
+    const sortedPorts = Array.from(allPortNames).sort((a, b) => {
+        const numA = parseInt(a.replace(/\D/g, ''), 10) || 0;
+        const numB = parseInt(b.replace(/\D/g, ''), 10) || 0;
+        return numA - numB;
+    });
+
+    if (sortedPorts.length === 0) {
+        lines.push('No switchports configured or connected.');
+    } else {
+        sortedPorts.forEach((pName) => {
+            const portInfo = stp.ports?.[pName] || { role: 'disabled', state: 'blocking', cost: 19, portPriority: 128 };
+            const portStr = pName.padEnd(17, ' ');
+            const roleStr = (portInfo.role === 'root' ? 'Root' : portInfo.role === 'designated' ? 'Desg' : portInfo.role === 'alternate' ? 'Altn' : 'Dis').padEnd(5, ' ');
+            const stsStr = (portInfo.state === 'forwarding' ? 'FWD' : 'BLK').padEnd(4, ' ');
+            const costStr = String(portInfo.cost || 19).padEnd(10, ' ');
+            const portNum = parseInt(pName.replace(/\D/g, ''), 10) || 1;
+            const prioNbrStr = `${portInfo.portPriority || 128}.${portNum}`.padEnd(9, ' ');
+            const typeStr = 'P2p';
+            lines.push(`${portStr}${roleStr}${stsStr}${costStr}${prioNbrStr}${typeStr}`);
+        });
+    }
+
+    return lines.join('\n');
+}
+
 function findDeviceByIp(ip) {
     if (!ip || typeof ip !== 'string') {
         return null;
@@ -12214,6 +12939,259 @@ function executeCliCommand(deviceId, rawInput) {
                 device: dev
             };
         }
+
+        // no spanning-tree priority / no spanning-tree vlan <id> priority / no spanning-tree cost / no spanning-tree port-priority
+        if (sub1 === 'spanning-tree' || sub1 === 'spanningtree' || sub1 === 'stp') {
+            if (!isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'no spanning-tree' is a switch configuration command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode === 'config-if') {
+                if (!session.selectedInterface || isSviName(session.selectedInterface)) {
+                    return {
+                        success: false,
+                        output: '% Spanning-tree interface commands are only supported on physical switchports.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                const portName = session.selectedInterface;
+                if (sub2 === 'cost') {
+                    pushHistory();
+                    setSwitchPortStpCost(dev, portName, portName.toLowerCase().startsWith('gi') ? DEFAULT_PORT_COST_GI : DEFAULT_PORT_COST_FA);
+                    render();
+                    return {
+                        success: true,
+                        output: '',
+                        clear: false,
+                        status: 'success',
+                        command,
+                        device: dev
+                    };
+                }
+                if (sub2 === 'port-priority') {
+                    pushHistory();
+                    setSwitchPortStpPriority(dev, portName, DEFAULT_PORT_PRIORITY);
+                    render();
+                    return {
+                        success: true,
+                        output: '',
+                        clear: false,
+                        status: 'success',
+                        command,
+                        device: dev
+                    };
+                }
+            }
+            if (session.mode !== 'config') {
+                return {
+                    success: false,
+                    output: '% "no spanning-tree" must be executed in global configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (sub2 === 'priority' || (sub2 === 'vlan' && tokens[4] === 'priority')) {
+                pushHistory();
+                setSwitchStpPriority(dev, DEFAULT_STP_PRIORITY);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: false,
+                output: '% Incomplete command: no spanning-tree priority [or "no spanning-tree vlan <id> priority"]',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+    }
+
+    // 12b. SPANNING-TREE commands
+    if (mainCmd === 'spanning-tree' || mainCmd === 'spanningtree' || mainCmd === 'stp') {
+        if (!isSwitch) {
+            return {
+                success: false,
+                output: "% 'spanning-tree' is a switch configuration command.",
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
+        // Interface mode: spanning-tree cost <cost> / spanning-tree port-priority <prio>
+        if (session.mode === 'config-if') {
+            if (!session.selectedInterface || isSviName(session.selectedInterface)) {
+                return {
+                    success: false,
+                    output: '% Spanning-tree interface commands are only supported on physical switchports.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const portName = session.selectedInterface;
+            if (tokens[1] === 'cost') {
+                const costVal = tokens[2];
+                if (!costVal) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: spanning-tree cost <1-200000000>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                try {
+                    pushHistory();
+                    setSwitchPortStpCost(dev, portName, costVal);
+                    render();
+                    return {
+                        success: true,
+                        output: '',
+                        clear: false,
+                        status: 'success',
+                        command,
+                        device: dev
+                    };
+                } catch (err) {
+                    return {
+                        success: false,
+                        output: `% ${err.message}`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+            }
+            if (tokens[1] === 'port-priority') {
+                const prioVal = tokens[2];
+                if (!prioVal) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: spanning-tree port-priority <0-240 in steps of 16>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                try {
+                    pushHistory();
+                    setSwitchPortStpPriority(dev, portName, prioVal);
+                    render();
+                    return {
+                        success: true,
+                        output: '',
+                        clear: false,
+                        status: 'success',
+                        command,
+                        device: dev
+                    };
+                } catch (err) {
+                    return {
+                        success: false,
+                        output: `% ${err.message}`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+            }
+            return {
+                success: false,
+                output: '% Incomplete or unrecognized spanning-tree interface command. Available: "spanning-tree cost <cost>", "spanning-tree port-priority <priority>".',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
+        // Global config mode: spanning-tree priority <val> / spanning-tree vlan <id> priority <val>
+        if (session.mode !== 'config') {
+            return {
+                success: false,
+                output: '% "spanning-tree" configuration commands must be executed in global configuration mode.',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
+        let rawPrio = null;
+        if (tokens[1] === 'priority') {
+            rawPrio = tokens[2];
+        } else if (tokens[1] === 'vlan' && tokens[3] === 'priority') {
+            rawPrio = tokens[4];
+        } else if (tokens[1] === 'vlan' && !tokens[3]) {
+            return {
+                success: false,
+                output: '% Incomplete command: spanning-tree vlan <id> priority <value>',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
+        if (rawPrio === null || rawPrio === undefined) {
+            return {
+                success: false,
+                output: '% Incomplete command: spanning-tree priority <value> (valid values: 0, 4096, 8192, ..., 61440)',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
+        try {
+            pushHistory();
+            setSwitchStpPriority(dev, rawPrio);
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        } catch (err) {
+            return {
+                success: false,
+                output: `% ${err.message}`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
     }
 
     // 13. IP ROUTING / IP DEFAULT-GATEWAY / IP ADDRESS
@@ -12883,6 +13861,28 @@ function executeCliCommand(deviceId, rawInput) {
         const sub1 = tokens[1] || '';
         const sub2 = tokens[2] || '';
 
+        // show spanning-tree / show spanningtree / show stp
+        if (sub1 === 'spanning-tree' || sub1 === 'spanningtree' || sub1 === 'stp') {
+            if (!isSwitch) {
+                return {
+                    success: false,
+                    output: `% 'show spanning-tree' is a switch command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: formatCliSwitchSpanningTree(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
         // show vlan / show vlan brief
         if (sub1 === 'vlan' || sub1 === 'vlans') {
             if (!isSwitch) {
@@ -13157,7 +14157,7 @@ function executeCliCommand(deviceId, rawInput) {
         } else if (isSwitch) {
             return {
                 success: false,
-                output: `% Unrecognized show command: "${command}". Available: "show vlan brief", "show mac-address-table", "show interfaces", "show interfaces trunk", "show ip interface brief", "show ip route".`,
+                output: `% Unrecognized show command: "${command}". Available: "show vlan brief", "show mac-address-table", "show interfaces", "show interfaces trunk", "show ip interface brief", "show ip route", "show spanning-tree".`,
                 clear: false,
                 status: 'error',
                 command,
