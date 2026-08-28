@@ -531,6 +531,7 @@ function clearCanvas() {
     networkState.switchRuntime = {};
     networkState.routerRuntime = {};
     networkState.arpRuntime = {};
+    networkState.dhcpTransactions = {};
     terminalRuntime.sessions = {};
     terminalRuntime.activeDeviceId = null;
     terminalRuntime.isOpen = false;
@@ -15050,6 +15051,546 @@ function createDhcpPacket(messageType, options = {}) {
         destinationIp: options.destinationIp || (['DISCOVER', 'REQUEST'].includes(normType) ? '255.255.255.255' : (yourIp !== '0.0.0.0' ? yourIp : '255.255.255.255')),
         sourcePort: isReply ? DEFAULT_DHCP_SERVER_PORT : DEFAULT_DHCP_CLIENT_PORT,
         destinationPort: isReply ? DEFAULT_DHCP_CLIENT_PORT : DEFAULT_DHCP_SERVER_PORT
+    };
+}
+
+/**
+ * Retrieves a DHCP transaction by transaction ID.
+ */
+function getDhcpTransaction(transactionId) {
+    if (!networkState.dhcpTransactions) {
+        networkState.dhcpTransactions = {};
+    }
+    return networkState.dhcpTransactions[transactionId] || null;
+}
+
+/**
+ * Clears all cached DHCP transactions.
+ */
+function clearDhcpTransactions() {
+    networkState.dhcpTransactions = {};
+}
+
+/**
+ * Traverses the Layer-2 broadcast domain starting from an endpoint to discover reachable DHCP servers.
+ * Respects physical connectivity, VLAN membership (Access/Trunk), and STP port blocking states.
+ * Stops at Layer-3 router interfaces / SVI boundaries.
+ */
+function findReachableDhcpServers(clientDeviceId, options = {}) {
+    const clientDev = typeof clientDeviceId === 'object' && clientDeviceId ? clientDeviceId : getDeviceById(clientDeviceId);
+    if (!clientDev) return [];
+
+    const reachableServers = [];
+    const visited = new Set();
+    const queue = [{ deviceId: clientDev.id, path: [clientDev.id], currentVlan: null }];
+    visited.add(clientDev.id);
+
+    while (queue.length > 0) {
+        const { deviceId, path, currentVlan } = queue.shift();
+        const currDev = getDeviceById(deviceId);
+        if (!currDev) continue;
+
+        const connections = (networkState.connections || []).filter(
+            c => c.source === deviceId || c.target === deviceId
+        );
+
+        for (const conn of connections) {
+            const neighborId = conn.source === deviceId ? conn.target : conn.source;
+            const neighborDev = getDeviceById(neighborId);
+            if (!neighborDev) continue;
+
+            // 1. If currently on a switch, check local port egress state
+            if (currDev.type === 'switch') {
+                const switchPort = getSwitchPortLabel(currDev.id, conn.id);
+                const stpState = currDev.stp?.ports?.[switchPort];
+                if (stpState && stpState.state === 'blocking') {
+                    continue; // STP blocking port prunes broadcast
+                }
+
+                const portCfg = getSwitchPortConfig(currDev, switchPort);
+                if (currentVlan !== null) {
+                    if (portCfg.mode === 'trunk') {
+                        if (!isVlanAllowedOnTrunk(portCfg, currentVlan)) {
+                            continue; // VLAN not allowed on trunk
+                        }
+                    } else {
+                        if ((portCfg.accessVlan || 1) !== currentVlan) {
+                            continue; // Access VLAN mismatch
+                        }
+                    }
+                }
+            }
+
+            // 2. If neighbor is a switch, check neighbor ingress port state
+            if (neighborDev.type === 'switch') {
+                const inPort = getSwitchPortLabel(neighborDev.id, conn.id);
+                const inStp = neighborDev.stp?.ports?.[inPort];
+                if (inStp && inStp.state === 'blocking') {
+                    continue; // Ingress STP blocked
+                }
+
+                const inPortCfg = getSwitchPortConfig(neighborDev, inPort);
+                let nextVlan = currentVlan;
+
+                if (currentVlan === null) {
+                    // First switch port ingress determines starting VLAN
+                    nextVlan = inPortCfg.mode === 'trunk' ? (inPortCfg.nativeVlan || 1) : (inPortCfg.accessVlan || 1);
+                } else {
+                    if (inPortCfg.mode === 'trunk') {
+                        if (!isVlanAllowedOnTrunk(inPortCfg, currentVlan)) {
+                            continue;
+                        }
+                    } else {
+                        if ((inPortCfg.accessVlan || 1) !== currentVlan) {
+                            continue;
+                        }
+                    }
+                }
+
+                // Check if switch itself is a Multilayer Switch acting as DHCP server
+                if (neighborDev.ipRouting && neighborDev.dhcpServer && neighborDev.dhcpServer.enabled) {
+                    const effectiveVlan = nextVlan || 1;
+                    const svi = neighborDev.svis?.[effectiveVlan];
+                    if (svi && svi.ip && getEffectiveSviStatus(neighborDev, effectiveVlan) === 'up') {
+                        const pool = findMatchingDhcpPool(neighborDev, svi.ip);
+                        if (pool) {
+                            reachableServers.push({
+                                serverDevice: neighborDev,
+                                serverId: neighborDev.id,
+                                serverIp: svi.ip,
+                                serverMac: svi.mac || neighborDev.mac,
+                                interfaceName: `Vlan${effectiveVlan}`,
+                                pool,
+                                topologyPath: [...path, neighborDev.id],
+                                vlan: effectiveVlan
+                            });
+                        }
+                    }
+                }
+
+                if (!visited.has(neighborDev.id)) {
+                    visited.add(neighborDev.id);
+                    queue.push({
+                        deviceId: neighborDev.id,
+                        path: [...path, neighborDev.id],
+                        currentVlan: nextVlan
+                    });
+                }
+            } else if (neighborDev.type === 'router') {
+                // Router reached on Layer-2 broadcast domain
+                const rPort = getPortForRouterAndNeighbor(neighborDev.id, currDev.id);
+                const effectiveVlan = currentVlan || 1;
+
+                ensureDeviceDhcpServerState(neighborDev);
+                if (neighborDev.dhcpServer && neighborDev.dhcpServer.enabled) {
+                    let targetIface = null;
+
+                    // Check for dot1q subinterface matching VLAN
+                    if (effectiveVlan && neighborDev.interfaces) {
+                        for (const iface of Object.values(neighborDev.interfaces)) {
+                            if (iface && iface.isSubinterface && iface.parentInterface === rPort && iface.encapsulation === 'dot1q' && iface.vlan === effectiveVlan) {
+                                targetIface = iface;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Fallback to main interface
+                    if (!targetIface && rPort && neighborDev.interfaces?.[rPort]) {
+                        targetIface = neighborDev.interfaces[rPort];
+                    }
+
+                    if (targetIface && targetIface.ip && getEffectiveInterfaceStatus(neighborDev, targetIface.name) === 'up') {
+                        const pool = findMatchingDhcpPool(neighborDev, targetIface.ip);
+                        if (pool) {
+                            reachableServers.push({
+                                serverDevice: neighborDev,
+                                serverId: neighborDev.id,
+                                serverIp: targetIface.ip,
+                                serverMac: targetIface.mac,
+                                interfaceName: targetIface.name,
+                                pool,
+                                topologyPath: [...path, neighborDev.id],
+                                vlan: effectiveVlan
+                            });
+                        }
+                    }
+                }
+                // Do not propagate BFS beyond router (L3 boundary)
+            }
+        }
+    }
+
+    return reachableServers;
+}
+
+/**
+ * Simulates the DHCP DISCOVER step of the DORA transaction.
+ * Broadcasts DISCOVER on the client's Layer-2 domain, locates reachable DHCP servers,
+ * allocates a candidate IP, and generates an OFFER response without committing an active lease.
+ */
+function simulateDhcpDiscover(clientDeviceId, options = {}) {
+    const clientDev = typeof clientDeviceId === 'object' && clientDeviceId ? clientDeviceId : getDeviceById(clientDeviceId);
+    if (!clientDev) {
+        return { success: false, reason: 'CLIENT_NOT_FOUND', events: ['Client device not found'] };
+    }
+
+    if (clientDev.type === 'router' || clientDev.type === 'switch') {
+        return { success: false, reason: 'INVALID_CLIENT_TYPE', events: ['Switches and routers cannot act as DHCP clients in this simulation.'] };
+    }
+
+    ensureDeviceDhcpClientState(clientDev);
+    clientDev.ipMode = 'dhcp';
+    clientDev.dhcpClient.state = 'SELECTING';
+
+    const events = [];
+    const txId = options.transactionId || ('0x' + Math.floor(Math.random() * 0xFFFFFFFF).toString(16).padStart(8, '0'));
+
+    const discoverPacket = createDhcpPacket('DISCOVER', {
+        transactionId: txId,
+        clientMac: clientDev.mac,
+        sourceIp: '0.0.0.0',
+        destinationIp: '255.255.255.255'
+    });
+
+    events.push(`${clientDev.name} generated DHCP DISCOVER (Transaction ID: ${txId})`);
+    events.push(`${clientDev.name} broadcast DHCP DISCOVER on Layer-2 network`);
+
+    const reachableServers = findReachableDhcpServers(clientDev.id, options);
+    if (reachableServers.length === 0) {
+        events.push('No DHCP server reachable on client broadcast domain');
+        return {
+            success: false,
+            reason: 'NO_DHCP_SERVER_REACHABLE',
+            transactionId: txId,
+            client: clientDev.id,
+            clientMac: clientDev.mac,
+            packets: [discoverPacket],
+            events
+        };
+    }
+
+    // Select the first eligible server (or preferred server if specified)
+    const selectedServer = (options.preferredServerId
+        ? reachableServers.find(s => s.serverId === options.preferredServerId)
+        : null) || reachableServers[0];
+
+    const serverDev = selectedServer.serverDevice;
+    const pool = selectedServer.pool;
+
+    events.push(`DHCP DISCOVER delivered to server ${serverDev.name} on interface ${selectedServer.interfaceName}`);
+    events.push(`Server ${serverDev.name} matched pool "${pool.name}" (${pool.network}/${pool.prefixLength})`);
+
+    // Allocate candidate IP without creating active binding
+    const candidateIp = getNextAvailableDhcpIp(serverDev, pool.name, clientDev.mac);
+    if (!candidateIp) {
+        events.push(`Server ${serverDev.name} has no available IP addresses in pool "${pool.name}"`);
+        return {
+            success: false,
+            reason: 'NO_IP_AVAILABLE_IN_POOL',
+            transactionId: txId,
+            client: clientDev.id,
+            clientMac: clientDev.mac,
+            server: serverDev.id,
+            poolName: pool.name,
+            packets: [discoverPacket],
+            events
+        };
+    }
+
+    const offerPacket = createDhcpPacket('OFFER', {
+        transactionId: txId,
+        clientMac: clientDev.mac,
+        offeredIp: candidateIp,
+        serverIdentifier: selectedServer.serverIp,
+        serverIp: selectedServer.serverIp,
+        subnetMask: pool.subnetMask,
+        defaultRouter: pool.defaultRouter || selectedServer.serverIp,
+        dnsServer: pool.dnsServer || '',
+        domainName: pool.domainName || '',
+        leaseTime: pool.leaseTime || DEFAULT_DHCP_LEASE_SECONDS
+    });
+
+    events.push(`Server ${serverDev.name} generated DHCP OFFER with IP ${candidateIp}`);
+    events.push(`Server ${serverDev.name} sent DHCP OFFER to ${clientDev.name}`);
+
+    if (!networkState.dhcpTransactions) {
+        networkState.dhcpTransactions = {};
+    }
+
+    networkState.dhcpTransactions[txId] = {
+        transactionId: txId,
+        clientDeviceId: clientDev.id,
+        clientMac: clientDev.mac,
+        serverId: serverDev.id,
+        serverIp: selectedServer.serverIp,
+        poolName: pool.name,
+        offeredIp: candidateIp,
+        subnetMask: pool.subnetMask,
+        defaultRouter: pool.defaultRouter || selectedServer.serverIp,
+        dnsServer: pool.dnsServer || '',
+        domainName: pool.domainName || '',
+        leaseTime: pool.leaseTime || DEFAULT_DHCP_LEASE_SECONDS,
+        state: 'OFFERED',
+        createdAt: typeof options.now === 'number' ? options.now : Date.now(),
+        topologyPath: selectedServer.topologyPath,
+        events: [...events]
+    };
+
+    clientDev.dhcpClient.transactionId = txId;
+    clientDev.dhcpClient.lastOffer = offerPacket;
+    clientDev.dhcpClient.lastServerId = selectedServer.serverIp;
+
+    events.push(`${clientDev.name} received DHCP OFFER (Offered IP: ${candidateIp}, Server: ${selectedServer.serverIp})`);
+
+    return {
+        success: true,
+        transactionId: txId,
+        client: clientDev.id,
+        clientMac: clientDev.mac,
+        server: serverDev.id,
+        serverIp: selectedServer.serverIp,
+        offeredIp: candidateIp,
+        poolName: pool.name,
+        leaseParameters: {
+            subnetMask: pool.subnetMask,
+            defaultRouter: pool.defaultRouter || selectedServer.serverIp,
+            dnsServer: pool.dnsServer || '',
+            leaseTime: pool.leaseTime || DEFAULT_DHCP_LEASE_SECONDS
+        },
+        packets: [discoverPacket, offerPacket],
+        events
+    };
+}
+
+/**
+ * Simulates the DHCP REQUEST and server ACK/NAK processing of the DORA transaction.
+ * Requests the offered IP, commits the lease on the server, and transitions the client to BOUND.
+ */
+function simulateDhcpRequest(clientDeviceId, offeredIp = null, serverId = null, transactionId = null, options = {}) {
+    const clientDev = typeof clientDeviceId === 'object' && clientDeviceId ? clientDeviceId : getDeviceById(clientDeviceId);
+    if (!clientDev) {
+        return { success: false, reason: 'CLIENT_NOT_FOUND', events: ['Client device not found'] };
+    }
+
+    ensureDeviceDhcpClientState(clientDev);
+
+    let opts = options;
+    if (offeredIp && typeof offeredIp === 'object') {
+        opts = offeredIp;
+    }
+
+    const txId = transactionId || opts.transactionId || clientDev.dhcpClient.transactionId;
+    if (!txId) {
+        return { success: false, reason: 'MISSING_TRANSACTION_ID', events: ['No active DHCP transaction ID found'] };
+    }
+
+    const tx = getDhcpTransaction(txId);
+    if (!tx) {
+        return { success: false, reason: 'TRANSACTION_NOT_FOUND', events: [`Transaction ${txId} not found`] };
+    }
+
+    if (tx.clientDeviceId !== clientDev.id) {
+        return { success: false, reason: 'CLIENT_MISMATCH', events: ['Client device mismatch for transaction'] };
+    }
+
+    const reqIp = (typeof offeredIp === 'string' && offeredIp) ? offeredIp : (opts.offeredIp || tx.offeredIp);
+    if (reqIp !== tx.offeredIp) {
+        return { success: false, reason: 'OFFERED_IP_MISMATCH', events: [`Requested IP (${reqIp}) does not match offered IP (${tx.offeredIp})`] };
+    }
+
+    const srvId = (typeof serverId === 'string' && serverId) ? serverId : (opts.serverId || tx.serverId);
+    if (srvId !== tx.serverId && srvId !== tx.serverIp) {
+        return { success: false, reason: 'SERVER_MISMATCH', events: [`Server identifier mismatch (${srvId})`] };
+    }
+
+    if (tx.state !== 'OFFERED') {
+        return { success: false, reason: 'INVALID_TRANSACTION_STATE', events: [`Transaction state is ${tx.state}, expected OFFERED`] };
+    }
+
+    const events = [...(tx.events || [])];
+    const serverDev = getDeviceById(tx.serverId);
+    if (!serverDev) {
+        return { success: false, reason: 'SERVER_NOT_FOUND', events: ['DHCP Server device not found'] };
+    }
+
+    const requestPacket = createDhcpPacket('REQUEST', {
+        transactionId: txId,
+        clientMac: clientDev.mac,
+        requestedIp: reqIp,
+        serverIdentifier: tx.serverIp,
+        sourceIp: '0.0.0.0',
+        destinationIp: '255.255.255.255'
+    });
+
+    clientDev.dhcpClient.state = 'REQUESTING';
+    events.push(`${clientDev.name} broadcast DHCP REQUEST for IP ${reqIp} (Server: ${tx.serverIp})`);
+
+    // Verify if IP is still available or already assigned to someone else
+    ensureDeviceDhcpServerState(serverDev);
+    if (isDhcpIpLeased(serverDev, reqIp, clientDev.mac) || isDhcpIpExcluded(serverDev, reqIp)) {
+        const nakPacket = createDhcpPacket('NAK', {
+            transactionId: txId,
+            clientMac: clientDev.mac,
+            serverIdentifier: tx.serverIp
+        });
+
+        tx.state = 'FAILED';
+        clientDev.dhcpClient.state = 'INIT';
+        events.push(`Server ${serverDev.name} rejected request and sent DHCP NAK for IP ${reqIp}`);
+
+        return {
+            success: false,
+            reason: 'REQUEST_REJECTED_NAK',
+            transactionId: txId,
+            client: clientDev.id,
+            server: serverDev.id,
+            packets: [requestPacket, nakPacket],
+            events
+        };
+    }
+
+    // Commit active lease on DHCP server
+    const leaseRes = createDhcpLease(serverDev, tx.poolName, clientDev.mac, reqIp, {
+        now: typeof opts.now === 'number' ? opts.now : Date.now(),
+        leaseDuration: tx.leaseTime,
+        hostname: clientDev.name
+    });
+
+    if (!leaseRes.success) {
+        tx.state = 'FAILED';
+        clientDev.dhcpClient.state = 'INIT';
+        events.push(`Server ${serverDev.name} failed to commit lease: ${leaseRes.reason}`);
+        return {
+            success: false,
+            reason: leaseRes.reason,
+            transactionId: txId,
+            client: clientDev.id,
+            server: serverDev.id,
+            packets: [requestPacket],
+            events
+        };
+    }
+
+    const committedLease = leaseRes.lease;
+
+    const ackPacket = createDhcpPacket('ACK', {
+        transactionId: txId,
+        clientMac: clientDev.mac,
+        yourIp: committedLease.ip,
+        serverIdentifier: tx.serverIp,
+        subnetMask: committedLease.subnetMask,
+        defaultRouter: committedLease.defaultRouter,
+        dnsServer: committedLease.dnsServer,
+        domainName: committedLease.domainName,
+        leaseTime: committedLease.leaseDuration
+    });
+
+    events.push(`Server ${serverDev.name} committed lease and sent DHCP ACK for IP ${committedLease.ip}`);
+
+    // Apply lease to client endpoint
+    applyDhcpLeaseToClient(clientDev, committedLease);
+    tx.state = 'ACKNOWLEDGED';
+
+    events.push(`${clientDev.name} received DHCP ACK and transitioned to BOUND state (IP: ${clientDev.ip}, Mask: ${clientDev.subnetMask}, Gateway: ${clientDev.gateway})`);
+
+    return {
+        success: true,
+        transactionId: txId,
+        client: clientDev.id,
+        clientMac: clientDev.mac,
+        server: serverDev.id,
+        serverIp: tx.serverIp,
+        assignedIp: committedLease.ip,
+        lease: committedLease,
+        packets: [requestPacket, ackPacket],
+        events
+    };
+}
+
+/**
+ * End-to-end convenience helper executing the complete 4-step DHCP DORA transaction.
+ * DISCOVER -> OFFER -> REQUEST -> ACK
+ */
+function simulateDhcpDora(clientDeviceId, options = {}) {
+    const discoverRes = simulateDhcpDiscover(clientDeviceId, options);
+    if (!discoverRes.success) {
+        return discoverRes;
+    }
+
+    const requestRes = simulateDhcpRequest(
+        clientDeviceId,
+        discoverRes.offeredIp,
+        discoverRes.server,
+        discoverRes.transactionId,
+        options
+    );
+
+    if (!requestRes.success) {
+        return {
+            ...requestRes,
+            packets: [...discoverRes.packets, ...requestRes.packets]
+        };
+    }
+
+    return {
+        success: true,
+        transactionId: discoverRes.transactionId,
+        client: discoverRes.client,
+        clientMac: discoverRes.clientMac,
+        server: discoverRes.server,
+        serverIp: discoverRes.serverIp,
+        assignedIp: requestRes.assignedIp,
+        lease: requestRes.lease,
+        packets: [...discoverRes.packets, ...requestRes.packets],
+        events: requestRes.events
+    };
+}
+
+/**
+ * Simulates an endpoint releasing its active DHCP lease.
+ */
+function simulateDhcpRelease(clientDeviceId, options = {}) {
+    const clientDev = typeof clientDeviceId === 'object' && clientDeviceId ? clientDeviceId : getDeviceById(clientDeviceId);
+    if (!clientDev) {
+        return { success: false, reason: 'CLIENT_NOT_FOUND', events: ['Client device not found'] };
+    }
+
+    ensureDeviceDhcpClientState(clientDev);
+    const lease = clientDev.dhcpClient.lease;
+
+    if (!lease || !lease.ip) {
+        return { success: false, reason: 'NO_ACTIVE_LEASE', events: [`${clientDev.name} has no active DHCP lease to release.`] };
+    }
+
+    const events = [];
+    const releasedIp = lease.ip;
+
+    const releasePacket = createDhcpPacket('RELEASE', {
+        clientMac: clientDev.mac,
+        clientIp: releasedIp,
+        serverIdentifier: lease.serverIp || lease.defaultRouter
+    });
+
+    events.push(`${clientDev.name} sent DHCP RELEASE for IP ${releasedIp}`);
+
+    // Locate DHCP server device in topology having this binding
+    for (const dev of (networkState.devices || [])) {
+        if (dev.dhcpServer && dev.dhcpServer.bindings?.[releasedIp]) {
+            releaseDhcpLease(dev, clientDev.mac, releasedIp);
+            events.push(`Server ${dev.name} released binding for IP ${releasedIp}`);
+            break;
+        }
+    }
+
+    clearDhcpClientLease(clientDev);
+    events.push(`${clientDev.name} cleared IP configuration and transitioned to INIT state`);
+
+    return {
+        success: true,
+        releasedIp,
+        packets: [releasePacket],
+        events
     };
 }
 

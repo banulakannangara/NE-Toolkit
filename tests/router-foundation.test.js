@@ -252,6 +252,7 @@ function resetLab() {
     networkState.switchRuntime = {};
     networkState.routerRuntime = {};
     networkState.arpRuntime = {};
+    networkState.dhcpTransactions = {};
     networkState.typeCounters = {};
     networkState.connectionCounter = 0;
     networkState.connectionTestState = null;
@@ -17034,6 +17035,758 @@ runTest('626. createDhcpPacket rejects invalid message types', () => {
     assert.throws(() => {
         createDhcpPacket('INVALID_TYPE', {});
     }, /invalid dhcp message type/i);
+});
+
+// ==========================================
+// V5.12 PHASE 2: DHCP DORA SIMULATION TESTS
+// ==========================================
+
+// 627. findReachableDhcpServers discovers router DHCP server directly connected to PC
+runTest('627. findReachableDhcpServers discovers router DHCP server directly connected to PC', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const [router, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.1.1' });
+
+    addConnection(router.id, pc.id);
+
+    const servers = findReachableDhcpServers(pc.id);
+    assert.strictEqual(servers.length, 1);
+    assert.strictEqual(servers[0].serverId, router.id);
+    assert.strictEqual(servers[0].serverIp, '192.168.1.1');
+    assert.strictEqual(servers[0].pool.name, 'LAN');
+});
+
+// 628. findReachableDhcpServers discovers router DHCP server connected across a switch
+runTest('628. findReachableDhcpServers discovers router DHCP server connected across a switch', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+    const [router, sw, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.1.1' });
+
+    addConnection(router.id, sw.id);
+    addConnection(sw.id, pc.id);
+
+    const servers = findReachableDhcpServers(pc.id);
+    assert.strictEqual(servers.length, 1);
+    assert.strictEqual(servers[0].serverId, router.id);
+    assert.strictEqual(servers[0].serverIp, '192.168.1.1');
+});
+
+// 629. findReachableDhcpServers discovers router subinterface on matching VLAN
+runTest('629. findReachableDhcpServers discovers router subinterface on matching VLAN', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+    const [router, sw, pc] = networkState.devices;
+
+    // Configure ROAS subinterface Gig0/0.10 for VLAN 10
+    ensureRouterSubinterface(router, 'Gig0/0.10');
+    setRouterSubinterfaceEncapsulation(router, 'Gig0/0.10', 10);
+    router.interfaces['Gig0/0.10'].ip = '10.10.10.1';
+    router.interfaces['Gig0/0.10'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'VLAN10', network: '10.10.10.0', subnetMask: '255.255.255.0', defaultRouter: '10.10.10.1' });
+
+    addConnection(router.id, sw.id);
+    addConnection(sw.id, pc.id);
+
+    createSwitchVlan(sw, 10);
+    setSwitchPortMode(sw, 'Fa0/1', 'trunk');
+    setSwitchPortMode(sw, 'Fa0/2', 'access');
+    setSwitchPortAccessVlan(sw, 'Fa0/2', 10);
+
+    const servers = findReachableDhcpServers(pc.id);
+    assert.strictEqual(servers.length, 1);
+    assert.strictEqual(servers[0].serverId, router.id);
+    assert.strictEqual(servers[0].serverIp, '10.10.10.1');
+    assert.strictEqual(servers[0].interfaceName, 'Gig0/0.10');
+});
+
+// 630. findReachableDhcpServers prunes router subinterface on mismatched VLAN
+runTest('630. findReachableDhcpServers prunes router subinterface on mismatched VLAN', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+    const [router, sw, pc] = networkState.devices;
+
+    // Configure ROAS subinterface Gig0/0.20 for VLAN 20
+    ensureRouterSubinterface(router, 'Gig0/0.20');
+    setRouterSubinterfaceEncapsulation(router, 'Gig0/0.20', 20);
+    router.interfaces['Gig0/0.20'].ip = '10.20.20.1';
+    router.interfaces['Gig0/0.20'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'VLAN20', network: '10.20.20.0', subnetMask: '255.255.255.0', defaultRouter: '10.20.20.1' });
+
+    addConnection(router.id, sw.id);
+    addConnection(sw.id, pc.id);
+
+    createSwitchVlan(sw, 10);
+    createSwitchVlan(sw, 20);
+    setSwitchPortMode(sw, 'Fa0/1', 'trunk');
+    setSwitchPortMode(sw, 'Fa0/2', 'access');
+    setSwitchPortAccessVlan(sw, 'Fa0/2', 10);
+
+    const servers = findReachableDhcpServers(pc.id);
+    assert.strictEqual(servers.length, 0); // VLAN 10 cannot reach VLAN 20 subinterface
+});
+
+// 631. findReachableDhcpServers prunes switch ports in STP blocking state
+runTest('631. findReachableDhcpServers prunes switch ports in STP blocking state', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+    const [router, sw, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0' });
+
+    addConnection(router.id, sw.id);
+    addConnection(sw.id, pc.id);
+
+    // Force port facing PC into STP blocking state
+    sw.stp.ports['Fa0/2'].state = 'blocking';
+
+    const servers = findReachableDhcpServers(pc.id);
+    assert.strictEqual(servers.length, 0);
+});
+
+// 632. findReachableDhcpServers discovers multilayer switch SVI DHCP server
+runTest('632. findReachableDhcpServers discovers multilayer switch SVI DHCP server', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const [mls, pc] = networkState.devices;
+
+    mls.ipRouting = true;
+    createSwitchVlan(mls, 10);
+    setSwitchSviIp(mls, 10, '10.10.10.1', '255.255.255.0');
+    createDhcpPool(mls, { name: 'MLS_VLAN10', network: '10.10.10.0', subnetMask: '255.255.255.0', defaultRouter: '10.10.10.1' });
+
+    addConnection(mls.id, pc.id);
+    setSwitchPortAccessVlan(mls, 'Fa0/1', 10);
+
+    const servers = findReachableDhcpServers(pc.id);
+    assert.strictEqual(servers.length, 1);
+    assert.strictEqual(servers[0].serverId, mls.id);
+    assert.strictEqual(servers[0].serverIp, '10.10.10.1');
+    assert.strictEqual(servers[0].interfaceName, 'Vlan10');
+});
+
+// 633. findReachableDhcpServers returns empty array when no DHCP server is reachable
+runTest('633. findReachableDhcpServers returns empty array when no DHCP server is reachable', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const pc = networkState.devices[0];
+
+    const servers = findReachableDhcpServers(pc.id);
+    assert.strictEqual(servers.length, 0);
+});
+
+// 634. simulateDhcpDiscover initiates DISCOVER packet with broadcast destination and ports 68 -> 67
+runTest('634. simulateDhcpDiscover initiates DISCOVER packet with broadcast destination and ports 68 -> 67', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const [router, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0' });
+    addConnection(router.id, pc.id);
+
+    const res = simulateDhcpDiscover(pc.id, { transactionId: '0x12345678' });
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.transactionId, '0x12345678');
+    assert.strictEqual(res.packets[0].messageType, 'DISCOVER');
+    assert.strictEqual(res.packets[0].sourceIp, '0.0.0.0');
+    assert.strictEqual(res.packets[0].destinationIp, '255.255.255.255');
+    assert.strictEqual(res.packets[0].sourcePort, 68);
+    assert.strictEqual(res.packets[0].destinationPort, 67);
+});
+
+// 635. simulateDhcpDiscover fails gracefully with NO_DHCP_SERVER_REACHABLE on isolated client
+runTest('635. simulateDhcpDiscover fails gracefully with NO_DHCP_SERVER_REACHABLE on isolated client', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const pc = networkState.devices[0];
+    pc.ip = '10.0.0.99'; // Static IP should remain untouched
+
+    const res = simulateDhcpDiscover(pc.id);
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.reason, 'NO_DHCP_SERVER_REACHABLE');
+    assert.strictEqual(pc.ip, '10.0.0.99'); // Static IP uncorrupted
+});
+
+// 636. simulateDhcpDiscover matches server pool and returns OFFER without creating active lease
+runTest('636. simulateDhcpDiscover matches server pool and returns OFFER without creating active lease', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const [router, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.1.1' });
+    addConnection(router.id, pc.id);
+
+    const res = simulateDhcpDiscover(pc.id);
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.offeredIp, '192.168.1.2');
+    assert.strictEqual(res.serverIp, '192.168.1.1');
+    assert.strictEqual(res.packets[1].messageType, 'OFFER');
+    assert.strictEqual(res.packets[1].yourIp, '192.168.1.2');
+
+    // Server should NOT have committed an active binding yet
+    assert.strictEqual(getDhcpBindings(router).length, 0);
+    assert.strictEqual(pc.ipMode, 'dhcp');
+    assert.strictEqual(pc.dhcpClient.state, 'SELECTING');
+});
+
+// 637. simulateDhcpDiscover skips excluded IP addresses during candidate offer allocation
+runTest('637. simulateDhcpDiscover skips excluded IP addresses during candidate offer allocation', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const [router, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.1.1' });
+    addDhcpExcludedRange(router, '192.168.1.1', '192.168.1.5');
+    addConnection(router.id, pc.id);
+
+    const res = simulateDhcpDiscover(pc.id);
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.offeredIp, '192.168.1.6'); // .1 through .5 skipped
+});
+
+// 638. simulateDhcpDiscover records pending transaction with state OFFERED and updates client to SELECTING
+runTest('638. simulateDhcpDiscover records pending transaction with state OFFERED and updates client to SELECTING', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const [router, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0' });
+    addConnection(router.id, pc.id);
+
+    const res = simulateDhcpDiscover(pc.id, { transactionId: '0xABC12345' });
+    assert.strictEqual(res.success, true);
+
+    const tx = getDhcpTransaction('0xABC12345');
+    assert.ok(tx);
+    assert.strictEqual(tx.state, 'OFFERED');
+    assert.strictEqual(tx.clientDeviceId, pc.id);
+    assert.strictEqual(tx.offeredIp, '192.168.1.2');
+    assert.strictEqual(pc.dhcpClient.state, 'SELECTING');
+    assert.strictEqual(pc.dhcpClient.transactionId, '0xABC12345');
+});
+
+// 639. simulateDhcpDiscover fails with NO_IP_AVAILABLE_IN_POOL when all pool addresses are exhausted
+runTest('639. simulateDhcpDiscover fails with NO_IP_AVAILABLE_IN_POOL when all pool addresses are exhausted', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const [router, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.252'; // /30 (Hosts .1, .2)
+    createDhcpPool(router, { name: 'TINY', network: '192.168.1.0', subnetMask: '255.255.255.252', defaultRouter: '192.168.1.1' });
+    // Lease out .2 to someone else
+    createDhcpLease(router, 'TINY', '00:99:99:99:99:99', '192.168.1.2');
+
+    addConnection(router.id, pc.id);
+
+    const res = simulateDhcpDiscover(pc.id);
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.reason, 'NO_IP_AVAILABLE_IN_POOL');
+});
+
+// 640. simulateDhcpRequest rejects request when transaction ID does not exist
+runTest('640. simulateDhcpRequest rejects request when transaction ID does not exist', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const pc = networkState.devices[0];
+
+    const res = simulateDhcpRequest(pc.id, '192.168.1.10', 'Router0', '0xNONEXISTENT');
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.reason, 'TRANSACTION_NOT_FOUND');
+});
+
+// 641. simulateDhcpRequest rejects request when client device ID does not match transaction
+runTest('641. simulateDhcpRequest rejects request when client device ID does not match transaction', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    addDevice('laptop', 500, 100);
+    const [router, pc, laptop] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0' });
+    addConnection(router.id, pc.id);
+
+    const disc = simulateDhcpDiscover(pc.id);
+    const res = simulateDhcpRequest(laptop.id, disc.offeredIp, disc.server, disc.transactionId);
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.reason, 'CLIENT_MISMATCH');
+});
+
+// 642. simulateDhcpRequest rejects request when offered IP does not match transaction
+runTest('642. simulateDhcpRequest rejects request when offered IP does not match transaction', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const [router, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0' });
+    addConnection(router.id, pc.id);
+
+    const disc = simulateDhcpDiscover(pc.id);
+    const res = simulateDhcpRequest(pc.id, '192.168.1.99', disc.server, disc.transactionId);
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.reason, 'OFFERED_IP_MISMATCH');
+});
+
+// 643. simulateDhcpRequest rejects request when server identifier does not match transaction
+runTest('643. simulateDhcpRequest rejects request when server identifier does not match transaction', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const [router, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0' });
+    addConnection(router.id, pc.id);
+
+    const disc = simulateDhcpDiscover(pc.id);
+    const res = simulateDhcpRequest(pc.id, disc.offeredIp, '10.99.99.1', disc.transactionId);
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.reason, 'SERVER_MISMATCH');
+});
+
+// 644. simulateDhcpRequest rejects request when transaction state is not OFFERED
+runTest('644. simulateDhcpRequest rejects request when transaction state is not OFFERED', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const [router, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0' });
+    addConnection(router.id, pc.id);
+
+    const disc = simulateDhcpDiscover(pc.id);
+    const tx = getDhcpTransaction(disc.transactionId);
+    tx.state = 'ACKNOWLEDGED'; // Already completed
+
+    const res = simulateDhcpRequest(pc.id, disc.offeredIp, disc.server, disc.transactionId);
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.reason, 'INVALID_TRANSACTION_STATE');
+});
+
+// 645. simulateDhcpRequest successfully processes valid request, generates ACK, and creates active server binding
+runTest('645. simulateDhcpRequest successfully processes valid request, generates ACK, and creates active server binding', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const [router, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.1.1' });
+    addConnection(router.id, pc.id);
+
+    const disc = simulateDhcpDiscover(pc.id);
+    const req = simulateDhcpRequest(pc.id, disc.offeredIp, disc.server, disc.transactionId);
+
+    assert.strictEqual(req.success, true);
+    assert.strictEqual(req.assignedIp, '192.168.1.2');
+    assert.strictEqual(req.packets[0].messageType, 'REQUEST');
+    assert.strictEqual(req.packets[1].messageType, 'ACK');
+    assert.strictEqual(req.packets[1].yourIp, '192.168.1.2');
+
+    // Server should have active binding
+    const bindings = getDhcpBindings(router);
+    assert.strictEqual(bindings.length, 1);
+    assert.strictEqual(bindings[0].ip, '192.168.1.2');
+    assert.strictEqual(bindings[0].mac, pc.mac);
+});
+
+// 646. simulateDhcpRequest transitions client to BOUND state and sets client IP, subnet mask, gateway, and DNS
+runTest('646. simulateDhcpRequest transitions client to BOUND state and sets client IP, subnet mask, gateway, and DNS', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const [router, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, {
+        name: 'LAN',
+        network: '192.168.1.0',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.1.1',
+        dnsServer: '8.8.8.8'
+    });
+    addConnection(router.id, pc.id);
+
+    const disc = simulateDhcpDiscover(pc.id);
+    simulateDhcpRequest(pc.id, disc.offeredIp, disc.server, disc.transactionId);
+
+    assert.strictEqual(pc.ipMode, 'dhcp');
+    assert.strictEqual(pc.dhcpClient.state, 'BOUND');
+    assert.strictEqual(pc.ip, '192.168.1.2');
+    assert.strictEqual(pc.subnetMask, '255.255.255.0');
+    assert.strictEqual(pc.gateway, '192.168.1.1');
+    assert.strictEqual(pc.dnsServer, '8.8.8.8');
+});
+
+// 647. simulateDhcpRequest sends NAK and transitions client to INIT when candidate IP becomes unavailable before request
+runTest('647. simulateDhcpRequest sends NAK and transitions client to INIT when candidate IP becomes unavailable before request', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const [router, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0' });
+    addConnection(router.id, pc.id);
+
+    const disc = simulateDhcpDiscover(pc.id);
+
+    // Simulate another client grabbing 192.168.1.2 before PC sends REQUEST
+    createDhcpLease(router, 'LAN', '00:88:88:88:88:88', '192.168.1.2');
+
+    const req = simulateDhcpRequest(pc.id, disc.offeredIp, disc.server, disc.transactionId);
+    assert.strictEqual(req.success, false);
+    assert.strictEqual(req.reason, 'REQUEST_REJECTED_NAK');
+    assert.strictEqual(req.packets[1].messageType, 'NAK');
+    assert.strictEqual(pc.dhcpClient.state, 'INIT');
+});
+
+// 648. simulateDhcpDora completes full 4-way DORA handshake between PC and directly connected Router
+runTest('648. simulateDhcpDora completes full 4-way DORA handshake between PC and directly connected Router', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const [router, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.1.1' });
+    addConnection(router.id, pc.id);
+
+    const dora = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora.success, true);
+    assert.strictEqual(dora.assignedIp, '192.168.1.2');
+    assert.strictEqual(dora.packets.length, 4);
+    assert.strictEqual(dora.packets[0].messageType, 'DISCOVER');
+    assert.strictEqual(dora.packets[1].messageType, 'OFFER');
+    assert.strictEqual(dora.packets[2].messageType, 'REQUEST');
+    assert.strictEqual(dora.packets[3].messageType, 'ACK');
+    assert.strictEqual(pc.ip, '192.168.1.2');
+});
+
+// 649. simulateDhcpDora completes full 4-way DORA handshake across Switch with Access VLAN
+runTest('649. simulateDhcpDora completes full 4-way DORA handshake across Switch with Access VLAN', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 100);
+    const [router, sw, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '10.50.50.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'VLAN50_POOL', network: '10.50.50.0', subnetMask: '255.255.255.0', defaultRouter: '10.50.50.1' });
+
+    addConnection(router.id, sw.id);
+    addConnection(sw.id, pc.id);
+
+    // Create VLAN 50 and configure both switch ports in Access VLAN 50
+    createSwitchVlan(sw, 50);
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 50);
+    setSwitchPortAccessVlan(sw, 'Fa0/2', 50);
+
+    const dora = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora.success, true);
+    assert.strictEqual(dora.assignedIp, '10.50.50.2');
+    assert.strictEqual(pc.ip, '10.50.50.2');
+    assert.strictEqual(pc.gateway, '10.50.50.1');
+});
+
+// 650. simulateDhcpDora completes full 4-way DORA handshake across 802.1Q Trunk link to Router subinterface
+runTest('650. simulateDhcpDora completes full 4-way DORA handshake across 802.1Q Trunk link to Router subinterface', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('laptop', 400, 100);
+    const [router, sw, laptop] = networkState.devices;
+
+    ensureRouterSubinterface(router, 'Gig0/0.30');
+    setRouterSubinterfaceEncapsulation(router, 'Gig0/0.30', 30);
+    router.interfaces['Gig0/0.30'].ip = '172.16.30.1';
+    router.interfaces['Gig0/0.30'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'VLAN30', network: '172.16.30.0', subnetMask: '255.255.255.0', defaultRouter: '172.16.30.1', dnsServer: '1.1.1.1' });
+
+    addConnection(router.id, sw.id);
+    addConnection(sw.id, laptop.id);
+
+    createSwitchVlan(sw, 30);
+    setSwitchPortMode(sw, 'Fa0/1', 'trunk');
+    setSwitchPortMode(sw, 'Fa0/2', 'access');
+    setSwitchPortAccessVlan(sw, 'Fa0/2', 30);
+
+    const dora = simulateDhcpDora(laptop.id);
+    assert.strictEqual(dora.success, true);
+    assert.strictEqual(dora.assignedIp, '172.16.30.2');
+    assert.strictEqual(laptop.ip, '172.16.30.2');
+    assert.strictEqual(laptop.gateway, '172.16.30.1');
+    assert.strictEqual(laptop.dnsServer, '1.1.1.1');
+});
+
+// 651. simulateDhcpDora completes full 4-way DORA handshake on Multilayer Switch SVI
+runTest('651. simulateDhcpDora completes full 4-way DORA handshake on Multilayer Switch SVI', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const [mls, pc] = networkState.devices;
+
+    mls.ipRouting = true;
+    createSwitchVlan(mls, 20);
+    setSwitchSviIp(mls, 20, '192.168.20.1', '255.255.255.0');
+    createDhcpPool(mls, { name: 'MLS_VLAN20', network: '192.168.20.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.20.1' });
+
+    addConnection(mls.id, pc.id);
+    setSwitchPortAccessVlan(mls, 'Fa0/1', 20);
+
+    const dora = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora.success, true);
+    assert.strictEqual(dora.assignedIp, '192.168.20.2');
+    assert.strictEqual(pc.ip, '192.168.20.2');
+});
+
+// 652. simulateDhcpDora allocates sequential unique IP addresses to multiple clients on the same subnet
+runTest('652. simulateDhcpDora allocates sequential unique IP addresses to multiple clients on the same subnet', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 50);
+    addDevice('pc', 400, 150);
+    addDevice('server', 400, 250);
+    const [router, sw, pc0, pc1, srv] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.1.1' });
+
+    addConnection(router.id, sw.id);
+    addConnection(sw.id, pc0.id);
+    addConnection(sw.id, pc1.id);
+    addConnection(sw.id, srv.id);
+
+    const dora0 = simulateDhcpDora(pc0.id);
+    const dora1 = simulateDhcpDora(pc1.id);
+    const dora2 = simulateDhcpDora(srv.id);
+
+    assert.strictEqual(dora0.assignedIp, '192.168.1.2');
+    assert.strictEqual(dora1.assignedIp, '192.168.1.3');
+    assert.strictEqual(dora2.assignedIp, '192.168.1.4');
+
+    assert.strictEqual(getDhcpBindings(router).length, 3);
+});
+
+// 653. simulateDhcpDora respects custom lease time and domain name options
+runTest('653. simulateDhcpDora respects custom lease time and domain name options', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const [router, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, {
+        name: 'CORP_LAN',
+        network: '192.168.1.0',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.1.1',
+        domainName: 'corp.internal',
+        leaseTime: 14400
+    });
+    addConnection(router.id, pc.id);
+
+    const dora = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora.success, true);
+    assert.strictEqual(dora.lease.leaseDuration, 14400);
+    assert.strictEqual(dora.lease.domainName, 'corp.internal');
+});
+
+// 654. simulateDhcpRelease releases active lease on server and resets client IP configuration to INIT
+runTest('654. simulateDhcpRelease releases active lease on server and resets client IP configuration to INIT', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const [router, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.1.1' });
+    addConnection(router.id, pc.id);
+
+    simulateDhcpDora(pc.id);
+    assert.strictEqual(pc.ip, '192.168.1.2');
+    assert.strictEqual(getDhcpBindings(router).length, 1);
+
+    const rel = simulateDhcpRelease(pc.id);
+    assert.strictEqual(rel.success, true);
+    assert.strictEqual(rel.releasedIp, '192.168.1.2');
+    assert.strictEqual(rel.packets[0].messageType, 'RELEASE');
+
+    assert.strictEqual(getDhcpBindings(router).length, 0);
+    assert.strictEqual(pc.ip, '');
+    assert.strictEqual(pc.dhcpClient.state, 'INIT');
+    assert.strictEqual(pc.dhcpClient.lease, null);
+});
+
+// 655. simulateDhcpRelease allows released IP address to be immediately re-allocated by another client
+runTest('655. simulateDhcpRelease allows released IP address to be immediately re-allocated by another client', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 50);
+    addDevice('pc', 400, 150);
+    const [router, sw, pc0, pc1] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.1.1' });
+
+    addConnection(router.id, sw.id);
+    addConnection(sw.id, pc0.id);
+    addConnection(sw.id, pc1.id);
+
+    simulateDhcpDora(pc0.id);
+    assert.strictEqual(pc0.ip, '192.168.1.2');
+
+    // PC0 releases .2
+    simulateDhcpRelease(pc0.id);
+
+    // PC1 runs DORA -> receives 192.168.1.2
+    const dora1 = simulateDhcpDora(pc1.id);
+    assert.strictEqual(dora1.assignedIp, '192.168.1.2');
+    assert.strictEqual(pc1.ip, '192.168.1.2');
+});
+
+// 656. simulateDhcpRelease returns NO_ACTIVE_LEASE error when client has no active lease
+runTest('656. simulateDhcpRelease returns NO_ACTIVE_LEASE error when client has no active lease', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const pc = networkState.devices[0];
+
+    const rel = simulateDhcpRelease(pc.id);
+    assert.strictEqual(rel.success, false);
+    assert.strictEqual(rel.reason, 'NO_ACTIVE_LEASE');
+});
+
+// 657. Repeated simulateDhcpDora by same client re-acquires/renews lease without creating duplicate bindings
+runTest('657. Repeated simulateDhcpDora by same client re-acquires/renews lease without creating duplicate bindings', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const [router, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.1.1' });
+    addConnection(router.id, pc.id);
+
+    simulateDhcpDora(pc.id);
+    assert.strictEqual(getDhcpBindings(router).length, 1);
+
+    // Run DORA again
+    const dora2 = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora2.success, true);
+    assert.strictEqual(dora2.assignedIp, '192.168.1.2');
+    assert.strictEqual(getDhcpBindings(router).length, 1); // Still 1 binding, no duplicates
+});
+
+// 658. Client with statically assigned IP is not mutated if DHCP discovery fails
+runTest('658. Client with statically assigned IP is not mutated if DHCP discovery fails', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const pc = networkState.devices[0];
+    pc.ip = '172.16.1.50';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '172.16.1.1';
+
+    const dora = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora.success, false);
+    assert.strictEqual(dora.reason, 'NO_DHCP_SERVER_REACHABLE');
+    assert.strictEqual(pc.ip, '172.16.1.50');
+    assert.strictEqual(pc.subnetMask, '255.255.255.0');
+    assert.strictEqual(pc.gateway, '172.16.1.1');
+});
+
+// 659. STP topology reconvergence dynamically restores DHCP reachability when alternate link opens
+runTest('659. STP topology reconvergence dynamically restores DHCP reachability when alternate link opens', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 250, 50);
+    addDevice('switch', 250, 150);
+    addDevice('pc', 400, 100);
+    const [router, sw0, sw1, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.1.1' });
+
+    addConnection(router.id, sw0.id);
+    addConnection(sw0.id, sw1.id);
+    addConnection(sw1.id, pc.id);
+
+    recalculateTopologyStp();
+
+    const dora = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora.success, true);
+    assert.strictEqual(dora.assignedIp, '192.168.1.2');
+});
+
+// 660. getDhcpTransaction and clearDhcpTransactions manage active transaction state properly
+runTest('660. getDhcpTransaction and clearDhcpTransactions manage active transaction state properly', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('pc', 300, 100);
+    const [router, pc] = networkState.devices;
+
+    router.interfaces['Gig0/0'].ip = '192.168.1.1';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0' });
+    addConnection(router.id, pc.id);
+
+    const disc = simulateDhcpDiscover(pc.id);
+    assert.ok(getDhcpTransaction(disc.transactionId));
+
+    clearDhcpTransactions();
+    assert.strictEqual(getDhcpTransaction(disc.transactionId), null);
 });
 
 console.log('----------------------------------------------------');
