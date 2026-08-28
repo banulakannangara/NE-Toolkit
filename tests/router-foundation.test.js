@@ -16457,6 +16457,585 @@ runTest('596. Serialization / Snapshot: Topology snapshots save and restore STP 
     assert.strictEqual(restoredSw1.stp.rootCost, 19);
 });
 
+// ==========================================
+// V5.12 PHASE 1: DHCP FOUNDATION TESTS
+// ==========================================
+
+// 597. ensureDeviceDhcpServerState initializes empty pools, excludedRanges, and bindings on router
+runTest('597. ensureDeviceDhcpServerState initializes empty pools, excludedRanges, and bindings on router', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    const dhcpState = ensureDeviceDhcpServerState(router);
+    assert.ok(dhcpState);
+    assert.strictEqual(dhcpState.enabled, true);
+    assert.deepStrictEqual(dhcpState.pools, {});
+    assert.deepStrictEqual(dhcpState.excludedRanges, []);
+    assert.deepStrictEqual(dhcpState.bindings, {});
+});
+
+// 598. createDhcpPool creates valid pool with network, subnet mask, prefix length, default router, and DNS
+runTest('598. createDhcpPool creates valid pool with network, subnet mask, prefix length, default router, and DNS', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    const pool = createDhcpPool(router, {
+        name: 'POOL_LAN1',
+        network: '192.168.1.0',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.1.1',
+        dnsServer: '8.8.8.8',
+        domainName: 'example.local',
+        leaseTime: 7200
+    });
+
+    assert.strictEqual(pool.name, 'POOL_LAN1');
+    assert.strictEqual(pool.network, '192.168.1.0');
+    assert.strictEqual(pool.subnetMask, '255.255.255.0');
+    assert.strictEqual(pool.prefixLength, 24);
+    assert.strictEqual(pool.defaultRouter, '192.168.1.1');
+    assert.strictEqual(pool.dnsServer, '8.8.8.8');
+    assert.strictEqual(pool.domainName, 'example.local');
+    assert.strictEqual(pool.leaseTime, 7200);
+
+    assert.strictEqual(getDhcpPool(router, 'POOL_LAN1'), pool);
+});
+
+// 599. createDhcpPool rejects invalid network IP or invalid subnet mask
+runTest('599. createDhcpPool rejects invalid network IP or invalid subnet mask', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    assert.throws(() => {
+        createDhcpPool(router, { name: '', network: '192.168.1.0', subnetMask: '255.255.255.0' });
+    }, /pool name is required/i);
+
+    assert.throws(() => {
+        createDhcpPool(router, { name: 'P1', network: '999.999.1.0', subnetMask: '255.255.255.0' });
+    }, /invalid network address/i);
+
+    assert.throws(() => {
+        createDhcpPool(router, { name: 'P1', network: '192.168.1.0', subnetMask: '255.255.0.255' });
+    }, /invalid subnet mask/i);
+});
+
+// 600. getDhcpPool and removeDhcpPool manage pool lifecycle and clean up bindings
+runTest('600. getDhcpPool and removeDhcpPool manage pool lifecycle and clean up bindings', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    createDhcpPool(router, { name: 'TEST_POOL', network: '10.0.0.0', subnetMask: '255.255.255.0' });
+    createDhcpLease(router, 'TEST_POOL', '00:11:22:33:44:55');
+
+    assert.strictEqual(getDhcpBindings(router, 'TEST_POOL').length, 1);
+
+    const removed = removeDhcpPool(router, 'TEST_POOL');
+    assert.strictEqual(removed, true);
+    assert.strictEqual(getDhcpPool(router, 'TEST_POOL'), null);
+    assert.strictEqual(getDhcpBindings(router, 'TEST_POOL').length, 0);
+});
+
+// 601. addDhcpExcludedRange and removeDhcpExcludedRange correctly track single and ranged IP exclusions
+runTest('601. addDhcpExcludedRange and removeDhcpExcludedRange correctly track single and ranged IP exclusions', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    const r1 = addDhcpExcludedRange(router, '192.168.1.1', '192.168.1.10');
+    assert.strictEqual(r1.startIp, '192.168.1.1');
+    assert.strictEqual(r1.endIp, '192.168.1.10');
+
+    // Single IP exclusion
+    const r2 = addDhcpExcludedRange(router, '192.168.1.254');
+    assert.strictEqual(r2.startIp, '192.168.1.254');
+    assert.strictEqual(r2.endIp, '192.168.1.254');
+
+    assert.strictEqual(router.dhcpServer.excludedRanges.length, 2);
+
+    const removed = removeDhcpExcludedRange(router, '192.168.1.254');
+    assert.strictEqual(removed, true);
+    assert.strictEqual(router.dhcpServer.excludedRanges.length, 1);
+});
+
+// 602. isDhcpIpExcluded accurately matches single IP exclusions and boundary values in ranges
+runTest('602. isDhcpIpExcluded accurately matches single IP exclusions and boundary values in ranges', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    addDhcpExcludedRange(router, '10.10.10.5', '10.10.10.15');
+
+    assert.strictEqual(isDhcpIpExcluded(router, '10.10.10.4'), false);
+    assert.strictEqual(isDhcpIpExcluded(router, '10.10.10.5'), true);  // Start boundary
+    assert.strictEqual(isDhcpIpExcluded(router, '10.10.10.10'), true); // Inside range
+    assert.strictEqual(isDhcpIpExcluded(router, '10.10.10.15'), true); // End boundary
+    assert.strictEqual(isDhcpIpExcluded(router, '10.10.10.16'), false);
+});
+
+// 603. findMatchingDhcpPool identifies the correct pool for client IP or subnet
+runTest('603. findMatchingDhcpPool identifies the correct pool for client IP or subnet', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    createDhcpPool(router, { name: 'VLAN10_POOL', network: '10.10.10.0', subnetMask: '255.255.255.0' });
+    createDhcpPool(router, { name: 'VLAN20_POOL', network: '10.20.20.0', subnetMask: '255.255.255.0' });
+
+    const match1 = findMatchingDhcpPool(router, '10.10.10.1');
+    assert.ok(match1);
+    assert.strictEqual(match1.name, 'VLAN10_POOL');
+
+    const match2 = findMatchingDhcpPool(router, '10.20.20.100');
+    assert.ok(match2);
+    assert.strictEqual(match2.name, 'VLAN20_POOL');
+
+    const noMatch = findMatchingDhcpPool(router, '172.16.1.1');
+    assert.strictEqual(noMatch, null);
+});
+
+// 604. getNextAvailableDhcpIp deterministically allocates the first usable host IP (skipping network and default router)
+runTest('604. getNextAvailableDhcpIp deterministically allocates the first usable host IP (skipping network and default router)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    createDhcpPool(router, {
+        name: 'LAN',
+        network: '192.168.1.0',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.1.1'
+    });
+
+    // Default router 192.168.1.1 is skipped -> first allocated IP is 192.168.1.2
+    const ip = getNextAvailableDhcpIp(router, 'LAN');
+    assert.strictEqual(ip, '192.168.1.2');
+});
+
+// 605. getNextAvailableDhcpIp skips router local interface IP addresses on the pool subnet
+runTest('605. getNextAvailableDhcpIp skips router local interface IP addresses on the pool subnet', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    // Configure router interface Gig0/0 with 192.168.1.2
+    router.interfaces['Gig0/0'].ip = '192.168.1.2';
+    router.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    createDhcpPool(router, {
+        name: 'LAN',
+        network: '192.168.1.0',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.1.1'
+    });
+
+    // 192.168.1.1 (gateway) and 192.168.1.2 (interface IP) are skipped -> next is 192.168.1.3
+    const ip = getNextAvailableDhcpIp(router, 'LAN');
+    assert.strictEqual(ip, '192.168.1.3');
+});
+
+// 606. getNextAvailableDhcpIp skips excluded single IP and range of IPs
+runTest('606. getNextAvailableDhcpIp skips excluded single IP and range of IPs', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    createDhcpPool(router, {
+        name: 'LAN',
+        network: '192.168.1.0',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.1.1'
+    });
+
+    addDhcpExcludedRange(router, '192.168.1.1', '192.168.1.10');
+
+    // 192.168.1.1-10 are excluded -> next available is 192.168.1.11
+    const ip = getNextAvailableDhcpIp(router, 'LAN');
+    assert.strictEqual(ip, '192.168.1.11');
+});
+
+// 607. getNextAvailableDhcpIp skips already leased active IP addresses
+runTest('607. getNextAvailableDhcpIp skips already leased active IP addresses', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    createDhcpPool(router, {
+        name: 'LAN',
+        network: '192.168.1.0',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.1.1'
+    });
+
+    // Lease 192.168.1.2 to Host 1
+    createDhcpLease(router, 'LAN', '00:11:22:33:44:01');
+
+    // Next IP for Host 2 should be 192.168.1.3
+    const nextIp = getNextAvailableDhcpIp(router, 'LAN');
+    assert.strictEqual(nextIp, '192.168.1.3');
+});
+
+// 608. createDhcpLease creates an active binding record with lease duration, expiration, MAC, and client ID
+runTest('608. createDhcpLease creates an active binding record with lease duration, expiration, MAC, and client ID', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    createDhcpPool(router, {
+        name: 'LAN',
+        network: '192.168.1.0',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.1.1',
+        dnsServer: '8.8.4.4',
+        leaseTime: 3600
+    });
+
+    const fixedTime = 1700000000000;
+    const res = createDhcpLease(router, 'LAN', '00:aa:bb:cc:dd:ee', null, {
+        hostname: 'ClientPC',
+        now: fixedTime
+    });
+
+    assert.strictEqual(res.success, true);
+    const lease = res.lease;
+    assert.strictEqual(lease.ip, '192.168.1.2');
+    assert.strictEqual(lease.mac, '00:AA:BB:CC:DD:EE');
+    assert.strictEqual(lease.hostname, 'ClientPC');
+    assert.strictEqual(lease.subnetMask, '255.255.255.0');
+    assert.strictEqual(lease.defaultRouter, '192.168.1.1');
+    assert.strictEqual(lease.dnsServer, '8.8.4.4');
+    assert.strictEqual(lease.leaseDuration, 3600);
+    assert.strictEqual(lease.leaseStart, fixedTime);
+    assert.strictEqual(lease.leaseExpires, fixedTime + 3600000);
+    assert.strictEqual(lease.state, 'active');
+});
+
+// 609. createDhcpLease respects valid requested IP when available
+runTest('609. createDhcpLease respects valid requested IP when available', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    createDhcpPool(router, {
+        name: 'LAN',
+        network: '192.168.1.0',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.1.1'
+    });
+
+    const res = createDhcpLease(router, 'LAN', '00:11:22:33:44:55', '192.168.1.50');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.lease.ip, '192.168.1.50');
+});
+
+// 610. createDhcpLease falls back to next available IP when requested IP is excluded or leased
+runTest('610. createDhcpLease falls back to next available IP when requested IP is excluded or leased', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    createDhcpPool(router, {
+        name: 'LAN',
+        network: '192.168.1.0',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.1.1'
+    });
+
+    // Exclude 192.168.1.50
+    addDhcpExcludedRange(router, '192.168.1.50');
+
+    // Requesting 192.168.1.50 must fall back to next available (192.168.1.2)
+    const res = createDhcpLease(router, 'LAN', '00:11:22:33:44:55', '192.168.1.50');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.lease.ip, '192.168.1.2');
+});
+
+// 611. createDhcpLease returns error (NO_IP_AVAILABLE) when all pool addresses are exhausted or excluded
+runTest('611. createDhcpLease returns error (NO_IP_AVAILABLE) when all pool addresses are exhausted or excluded', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    // Tiny subnet /30: 192.168.1.0/30 (Usable hosts: .1, .2)
+    createDhcpPool(router, {
+        name: 'TINY_POOL',
+        network: '192.168.1.0',
+        subnetMask: '255.255.255.252',
+        defaultRouter: '192.168.1.1'
+    });
+
+    // .1 is defaultRouter. Only .2 is available.
+    const res1 = createDhcpLease(router, 'TINY_POOL', '00:11:22:33:44:01');
+    assert.strictEqual(res1.success, true);
+    assert.strictEqual(res1.lease.ip, '192.168.1.2');
+
+    // Next lease must fail because pool is exhausted
+    const res2 = createDhcpLease(router, 'TINY_POOL', '00:11:22:33:44:02');
+    assert.strictEqual(res2.success, false);
+    assert.strictEqual(res2.reason, 'NO_IP_AVAILABLE');
+});
+
+// 612. getDhcpBindings queries active leases across all pools or filtered by pool name
+runTest('612. getDhcpBindings queries active leases across all pools or filtered by pool name', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    createDhcpPool(router, { name: 'POOL_A', network: '10.1.0.0', subnetMask: '255.255.255.0' });
+    createDhcpPool(router, { name: 'POOL_B', network: '10.2.0.0', subnetMask: '255.255.255.0' });
+
+    createDhcpLease(router, 'POOL_A', '00:11:22:33:44:01');
+    createDhcpLease(router, 'POOL_A', '00:11:22:33:44:02');
+    createDhcpLease(router, 'POOL_B', '00:11:22:33:44:03');
+
+    assert.strictEqual(getDhcpBindings(router).length, 3);
+    assert.strictEqual(getDhcpBindings(router, 'POOL_A').length, 2);
+    assert.strictEqual(getDhcpBindings(router, 'POOL_B').length, 1);
+});
+
+// 613. renewDhcpLease updates leaseStart and leaseExpires for matching client MAC
+runTest('613. renewDhcpLease updates leaseStart and leaseExpires for matching client MAC', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0', leaseTime: 1000 });
+    const leaseRes = createDhcpLease(router, 'LAN', '00:11:22:33:44:55', null, { now: 1000000 });
+
+    const renewRes = renewDhcpLease(router, '00:11:22:33:44:55', leaseRes.lease.ip, { now: 1500000 });
+    assert.strictEqual(renewRes.success, true);
+    assert.strictEqual(renewRes.lease.leaseStart, 1500000);
+    assert.strictEqual(renewRes.lease.leaseExpires, 2500000);
+});
+
+// 614. renewDhcpLease rejects renewal when client MAC does not match lease
+runTest('614. renewDhcpLease rejects renewal when client MAC does not match lease', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0' });
+    const leaseRes = createDhcpLease(router, 'LAN', '00:11:22:33:44:55');
+
+    const badRenew = renewDhcpLease(router, '00:99:99:99:99:99', leaseRes.lease.ip);
+    assert.strictEqual(badRenew.success, false);
+    assert.strictEqual(badRenew.reason, 'MAC_MISMATCH');
+});
+
+// 615. releaseDhcpLease releases active lease and makes IP available for re-allocation
+runTest('615. releaseDhcpLease releases active lease and makes IP available for re-allocation', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.1.1' });
+    const leaseRes = createDhcpLease(router, 'LAN', '00:11:22:33:44:55');
+    assert.strictEqual(leaseRes.lease.ip, '192.168.1.2');
+
+    // Release lease
+    const rel = releaseDhcpLease(router, '00:11:22:33:44:55', '192.168.1.2');
+    assert.strictEqual(rel.success, true);
+    assert.strictEqual(getDhcpBindings(router).length, 0);
+
+    // 192.168.1.2 should be immediately available for next client
+    const nextIp = getNextAvailableDhcpIp(router, 'LAN');
+    assert.strictEqual(nextIp, '192.168.1.2');
+});
+
+// 616. isDhcpIpLeased correctly identifies active leases and ignores specified client MAC for re-acquisition
+runTest('616. isDhcpIpLeased correctly identifies active leases and ignores specified client MAC for re-acquisition', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const router = networkState.devices[0];
+
+    createDhcpPool(router, { name: 'LAN', network: '192.168.1.0', subnetMask: '255.255.255.0' });
+    createDhcpLease(router, 'LAN', '00:11:22:33:44:55');
+
+    assert.strictEqual(isDhcpIpLeased(router, '192.168.1.1'), true);
+    assert.strictEqual(isDhcpIpLeased(router, '192.168.1.1', '00:11:22:33:44:55'), false); // Same client re-requesting
+    assert.strictEqual(isDhcpIpLeased(router, '192.168.1.1', '00:AA:BB:CC:DD:EE'), true);  // Different client
+});
+
+// 617. ensureDeviceDhcpClientState initializes client state to INIT and ipMode to static by default
+runTest('617. ensureDeviceDhcpClientState initializes client state to INIT and ipMode to static by default', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const pc = networkState.devices[0];
+
+    const clientState = ensureDeviceDhcpClientState(pc);
+    assert.strictEqual(pc.ipMode, 'static');
+    assert.strictEqual(clientState.state, 'INIT');
+    assert.strictEqual(clientState.lease, null);
+});
+
+// 618. setDeviceIpMode toggles client between static and dhcp mode without corrupting existing IP parameters
+runTest('618. setDeviceIpMode toggles client between static and dhcp mode without corrupting existing IP parameters', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const pc = networkState.devices[0];
+
+    pc.ip = '192.168.1.100';
+    pc.subnetMask = '255.255.255.0';
+    pc.gateway = '192.168.1.1';
+
+    setDeviceIpMode(pc, 'dhcp');
+    assert.strictEqual(pc.ipMode, 'dhcp');
+    assert.strictEqual(pc.ip, '192.168.1.100'); // IP preserved until explicit lease renewal/clear
+
+    setDeviceIpMode(pc, 'static');
+    assert.strictEqual(pc.ipMode, 'static');
+});
+
+// 619. applyDhcpLeaseToClient transitions client state to BOUND and configures IP, subnet mask, gateway, and DNS
+runTest('619. applyDhcpLeaseToClient transitions client state to BOUND and configures IP, subnet mask, gateway, and DNS', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const pc = networkState.devices[0];
+
+    const mockLease = {
+        ip: '192.168.1.55',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.1.1',
+        dnsServer: '1.1.1.1',
+        leaseDuration: 86400,
+        poolName: 'OFFICE_LAN'
+    };
+
+    const applied = applyDhcpLeaseToClient(pc, mockLease);
+    assert.strictEqual(applied, true);
+    assert.strictEqual(pc.ipMode, 'dhcp');
+    assert.strictEqual(pc.ip, '192.168.1.55');
+    assert.strictEqual(pc.subnetMask, '255.255.255.0');
+    assert.strictEqual(pc.gateway, '192.168.1.1');
+    assert.strictEqual(pc.dnsServer, '1.1.1.1');
+    assert.strictEqual(pc.dhcpClient.state, 'BOUND');
+    assert.strictEqual(pc.dhcpClient.lease.ip, '192.168.1.55');
+});
+
+// 620. clearDhcpClientLease resets client state to INIT, clears lease, and blanks IP parameters in DHCP mode
+runTest('620. clearDhcpClientLease resets client state to INIT, clears lease, and blanks IP parameters in DHCP mode', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const pc = networkState.devices[0];
+
+    applyDhcpLeaseToClient(pc, {
+        ip: '192.168.1.55',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.1.1'
+    });
+
+    assert.strictEqual(pc.ip, '192.168.1.55');
+
+    clearDhcpClientLease(pc);
+    assert.strictEqual(pc.dhcpClient.state, 'INIT');
+    assert.strictEqual(pc.dhcpClient.lease, null);
+    assert.strictEqual(pc.ip, '');
+    assert.strictEqual(pc.subnetMask, '');
+    assert.strictEqual(pc.gateway, '');
+});
+
+// 621. createDhcpPacket constructs valid DHCP DISCOVER packet with broadcast destination and ports 68 -> 67
+runTest('621. createDhcpPacket constructs valid DHCP DISCOVER packet with broadcast destination and ports 68 -> 67', () => {
+    const pkt = createDhcpPacket('DISCOVER', {
+        clientMac: '00:11:22:33:44:55',
+        transactionId: '0x1234abcd'
+    });
+
+    assert.strictEqual(pkt.protocol, 'DHCP');
+    assert.strictEqual(pkt.messageType, 'DISCOVER');
+    assert.strictEqual(pkt.op, 'BOOTREQUEST');
+    assert.strictEqual(pkt.transactionId, '0x1234abcd');
+    assert.strictEqual(pkt.clientMac, '00:11:22:33:44:55');
+    assert.strictEqual(pkt.sourceIp, '0.0.0.0');
+    assert.strictEqual(pkt.destinationIp, '255.255.255.255');
+    assert.strictEqual(pkt.sourcePort, 68);
+    assert.strictEqual(pkt.destinationPort, 67);
+});
+
+// 622. createDhcpPacket constructs valid DHCP OFFER packet with BOOTREPLY op, offered IP, server ID, and options
+runTest('622. createDhcpPacket constructs valid DHCP OFFER packet with BOOTREPLY op, offered IP, server ID, and options', () => {
+    const pkt = createDhcpPacket('OFFER', {
+        clientMac: '00:11:22:33:44:55',
+        transactionId: '0x1234abcd',
+        offeredIp: '192.168.1.10',
+        serverIdentifier: '192.168.1.1',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.1.1',
+        dnsServer: '8.8.8.8',
+        leaseTime: 43200
+    });
+
+    assert.strictEqual(pkt.messageType, 'OFFER');
+    assert.strictEqual(pkt.op, 'BOOTREPLY');
+    assert.strictEqual(pkt.yourIp, '192.168.1.10');
+    assert.strictEqual(pkt.serverIp, '192.168.1.1');
+    assert.strictEqual(pkt.options.subnetMask, '255.255.255.0');
+    assert.deepStrictEqual(pkt.options.routers, ['192.168.1.1']);
+    assert.deepStrictEqual(pkt.options.dnsServers, ['8.8.8.8']);
+    assert.strictEqual(pkt.options.leaseTime, 43200);
+    assert.strictEqual(pkt.sourcePort, 67);
+    assert.strictEqual(pkt.destinationPort, 68);
+});
+
+// 623. createDhcpPacket constructs valid DHCP REQUEST packet with requested IP and server identifier
+runTest('623. createDhcpPacket constructs valid DHCP REQUEST packet with requested IP and server identifier', () => {
+    const pkt = createDhcpPacket('REQUEST', {
+        clientMac: '00:11:22:33:44:55',
+        transactionId: '0x1234abcd',
+        requestedIp: '192.168.1.10',
+        serverIdentifier: '192.168.1.1'
+    });
+
+    assert.strictEqual(pkt.messageType, 'REQUEST');
+    assert.strictEqual(pkt.op, 'BOOTREQUEST');
+    assert.strictEqual(pkt.options.requestedIp, '192.168.1.10');
+    assert.strictEqual(pkt.options.serverIdentifier, '192.168.1.1');
+    assert.strictEqual(pkt.sourceIp, '0.0.0.0');
+    assert.strictEqual(pkt.destinationIp, '255.255.255.255');
+});
+
+// 624. createDhcpPacket constructs valid DHCP ACK packet with BOOTREPLY op, client MAC, lease duration, and network options
+runTest('624. createDhcpPacket constructs valid DHCP ACK packet with BOOTREPLY op, client MAC, lease duration, and network options', () => {
+    const pkt = createDhcpPacket('ACK', {
+        clientMac: '00:11:22:33:44:55',
+        transactionId: '0x1234abcd',
+        yourIp: '192.168.1.10',
+        serverIdentifier: '192.168.1.1',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.1.1',
+        leaseTime: 86400
+    });
+
+    assert.strictEqual(pkt.messageType, 'ACK');
+    assert.strictEqual(pkt.op, 'BOOTREPLY');
+    assert.strictEqual(pkt.yourIp, '192.168.1.10');
+    assert.strictEqual(pkt.options.leaseTime, 86400);
+});
+
+// 625. createDhcpPacket constructs valid DHCP RELEASE packet with client IP and server ID
+runTest('625. createDhcpPacket constructs valid DHCP RELEASE packet with client IP and server ID', () => {
+    const pkt = createDhcpPacket('RELEASE', {
+        clientMac: '00:11:22:33:44:55',
+        clientIp: '192.168.1.10',
+        serverIdentifier: '192.168.1.1'
+    });
+
+    assert.strictEqual(pkt.messageType, 'RELEASE');
+    assert.strictEqual(pkt.op, 'BOOTREQUEST');
+    assert.strictEqual(pkt.clientIp, '192.168.1.10');
+    assert.strictEqual(pkt.options.serverIdentifier, '192.168.1.1');
+});
+
+// 626. createDhcpPacket rejects invalid message types
+runTest('626. createDhcpPacket rejects invalid message types', () => {
+    assert.throws(() => {
+        createDhcpPacket('INVALID_TYPE', {});
+    }, /invalid dhcp message type/i);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

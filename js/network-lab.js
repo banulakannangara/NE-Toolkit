@@ -14438,4 +14438,619 @@ function bindTerminalEvents() {
     }
 }
 
+// ==========================================
+// V5.12 PHASE 1: DHCP FOUNDATION MODULE
+// ==========================================
+
+const DEFAULT_DHCP_LEASE_SECONDS = 86400; // 1 day
+const DEFAULT_DHCP_SERVER_PORT = 67;
+const DEFAULT_DHCP_CLIENT_PORT = 68;
+
+const DHCP_MESSAGE_TYPES = Object.freeze({
+    DISCOVER: 'DISCOVER',
+    OFFER: 'OFFER',
+    REQUEST: 'REQUEST',
+    ACK: 'ACK',
+    NAK: 'NAK',
+    RELEASE: 'RELEASE',
+    DECLINE: 'DECLINE',
+    INFORM: 'INFORM'
+});
+
+/**
+ * Ensures a Layer-3 device (router or multilayer switch) has a valid DHCP server data structure.
+ */
+function ensureDeviceDhcpServerState(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return null;
+
+    if (!dev.dhcpServer || typeof dev.dhcpServer !== 'object') {
+        dev.dhcpServer = {
+            enabled: true,
+            pools: {},
+            excludedRanges: [],
+            bindings: {}
+        };
+    }
+    if (!dev.dhcpServer.pools || typeof dev.dhcpServer.pools !== 'object') {
+        dev.dhcpServer.pools = {};
+    }
+    if (!Array.isArray(dev.dhcpServer.excludedRanges)) {
+        dev.dhcpServer.excludedRanges = [];
+    }
+    if (!dev.dhcpServer.bindings || typeof dev.dhcpServer.bindings !== 'object') {
+        dev.dhcpServer.bindings = {};
+    }
+
+    return dev.dhcpServer;
+}
+
+/**
+ * Ensures an endpoint (PC, Laptop, Server) has valid DHCP client data structures.
+ */
+function ensureDeviceDhcpClientState(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return null;
+
+    if (!dev.ipMode) {
+        dev.ipMode = 'static';
+    }
+    if (!dev.dhcpClient || typeof dev.dhcpClient !== 'object') {
+        dev.dhcpClient = {
+            state: 'INIT', // 'INIT', 'SELECTING', 'REQUESTING', 'BOUND', 'RENEWING', 'REBINDING'
+            lease: null,
+            transactionId: null,
+            lastOffer: null,
+            lastServerId: null
+        };
+    }
+
+    return dev.dhcpClient;
+}
+
+/**
+ * Creates or updates a DHCP pool on a DHCP server device.
+ */
+function createDhcpPool(deviceOrId, poolConfig) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) throw new Error('Device not found.');
+
+    ensureDeviceDhcpServerState(dev);
+
+    if (!poolConfig || typeof poolConfig !== 'object') {
+        throw new Error('Invalid DHCP pool configuration.');
+    }
+
+    const name = String(poolConfig.name || '').trim();
+    if (!name) {
+        throw new Error('DHCP pool name is required.');
+    }
+
+    const network = String(poolConfig.network || '').trim();
+    if (!isValidIPv4(network)) {
+        throw new Error(`Invalid network address "${network}".`);
+    }
+
+    const rawMask = String(poolConfig.subnetMask || '').trim();
+    const subnetMask = normalizeSubnetMask(rawMask);
+    if (!subnetMask) {
+        throw new Error(`Invalid subnet mask "${rawMask}".`);
+    }
+
+    const calculatedNet = calculateNetworkAddress(network, subnetMask);
+    const defaultRouter = poolConfig.defaultRouter ? String(poolConfig.defaultRouter).trim() : '';
+    if (defaultRouter && !isValidIPv4(defaultRouter)) {
+        throw new Error(`Invalid default router IP "${defaultRouter}".`);
+    }
+
+    const dnsServer = poolConfig.dnsServer ? String(poolConfig.dnsServer).trim() : '';
+    if (dnsServer && !isValidIPv4(dnsServer)) {
+        throw new Error(`Invalid DNS server IP "${dnsServer}".`);
+    }
+
+    const leaseTime = typeof poolConfig.leaseTime === 'number' && poolConfig.leaseTime > 0
+        ? poolConfig.leaseTime
+        : DEFAULT_DHCP_LEASE_SECONDS;
+
+    const pool = {
+        name,
+        network: calculatedNet || network,
+        subnetMask,
+        prefixLength: getPrefixLengthFromMask(subnetMask),
+        defaultRouter,
+        dnsServer,
+        domainName: poolConfig.domainName ? String(poolConfig.domainName).trim() : '',
+        leaseTime
+    };
+
+    dev.dhcpServer.pools[name] = pool;
+    return pool;
+}
+
+/**
+ * Retrieves a DHCP pool by name.
+ */
+function getDhcpPool(deviceOrId, poolName) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return null;
+    ensureDeviceDhcpServerState(dev);
+    const name = String(poolName || '').trim();
+    return dev.dhcpServer.pools[name] || null;
+}
+
+/**
+ * Removes a DHCP pool and releases any active leases from that pool.
+ */
+function removeDhcpPool(deviceOrId, poolName) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return false;
+    ensureDeviceDhcpServerState(dev);
+    const name = String(poolName || '').trim();
+    if (!dev.dhcpServer.pools[name]) return false;
+
+    delete dev.dhcpServer.pools[name];
+
+    // Clean up active bindings for this pool
+    for (const [ip, binding] of Object.entries(dev.dhcpServer.bindings)) {
+        if (binding && binding.poolName === name) {
+            delete dev.dhcpServer.bindings[ip];
+        }
+    }
+
+    return true;
+}
+
+/**
+ * Adds an excluded IP address or range of IP addresses to the DHCP server.
+ */
+function addDhcpExcludedRange(deviceOrId, startIp, endIp = null) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) throw new Error('Device not found.');
+    ensureDeviceDhcpServerState(dev);
+
+    const start = String(startIp || '').trim();
+    if (!isValidIPv4(start)) {
+        throw new Error(`Invalid start IP address "${start}".`);
+    }
+
+    const end = endIp ? String(endIp).trim() : start;
+    if (!isValidIPv4(end)) {
+        throw new Error(`Invalid end IP address "${end}".`);
+    }
+
+    const startInt = ipv4ToInteger(start);
+    const endInt = ipv4ToInteger(end);
+    const minInt = Math.min(startInt, endInt);
+    const maxInt = Math.max(startInt, endInt);
+
+    const rangeObj = {
+        startIp: integerToIPv4(minInt),
+        endIp: integerToIPv4(maxInt),
+        startInt: minInt,
+        endInt: maxInt
+    };
+
+    // Avoid duplicate range entries
+    const exists = dev.dhcpServer.excludedRanges.some(r => r.startInt === minInt && r.endInt === maxInt);
+    if (!exists) {
+        dev.dhcpServer.excludedRanges.push(rangeObj);
+    }
+
+    return rangeObj;
+}
+
+/**
+ * Removes an excluded IP address or range from the DHCP server.
+ */
+function removeDhcpExcludedRange(deviceOrId, startIp, endIp = null) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return false;
+    ensureDeviceDhcpServerState(dev);
+
+    const start = String(startIp || '').trim();
+    const end = endIp ? String(endIp).trim() : start;
+    if (!isValidIPv4(start) || !isValidIPv4(end)) return false;
+
+    const startInt = Math.min(ipv4ToInteger(start), ipv4ToInteger(end));
+    const endInt = Math.max(ipv4ToInteger(start), ipv4ToInteger(end));
+
+    const initialLen = dev.dhcpServer.excludedRanges.length;
+    dev.dhcpServer.excludedRanges = dev.dhcpServer.excludedRanges.filter(
+        r => !(r.startInt === startInt && r.endInt === endInt)
+    );
+
+    return dev.dhcpServer.excludedRanges.length < initialLen;
+}
+
+/**
+ * Checks whether an IP address is within any configured excluded range on the DHCP server.
+ */
+function isDhcpIpExcluded(deviceOrId, ip) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return false;
+    ensureDeviceDhcpServerState(dev);
+
+    const rawIp = String(ip || '').trim();
+    if (!isValidIPv4(rawIp)) return false;
+    const ipInt = ipv4ToInteger(rawIp);
+
+    return dev.dhcpServer.excludedRanges.some(r => ipInt >= r.startInt && ipInt <= r.endInt);
+}
+
+/**
+ * Checks whether an IP address is currently leased to an active client (ignoring a specific MAC if provided).
+ */
+function isDhcpIpLeased(deviceOrId, ip, clientMacToIgnore = null) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return false;
+    ensureDeviceDhcpServerState(dev);
+
+    const rawIp = String(ip || '').trim();
+    const binding = dev.dhcpServer.bindings[rawIp];
+    if (!binding || binding.state !== 'active') {
+        return false;
+    }
+
+    if (clientMacToIgnore) {
+        const normIgnore = normalizeMacAddress(clientMacToIgnore);
+        if (normIgnore && binding.mac === normIgnore) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
+ * Finds a matching DHCP pool for a given client IP, subnet, or router interface IP.
+ */
+function findMatchingDhcpPool(deviceOrId, ipOrSubnet) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return null;
+    ensureDeviceDhcpServerState(dev);
+
+    const raw = String(ipOrSubnet || '').trim();
+    if (!isValidIPv4(raw)) return null;
+
+    for (const pool of Object.values(dev.dhcpServer.pools)) {
+        if (!pool || !pool.subnetMask) continue;
+        const net = calculateNetworkAddress(raw, pool.subnetMask);
+        if (net === pool.network) {
+            return pool;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Deterministically allocates the next available IP address from a DHCP pool.
+ * Scans sequentially from the first host address (network + 1) to (broadcast - 1).
+ * Skips:
+ * 1. Network Address and Broadcast Address
+ * 2. Default Router IP configured on the pool
+ * 3. Router local interface IP addresses matching the subnet
+ * 4. Excluded IP ranges
+ * 5. Already actively leased IP addresses
+ */
+function getNextAvailableDhcpIp(deviceOrId, poolName, clientMacToIgnore = null) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return null;
+    ensureDeviceDhcpServerState(dev);
+
+    const pool = getDhcpPool(dev, poolName);
+    if (!pool || !pool.network || !pool.subnetMask) return null;
+
+    const netInt = ipv4ToInteger(pool.network);
+    const maskInt = ipv4ToInteger(pool.subnetMask);
+    const broadcastInt = (netInt | (~maskInt >>> 0)) >>> 0;
+
+    // Collect reserved local interface IPs on the server
+    const localServerIps = new Set();
+    if (pool.defaultRouter) {
+        localServerIps.add(pool.defaultRouter);
+    }
+    if (dev.interfaces) {
+        for (const iface of Object.values(dev.interfaces)) {
+            if (iface && iface.ip && calculateNetworkAddress(iface.ip, pool.subnetMask) === pool.network) {
+                localServerIps.add(iface.ip);
+            }
+        }
+    }
+    if (dev.svis) {
+        for (const svi of Object.values(dev.svis)) {
+            if (svi && svi.ip && calculateNetworkAddress(svi.ip, pool.subnetMask) === pool.network) {
+                localServerIps.add(svi.ip);
+            }
+        }
+    }
+
+    const firstHostInt = netInt + 1;
+    const lastHostInt = broadcastInt - 1;
+
+    for (let ipInt = firstHostInt; ipInt <= lastHostInt; ipInt++) {
+        const ipStr = integerToIPv4(ipInt);
+
+        // Skip router/gateway interfaces
+        if (localServerIps.has(ipStr)) continue;
+
+        // Skip excluded ranges
+        if (isDhcpIpExcluded(dev, ipStr)) continue;
+
+        // Skip active leases
+        if (isDhcpIpLeased(dev, ipStr, clientMacToIgnore)) continue;
+
+        return ipStr;
+    }
+
+    return null;
+}
+
+/**
+ * Creates an active DHCP lease/binding on the server.
+ */
+function createDhcpLease(deviceOrId, poolName, clientMac, requestedIp = null, options = {}) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) throw new Error('Device not found.');
+    ensureDeviceDhcpServerState(dev);
+
+    const pool = getDhcpPool(dev, poolName);
+    if (!pool) {
+        return { success: false, reason: 'POOL_NOT_FOUND' };
+    }
+
+    const normMac = normalizeMacAddress(clientMac);
+    if (!normMac) {
+        return { success: false, reason: 'INVALID_CLIENT_MAC' };
+    }
+
+    let allocatedIp = null;
+
+    // If a specific requested IP is provided and valid, verify if it's usable
+    if (requestedIp && isValidIPv4(requestedIp)) {
+        const reqStr = String(requestedIp).trim();
+        const reqNet = calculateNetworkAddress(reqStr, pool.subnetMask);
+        if (reqNet === pool.network
+            && !isDhcpIpExcluded(dev, reqStr)
+            && !isDhcpIpLeased(dev, reqStr, normMac)
+            && reqStr !== pool.defaultRouter) {
+            allocatedIp = reqStr;
+        }
+    }
+
+    // Otherwise allocate the next available IP
+    if (!allocatedIp) {
+        allocatedIp = getNextAvailableDhcpIp(dev, pool.name, normMac);
+    }
+
+    if (!allocatedIp) {
+        return { success: false, reason: 'NO_IP_AVAILABLE' };
+    }
+
+    // Clean up any other active lease for this MAC in the same pool
+    for (const [ip, b] of Object.entries(dev.dhcpServer.bindings)) {
+        if (b && b.mac === normMac && b.poolName === pool.name && ip !== allocatedIp) {
+            delete dev.dhcpServer.bindings[ip];
+        }
+    }
+
+    const now = typeof options.now === 'number' ? options.now : Date.now();
+    const leaseDuration = typeof options.leaseDuration === 'number' && options.leaseDuration > 0
+        ? options.leaseDuration
+        : pool.leaseTime;
+
+    const lease = {
+        ip: allocatedIp,
+        mac: normMac,
+        clientId: options.clientId || normMac,
+        hostname: options.hostname ? String(options.hostname).trim() : '',
+        poolName: pool.name,
+        subnetMask: pool.subnetMask,
+        defaultRouter: pool.defaultRouter || '',
+        dnsServer: pool.dnsServer || '',
+        domainName: pool.domainName || '',
+        leaseDuration,
+        leaseStart: now,
+        leaseExpires: now + (leaseDuration * 1000),
+        state: 'active',
+        type: options.type || 'dynamic'
+    };
+
+    dev.dhcpServer.bindings[allocatedIp] = lease;
+
+    return {
+        success: true,
+        lease
+    };
+}
+
+/**
+ * Renews an existing active DHCP lease on the server.
+ */
+function renewDhcpLease(deviceOrId, clientMac, ip, options = {}) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return { success: false, reason: 'DEVICE_NOT_FOUND' };
+    ensureDeviceDhcpServerState(dev);
+
+    const normMac = normalizeMacAddress(clientMac);
+    const rawIp = String(ip || '').trim();
+    const binding = dev.dhcpServer.bindings[rawIp];
+
+    if (!binding) {
+        return { success: false, reason: 'LEASE_NOT_FOUND' };
+    }
+
+    if (binding.mac !== normMac) {
+        return { success: false, reason: 'MAC_MISMATCH' };
+    }
+
+    const now = typeof options.now === 'number' ? options.now : Date.now();
+    const leaseDuration = typeof options.leaseDuration === 'number' && options.leaseDuration > 0
+        ? options.leaseDuration
+        : binding.leaseDuration;
+
+    binding.leaseStart = now;
+    binding.leaseDuration = leaseDuration;
+    binding.leaseExpires = now + (leaseDuration * 1000);
+    binding.state = 'active';
+
+    return {
+        success: true,
+        lease: binding
+    };
+}
+
+/**
+ * Releases an active DHCP lease on the server.
+ */
+function releaseDhcpLease(deviceOrId, clientMac, ip) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return { success: false, reason: 'DEVICE_NOT_FOUND' };
+    ensureDeviceDhcpServerState(dev);
+
+    const normMac = normalizeMacAddress(clientMac);
+    const rawIp = String(ip || '').trim();
+    const binding = dev.dhcpServer.bindings[rawIp];
+
+    if (!binding) {
+        return { success: false, reason: 'LEASE_NOT_FOUND' };
+    }
+
+    if (binding.mac !== normMac) {
+        return { success: false, reason: 'MAC_MISMATCH' };
+    }
+
+    delete dev.dhcpServer.bindings[rawIp];
+
+    return {
+        success: true,
+        releasedIp: rawIp
+    };
+}
+
+/**
+ * Returns a list of active DHCP bindings/leases.
+ */
+function getDhcpBindings(deviceOrId, poolName = null) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return [];
+    ensureDeviceDhcpServerState(dev);
+
+    const filterPool = poolName ? String(poolName).trim() : null;
+    return Object.values(dev.dhcpServer.bindings).filter(b => {
+        if (!b || b.state !== 'active') return false;
+        if (filterPool && b.poolName !== filterPool) return false;
+        return true;
+    });
+}
+
+/**
+ * Sets the IP configuration mode of an endpoint ('static' or 'dhcp').
+ */
+function setDeviceIpMode(deviceOrId, mode) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) throw new Error('Device not found.');
+
+    ensureDeviceDhcpClientState(dev);
+    const normalizedMode = String(mode).toLowerCase().trim();
+
+    if (normalizedMode !== 'static' && normalizedMode !== 'dhcp') {
+        throw new Error('IP mode must be either "static" or "dhcp".');
+    }
+
+    dev.ipMode = normalizedMode;
+    return dev.ipMode;
+}
+
+/**
+ * Applies an acquired DHCP lease to an endpoint client's runtime IP configuration.
+ */
+function applyDhcpLeaseToClient(deviceOrId, lease) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return false;
+
+    ensureDeviceDhcpClientState(dev);
+    if (!lease || typeof lease !== 'object') return false;
+
+    dev.ipMode = 'dhcp';
+    dev.ip = lease.ip || '';
+    dev.subnetMask = lease.subnetMask || '';
+    dev.gateway = lease.defaultRouter || '';
+    if (lease.dnsServer) {
+        dev.dnsServer = lease.dnsServer;
+    }
+
+    dev.dhcpClient.state = 'BOUND';
+    dev.dhcpClient.lease = { ...lease };
+    return true;
+}
+
+/**
+ * Clears an endpoint's DHCP client lease and resets IP attributes.
+ */
+function clearDhcpClientLease(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return false;
+
+    ensureDeviceDhcpClientState(dev);
+    dev.dhcpClient.state = 'INIT';
+    dev.dhcpClient.lease = null;
+    dev.dhcpClient.lastOffer = null;
+    dev.dhcpClient.lastServerId = null;
+
+    if (dev.ipMode === 'dhcp') {
+        dev.ip = '';
+        dev.subnetMask = '';
+        dev.gateway = '';
+    }
+
+    return true;
+}
+
+/**
+ * Lightweight factory helper constructing standard DHCP simulation packets / messages.
+ */
+function createDhcpPacket(messageType, options = {}) {
+    const normType = String(messageType || '').toUpperCase().trim();
+    if (!DHCP_MESSAGE_TYPES[normType]) {
+        throw new Error(`Invalid DHCP message type "${messageType}".`);
+    }
+
+    const isReply = normType === DHCP_MESSAGE_TYPES.OFFER
+        || normType === DHCP_MESSAGE_TYPES.ACK
+        || normType === DHCP_MESSAGE_TYPES.NAK;
+
+    const transactionId = options.transactionId || Math.floor(Math.random() * 0xFFFFFFFF).toString(16);
+    const clientMac = options.clientMac ? normalizeMacAddress(options.clientMac) : '00:00:00:00:00:00';
+    const clientIp = options.clientIp || '0.0.0.0';
+    const yourIp = options.yourIp || options.offeredIp || '0.0.0.0';
+    const serverIp = options.serverIp || options.serverIdentifier || '0.0.0.0';
+
+    return {
+        protocol: 'DHCP',
+        messageType: normType,
+        op: isReply ? 'BOOTREPLY' : 'BOOTREQUEST',
+        transactionId,
+        clientMac,
+        clientIp,
+        yourIp,
+        serverIp,
+        gatewayIp: options.gatewayIp || '0.0.0.0',
+        options: {
+            subnetMask: options.subnetMask || '',
+            routers: options.routers || (options.defaultRouter ? [options.defaultRouter] : []),
+            dnsServers: options.dnsServers || (options.dnsServer ? [options.dnsServer] : []),
+            domainName: options.domainName || '',
+            leaseTime: typeof options.leaseTime === 'number' ? options.leaseTime : DEFAULT_DHCP_LEASE_SECONDS,
+            serverIdentifier: options.serverIdentifier || serverIp,
+            requestedIp: options.requestedIp || '',
+            message: options.message || ''
+        },
+        sourceIp: options.sourceIp || (['DISCOVER', 'REQUEST'].includes(normType) ? '0.0.0.0' : serverIp),
+        destinationIp: options.destinationIp || (['DISCOVER', 'REQUEST'].includes(normType) ? '255.255.255.255' : (yourIp !== '0.0.0.0' ? yourIp : '255.255.255.255')),
+        sourcePort: isReply ? DEFAULT_DHCP_SERVER_PORT : DEFAULT_DHCP_CLIENT_PORT,
+        destinationPort: isReply ? DEFAULT_DHCP_CLIENT_PORT : DEFAULT_DHCP_SERVER_PORT
+    };
+}
+
 document.addEventListener('DOMContentLoaded', initializeLab);
