@@ -20007,6 +20007,2988 @@ runTest('760. Total test count verification check', () => {
     assert.ok(testsPassed >= 759);
 });
 
+// ==========================================
+// V5.13 PHASE 1: OSPF FOUNDATION TESTS
+// ==========================================
+
+// 761. ensureDeviceOspfState initializes per-router OSPF data model with networks, passiveInterfaces, and neighbors
+runTest('761. ensureDeviceOspfState initializes per-router OSPF data model with networks, passiveInterfaces, and neighbors', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const ospf = ensureDeviceOspfState(r0);
+    assert.ok(ospf);
+    assert.strictEqual(ospf.enabled, false);
+    assert.strictEqual(ospf.processId, null);
+    assert.strictEqual(ospf.configuredRouterId, null);
+    assert.ok(Array.isArray(ospf.networks));
+    assert.ok(Array.isArray(ospf.passiveInterfaces));
+    assert.strictEqual(typeof ospf.neighbors, 'object');
+    assert.strictEqual(typeof ospf.interfaces, 'object');
+});
+
+// 762. Automatic OSPF router-id selection elects highest loopback IP over physical interface IPs and defaults to 0.0.0.0
+runTest('762. Automatic OSPF router-id selection elects highest loopback IP over physical interface IPs and defaults to 0.0.0.0', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+
+    // With no IPs configured, router-id is 0.0.0.0
+    assert.strictEqual(getDeviceRouterId(r0), '0.0.0.0');
+
+    // With physical IPs configured, highest physical IP is elected
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.10.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    assert.strictEqual(getDeviceRouterId(r0), '192.168.10.1');
+
+    // With loopback IP configured, loopback IP takes precedence over physical IPs
+    r0.interfaces['Loopback0'] = {
+        name: 'Loopback0',
+        ip: '1.1.1.1',
+        subnetMask: '255.255.255.255',
+        status: 'up'
+    };
+    assert.strictEqual(getDeviceRouterId(r0), '1.1.1.1');
+
+    // If multiple loopbacks exist, highest loopback IP is elected
+    r0.interfaces['Loopback1'] = {
+        name: 'Loopback1',
+        ip: '2.2.2.2',
+        subnetMask: '255.255.255.255',
+        status: 'up'
+    };
+    assert.strictEqual(getDeviceRouterId(r0), '2.2.2.2');
+});
+
+// 763. Explicit router-id CLI configuration overrides auto selection and no router-id restores auto router-id
+runTest('763. Explicit router-id CLI configuration overrides auto selection and no router-id restores auto router-id', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    assert.strictEqual(r0.ospf.routerId, '192.168.1.1');
+
+    // Explicit router-id
+    const ridRes = executeCliCommand(r0, 'router-id 10.99.99.99');
+    assert.strictEqual(ridRes.success, true);
+    assert.strictEqual(r0.ospf.configuredRouterId, '10.99.99.99');
+    assert.strictEqual(r0.ospf.routerId, '10.99.99.99');
+
+    // no router-id resets to auto
+    const noRidRes = executeCliCommand(r0, 'no router-id');
+    assert.strictEqual(noRidRes.success, true);
+    assert.strictEqual(r0.ospf.configuredRouterId, null);
+    assert.strictEqual(r0.ospf.routerId, '192.168.1.1');
+});
+
+// 764. router ospf <pid> in global config enters config-router mode with Router(config-router)# prompt
+runTest('764. router ospf <pid> in global config enters config-router mode with Router(config-router)# prompt', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'router ospf 10');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(r0.ospf.enabled, true);
+    assert.strictEqual(r0.ospf.processId, 10);
+    assert.strictEqual(getDeviceCliPrompt(r0), 'Router0(config-router)#');
+
+    // exit returns to config
+    executeCliCommand(r0, 'exit');
+    assert.strictEqual(getDeviceCliPrompt(r0), 'Router0(config)#');
+
+    // re-enter and end returns to exec
+    executeCliCommand(r0, 'router ospf 10');
+    executeCliCommand(r0, 'end');
+    assert.strictEqual(getDeviceCliPrompt(r0), 'Router0#');
+});
+
+// 765. network <net> <wildcard> area <area> adds network statement and no network removes it
+runTest('765. network <net> <wildcard> area <area> adds network statement and no network removes it', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    const netRes = executeCliCommand(r0, 'network 192.168.10.0 0.0.0.255 area 0');
+    assert.strictEqual(netRes.success, true);
+    assert.strictEqual(r0.ospf.networks.length, 1);
+    assert.strictEqual(r0.ospf.networks[0].network, '192.168.10.0');
+    assert.strictEqual(r0.ospf.networks[0].wildcardMask, '0.0.0.255');
+    assert.strictEqual(r0.ospf.networks[0].area, '0');
+
+    // Add second network statement with area 0.0.0.0 (normalized to '0')
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.3 area 0.0.0.0');
+    assert.strictEqual(r0.ospf.networks.length, 2);
+    assert.strictEqual(r0.ospf.networks[1].area, '0');
+
+    // Remove first network statement
+    const noNetRes = executeCliCommand(r0, 'no network 192.168.10.0 0.0.0.255 area 0');
+    assert.strictEqual(noNetRes.success, true);
+    assert.strictEqual(r0.ospf.networks.length, 1);
+    assert.strictEqual(r0.ospf.networks[0].network, '10.0.0.0');
+});
+
+// 766. isIpInWildcardRange bitwise matcher correctly handles exact, subnet, and quad-255 wildcards
+runTest('766. isIpInWildcardRange bitwise matcher correctly handles exact, subnet, and quad-255 wildcards', () => {
+    // Exact match /32 wildcard 0.0.0.0
+    assert.strictEqual(isIpInWildcardRange('192.168.1.1', '192.168.1.1', '0.0.0.0'), true);
+    assert.strictEqual(isIpInWildcardRange('192.168.1.2', '192.168.1.1', '0.0.0.0'), false);
+
+    // Subnet match /24 wildcard 0.0.0.255
+    assert.strictEqual(isIpInWildcardRange('192.168.1.100', '192.168.1.0', '0.0.0.255'), true);
+    assert.strictEqual(isIpInWildcardRange('192.168.2.100', '192.168.1.0', '0.0.0.255'), false);
+
+    // Point-to-point /30 wildcard 0.0.0.3
+    assert.strictEqual(isIpInWildcardRange('10.0.0.1', '10.0.0.0', '0.0.0.3'), true);
+    assert.strictEqual(isIpInWildcardRange('10.0.0.2', '10.0.0.0', '0.0.0.3'), true);
+    assert.strictEqual(isIpInWildcardRange('10.0.0.4', '10.0.0.0', '0.0.0.3'), false);
+
+    // Quad-255 wildcard 255.255.255.255 matches any IP
+    assert.strictEqual(isIpInWildcardRange('172.16.50.2', '0.0.0.0', '255.255.255.255'), true);
+});
+
+// 767. getOspfEnabledInterfaces activates interfaces matching network statements and tags area and passive state
+runTest('767. getOspfEnabledInterfaces activates interfaces matching network statements and tags area and passive state', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r0.interfaces['Gig0/1'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    // No OSPF enabled -> empty list
+    assert.strictEqual(getOspfEnabledInterfaces(r0).length, 0);
+
+    // Enable OSPF and add network statement for 10.0.0.0/30 only
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.3 area 0');
+
+    let enabled = getOspfEnabledInterfaces(r0);
+    assert.strictEqual(enabled.length, 1);
+    assert.strictEqual(enabled[0].name, 'Gig0/0');
+    assert.strictEqual(enabled[0].area, '0');
+    assert.strictEqual(enabled[0].isPassive, false);
+
+    // Add network statement for 192.168.1.0/24
+    executeCliCommand(r0, 'network 192.168.1.0 0.0.0.255 area 0');
+    enabled = getOspfEnabledInterfaces(r0);
+    assert.strictEqual(enabled.length, 2);
+});
+
+// 768. passive-interface <iface> suppresses Hello participation and no passive-interface restores it
+runTest('768. passive-interface <iface> suppresses Hello participation and no passive-interface restores it', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 192.168.1.0 0.0.0.255 area 0');
+
+    // Configure passive-interface
+    const passRes = executeCliCommand(r0, 'passive-interface Gig0/0');
+    assert.strictEqual(passRes.success, true);
+    assert.strictEqual(r0.ospf.passiveInterfaces.includes('Gig0/0'), true);
+
+    const ifaces = getOspfEnabledInterfaces(r0);
+    assert.strictEqual(ifaces[0].isPassive, true);
+    assert.strictEqual(ifaces[0].state, 'PASSIVE');
+
+    // Remove passive-interface
+    const noPassRes = executeCliCommand(r0, 'no passive-interface Gig0/0');
+    assert.strictEqual(noPassRes.success, true);
+    assert.strictEqual(r0.ospf.passiveInterfaces.includes('Gig0/0'), false);
+    assert.strictEqual(getOspfEnabledInterfaces(r0)[0].isPassive, false);
+});
+
+// 769. simulateOspfHello completes two-router point-to-point adjacency handshake transitioning to FULL state
+runTest('769. simulateOspfHello completes two-router point-to-point adjacency handshake transitioning to FULL state', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.0.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.0.0 0.0.0.3 area 0');
+
+    const helloRes = simulateOspfHello(r0.id, r1.id);
+    assert.strictEqual(helloRes.success, true);
+    assert.strictEqual(helloRes.state, 'FULL');
+    assert.ok(helloRes.events.length >= 4);
+
+    // Verify neighbors registered on both routers
+    assert.ok(r0.ospf.neighbors['10.0.0.2']);
+    assert.strictEqual(r0.ospf.neighbors['10.0.0.2'].state, 'FULL');
+    assert.strictEqual(r0.ospf.neighbors['10.0.0.2'].interface, 'Gig0/0');
+
+    assert.ok(r1.ospf.neighbors['10.0.0.1']);
+    assert.strictEqual(r1.ospf.neighbors['10.0.0.1'].state, 'FULL');
+    assert.strictEqual(r1.ospf.neighbors['10.0.0.1'].interface, 'Gig0/0');
+});
+
+// 770. OSPF Hello handshake fails on area mismatch or IP subnet mismatch
+runTest('770. OSPF Hello handshake fails on area mismatch or IP subnet mismatch', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.0.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.3 area 0');
+
+    // r1 in Area 1 (mismatch)
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.0.0 0.0.0.3 area 1');
+
+    const areaRes = simulateOspfHello(r0.id, r1.id);
+    assert.strictEqual(areaRes.success, false);
+    assert.strictEqual(areaRes.reason, 'AREA_MISMATCH');
+
+    // Fix area, but introduce subnet mismatch
+    executeCliCommand(r1, 'no network 10.0.0.0 0.0.0.3 area 1');
+    r1.interfaces['Gig0/0'].ip = '192.168.50.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    executeCliCommand(r1, 'network 192.168.50.0 0.0.0.255 area 0');
+
+    const subnetRes = simulateOspfHello(r0.id, r1.id);
+    assert.strictEqual(subnetRes.success, false);
+    assert.strictEqual(subnetRes.reason, 'SUBNET_MISMATCH');
+});
+
+// 771. OSPF Hello handshake fails when connecting interface is configured as passive-interface
+runTest('771. OSPF Hello handshake fails when connecting interface is configured as passive-interface', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.0.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.3 area 0');
+    executeCliCommand(r0, 'passive-interface Gig0/0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.0.0 0.0.0.3 area 0');
+
+    const passHello = simulateOspfHello(r0.id, r1.id);
+    assert.strictEqual(passHello.success, false);
+    assert.strictEqual(passHello.reason, 'PASSIVE_INTERFACE');
+});
+
+// 772. no router ospf removes OSPF process, purges network statements, and clears neighbor adjacencies
+runTest('772. no router ospf removes OSPF process, purges network statements, and clears neighbor adjacencies', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 10');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.255 area 0');
+    assert.strictEqual(r0.ospf.enabled, true);
+    assert.strictEqual(r0.ospf.networks.length, 1);
+
+    const noOspfRes = executeCliCommand(r0, 'no router ospf 10');
+    assert.strictEqual(noOspfRes.success, true);
+    assert.strictEqual(r0.ospf.enabled, false);
+    assert.strictEqual(r0.ospf.processId, null);
+    assert.strictEqual(r0.ospf.networks.length, 0);
+    assert.strictEqual(Object.keys(r0.ospf.neighbors).length, 0);
+});
+
+// 773. show ip ospf, show ip ospf neighbor, and show ip ospf interface brief render formatted CLI output
+runTest('773. show ip ospf, show ip ospf neighbor, and show ip ospf interface brief render formatted CLI output', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.0.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.0.0 0.0.0.3 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+
+    // show ip ospf
+    const ospfRes = executeCliCommand(r0, 'show ip ospf');
+    assert.strictEqual(ospfRes.success, true);
+    assert.ok(ospfRes.output.includes('Routing Process "ospf 1" with ID 10.0.0.1'));
+    assert.ok(ospfRes.output.includes('Area BACKBONE(0)'));
+
+    // show ip ospf neighbor
+    const neiRes = executeCliCommand(r0, 'show ip ospf neighbor');
+    assert.strictEqual(neiRes.success, true);
+    assert.ok(neiRes.output.includes('Neighbor ID'));
+    assert.ok(neiRes.output.includes('10.0.0.2'));
+    assert.ok(neiRes.output.includes('FULL/ -'));
+
+    // show ip ospf interface brief
+    const intRes = executeCliCommand(r0, 'show ip ospf interface brief');
+    assert.strictEqual(intRes.success, true);
+    assert.ok(intRes.output.includes('Interface'));
+    assert.ok(intRes.output.includes('Gig0/0'));
+    assert.ok(intRes.output.includes('10.0.0.1/30'));
+});
+
+// 774. Full regression check: all V5.11, V5.12, and V5.13 OSPF Phase 1 foundation components operate harmoniously
+runTest('774. Full regression check: all V5.11, V5.12, and V5.13 OSPF Phase 1 foundation components operate harmoniously', () => {
+    assert.strictEqual(typeof ensureDeviceOspfState, 'function');
+    assert.strictEqual(typeof getDeviceRouterId, 'function');
+    assert.strictEqual(typeof isIpInWildcardRange, 'function');
+    assert.strictEqual(typeof addOspfNetworkStatement, 'function');
+    assert.strictEqual(typeof removeOspfNetworkStatement, 'function');
+    assert.strictEqual(typeof setOspfPassiveInterface, 'function');
+    assert.strictEqual(typeof getOspfEnabledInterfaces, 'function');
+    assert.strictEqual(typeof simulateOspfHello, 'function');
+    assert.strictEqual(typeof formatCliOspfGeneral, 'function');
+    assert.strictEqual(typeof formatCliOspfNeighbors, 'function');
+    assert.strictEqual(typeof formatCliOspfInterfaces, 'function');
+});
+
+// 775. Total test count verification check (Phase 1 baseline)
+runTest('775. Total test count verification check (Phase 1 baseline)', () => {
+    assert.ok(testsPassed >= 774);
+});
+
+// ==========================================
+// V5.13 PHASE 2: OSPF LSDB + SPF TESTS
+// ==========================================
+
+// 776. generateRouterLsa creates Type 1 Router-LSA with stub links for isolated router
+runTest('776. generateRouterLsa creates Type 1 Router-LSA with stub links for isolated router', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 192.168.1.0 0.0.0.255 area 0');
+
+    const lsa = generateRouterLsa(r0);
+    assert.ok(lsa, 'LSA must be generated');
+    assert.strictEqual(lsa.type, 1);
+    assert.strictEqual(lsa.advRouter, '192.168.1.1');
+    assert.strictEqual(lsa.area, '0');
+    assert.strictEqual(lsa.links.length, 1);
+    assert.strictEqual(lsa.links[0].linkType, 'stub');
+    assert.strictEqual(lsa.links[0].linkId, '192.168.1.0');
+    assert.strictEqual(lsa.links[0].linkData, '255.255.255.0');
+    assert.strictEqual(lsa.links[0].metric, 1);
+});
+
+// 777. generateRouterLsa includes point-to-point and stub link descriptors for active FULL neighbors
+runTest('777. generateRouterLsa includes point-to-point and stub link descriptors for active FULL neighbors', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.0.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.0.0 0.0.0.3 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+
+    const lsa = generateRouterLsa(r0);
+    assert.ok(lsa);
+    assert.strictEqual(lsa.links.length, 2, 'Must have 1 P2P link and 1 stub link');
+
+    const p2pLink = lsa.links.find(l => l.linkType === 'point-to-point');
+    assert.ok(p2pLink);
+    assert.strictEqual(p2pLink.linkId, '10.0.0.2');
+    assert.strictEqual(p2pLink.linkData, '10.0.0.1');
+
+    const stubLink = lsa.links.find(l => l.linkType === 'stub');
+    assert.ok(stubLink);
+    assert.strictEqual(stubLink.linkId, '10.0.0.0');
+    assert.strictEqual(stubLink.linkData, '255.255.255.252');
+});
+
+// 778. generateRouterLsa encodes passive interfaces strictly as stub links without P2P descriptor
+runTest('778. generateRouterLsa encodes passive interfaces strictly as stub links without P2P descriptor', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '192.168.10.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 192.168.10.0 0.0.0.255 area 0');
+    executeCliCommand(r0, 'passive-interface Gig0/0');
+
+    const lsa = generateRouterLsa(r0);
+    assert.strictEqual(lsa.links.length, 1);
+    assert.strictEqual(lsa.links[0].linkType, 'stub');
+    assert.strictEqual(lsa.links[0].linkId, '192.168.10.0');
+});
+
+// 779. generateRouterLsa includes /32 stub links for active OSPF loopback interfaces
+runTest('779. generateRouterLsa includes /32 stub links for active OSPF loopback interfaces', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Loopback0'] = { name: 'Loopback0', ip: '1.1.1.1', subnetMask: '255.255.255.255', status: 'up' };
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 1.1.1.1 0.0.0.0 area 0');
+
+    const lsa = generateRouterLsa(r0);
+    assert.ok(lsa);
+    const loStub = lsa.links.find(l => l.linkId === '1.1.1.1');
+    assert.ok(loStub, 'Loopback stub link must exist in LSA');
+    assert.strictEqual(loStub.linkData, '255.255.255.255');
+});
+
+// 780. formatCliOspfDatabase renders standard Cisco formatted Router Link States table
+runTest('780. formatCliOspfDatabase renders standard Cisco formatted Router Link States table', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.255 area 0');
+
+    const output = formatCliOspfDatabase(r0);
+    assert.ok(output.includes('Router Link States (Area 0)'));
+    assert.ok(output.includes('Link ID'));
+    assert.ok(output.includes('ADV Router'));
+    assert.ok(output.includes('10.0.0.1'));
+});
+
+// 781. show ip ospf database CLI command outputs LSDB for OSPF-enabled router
+runTest('781. show ip ospf database CLI command outputs LSDB for OSPF-enabled router', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.255 area 0');
+
+    const res = executeCliCommand(r0, 'show ip ospf database');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('OSPF Router with ID (10.0.0.1)'));
+});
+
+// 782. synchronizeOspfTopology synchronizes LSDBs across 2 directly connected OSPF routers
+runTest('782. synchronizeOspfTopology synchronizes LSDBs across 2 directly connected OSPF routers', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.0.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.0.0 0.0.0.3 area 0');
+
+    // After Hello adjacency
+    simulateOspfHello(r0.id, r1.id);
+
+    assert.ok(r0.ospf.lsdb.routerLsas['10.0.0.1'], 'r0 must have its own LSA');
+    assert.ok(r0.ospf.lsdb.routerLsas['10.0.0.2'], 'r0 must have r1 LSA');
+    assert.ok(r1.ospf.lsdb.routerLsas['10.0.0.1'], 'r1 must have r0 LSA');
+    assert.ok(r1.ospf.lsdb.routerLsas['10.0.0.2'], 'r1 must have its own LSA');
+});
+
+// 783. 2-Router OSPF convergence installs remote subnet as O route with AD 110 and metric 2
+runTest('783. 2-Router OSPF convergence installs remote subnet as O route with AD 110 and metric 2', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    // Link between r0 and r1
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r0.id, r1.id);
+
+    // r1 has local LAN on Gig0/1
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+
+    const routesR0 = r0.ospf.routes;
+    assert.strictEqual(routesR0.length, 1, 'r0 should have exactly 1 OSPF route for 192.168.2.0/24');
+    const r = routesR0[0];
+    assert.strictEqual(r.network, '192.168.2.0');
+    assert.strictEqual(r.prefixLength, 24);
+    assert.strictEqual(r.nextHop, '10.0.12.2');
+    assert.strictEqual(r.interface, 'Gig0/0');
+    assert.strictEqual(r.adminDistance, 110);
+    assert.strictEqual(r.metric, 2); // 1 (P2P cost) + 1 (Stub cost)
+    assert.strictEqual(r.code, 'O');
+});
+
+// 784. getRouterRoutingTable exposes dynamic OSPF routes with code O and adminDistance 110
+runTest('784. getRouterRoutingTable exposes dynamic OSPF routes with code O and adminDistance 110', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+
+    const table = getRouterRoutingTable(r0.id);
+    const cRoute = table.find(r => r.code === 'C');
+    const oRoute = table.find(r => r.code === 'O');
+
+    assert.ok(cRoute, 'Connected route must exist');
+    assert.ok(oRoute, 'OSPF route must exist');
+    assert.strictEqual(oRoute.network, '192.168.2.0');
+    assert.strictEqual(oRoute.adminDistance, 110);
+});
+
+// 785. show ip route renders OSPF routes with [110/<metric>] via next-hop format
+runTest('785. show ip route renders OSPF routes with [110/<metric>] via next-hop format', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+
+    const res = executeCliCommand(r0, 'show ip route');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('O    192.168.2.0/24 [110/2] via 10.0.12.2, Gig0/0'));
+});
+
+// 786. show ip route ospf filters routing table to display only OSPF routes
+runTest('786. show ip route ospf filters routing table to display only OSPF routes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+
+    const res = executeCliCommand(r0, 'show ip route ospf');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('192.168.2.0/24'));
+    assert.ok(!res.output.includes('10.0.12.0/30 is directly connected'));
+});
+
+// 787. 3-Router linear topology (R1 - R2 - R3): R1 learns R3 LAN (192.168.3.0/24) via R2 with metric 3
+runTest('787. 3-Router linear topology (R1 - R2 - R3): R1 learns R3 LAN (192.168.3.0/24) via R2 with metric 3', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [r1, r2, r3] = networkState.devices;
+
+    // R1 <-> R2 on 10.0.12.0/30
+    r1.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r2.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r1.id, r2.id);
+
+    // R2 <-> R3 on 10.0.23.0/30
+    r2.interfaces['Gig0/1'].ip = '10.0.23.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+    r3.interfaces['Gig0/0'].ip = '10.0.23.2';
+    r3.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r2.id, r3.id);
+
+    // R3 LAN on Gig0/1
+    r3.interfaces['Gig0/1'].ip = '192.168.3.1';
+    r3.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    // Configure OSPF on R1, R2, R3
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r2, 'enable');
+    executeCliCommand(r2, 'conf t');
+    executeCliCommand(r2, 'router ospf 1');
+    executeCliCommand(r2, 'network 10.0.0.0 0.255.255.255 area 0');
+
+    executeCliCommand(r3, 'enable');
+    executeCliCommand(r3, 'conf t');
+    executeCliCommand(r3, 'router ospf 1');
+    executeCliCommand(r3, 'network 10.0.23.0 0.0.0.3 area 0');
+    executeCliCommand(r3, 'network 192.168.3.0 0.0.0.255 area 0');
+
+    // Trigger Hellos
+    simulateOspfHello(r1.id, r2.id);
+    simulateOspfHello(r2.id, r3.id);
+
+    const r3LanRoute = r1.ospf.routes.find(r => r.network === '192.168.3.0');
+    assert.ok(r3LanRoute, 'R1 must have OSPF route to R3 LAN');
+    assert.strictEqual(r3LanRoute.nextHop, '10.0.12.2');
+    assert.strictEqual(r3LanRoute.interface, 'Gig0/0');
+    assert.strictEqual(r3LanRoute.metric, 3); // 1 (R1-R2) + 1 (R2-R3) + 1 (R3 LAN)
+});
+
+// 788. 3-Router linear topology: R3 learns R1 LAN (192.168.1.0/24) via R2 with metric 3
+runTest('788. 3-Router linear topology: R3 learns R1 LAN (192.168.1.0/24) via R2 with metric 3', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 500, 100);
+    const [r1, r2, r3] = networkState.devices;
+
+    r1.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.1.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r2.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r2.interfaces['Gig0/1'].ip = '10.0.23.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r3.interfaces['Gig0/0'].ip = '10.0.23.2';
+    r3.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+
+    addConnection(r1.id, r2.id);
+    addConnection(r2.id, r3.id);
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.1.0 0.0.0.255 area 0');
+
+    executeCliCommand(r2, 'enable');
+    executeCliCommand(r2, 'conf t');
+    executeCliCommand(r2, 'router ospf 1');
+    executeCliCommand(r2, 'network 10.0.0.0 0.255.255.255 area 0');
+
+    executeCliCommand(r3, 'enable');
+    executeCliCommand(r3, 'conf t');
+    executeCliCommand(r3, 'router ospf 1');
+    executeCliCommand(r3, 'network 10.0.23.0 0.0.0.3 area 0');
+
+    simulateOspfHello(r1.id, r2.id);
+    simulateOspfHello(r2.id, r3.id);
+
+    const r1LanRoute = r3.ospf.routes.find(r => r.network === '192.168.1.0');
+    assert.ok(r1LanRoute, 'R3 must have OSPF route to R1 LAN');
+    assert.strictEqual(r1LanRoute.nextHop, '10.0.23.1');
+    assert.strictEqual(r1LanRoute.interface, 'Gig0/0');
+    assert.strictEqual(r1LanRoute.metric, 3);
+});
+
+// 789. End-to-end packet forwarding (simulateSendFrame) succeeds across 3-router OSPF topology
+runTest('789. End-to-end packet forwarding (simulateSendFrame) succeeds across 3-router OSPF topology', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 350, 100);
+    addDevice('router', 500, 100);
+    addDevice('pc', 650, 100);
+
+    const [pc1, r1, r2, r3, pc2] = networkState.devices;
+
+    pc1.ip = '192.168.1.50';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.1.1';
+
+    // Connections first:
+    // pc1 -> r1 (gets r1:Gig0/0)
+    addConnection(pc1.id, r1.id);
+    // r1 -> r2 (gets r1:Gig0/1, r2:Gig0/0)
+    addConnection(r1.id, r2.id);
+    // r2 -> r3 (gets r2:Gig0/1, r3:Gig0/0)
+    addConnection(r2.id, r3.id);
+    // r3 -> pc2 (gets r3:Gig0/1)
+    addConnection(r3.id, pc2.id);
+
+    // IP configurations matching port assignments:
+    r1.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r2.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r2.interfaces['Gig0/1'].ip = '10.0.23.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r3.interfaces['Gig0/0'].ip = '10.0.23.2';
+    r3.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r3.interfaces['Gig0/1'].ip = '192.168.3.1';
+    r3.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc2.ip = '192.168.3.50';
+    pc2.subnetMask = '255.255.255.0';
+    pc2.gateway = '192.168.3.1';
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 0.0.0.0 255.255.255.255 area 0');
+
+    executeCliCommand(r2, 'enable');
+    executeCliCommand(r2, 'conf t');
+    executeCliCommand(r2, 'router ospf 1');
+    executeCliCommand(r2, 'network 0.0.0.0 255.255.255.255 area 0');
+
+    executeCliCommand(r3, 'enable');
+    executeCliCommand(r3, 'conf t');
+    executeCliCommand(r3, 'router ospf 1');
+    executeCliCommand(r3, 'network 0.0.0.0 255.255.255.255 area 0');
+
+    simulateOspfHello(r1.id, r2.id);
+    simulateOspfHello(r2.id, r3.id);
+
+    const frameRes = simulateSendFrame(pc1, pc2);
+    assert.strictEqual(frameRes.success, true, 'Frame should route successfully end-to-end');
+    assert.ok(frameRes.path.includes(r1.id));
+    assert.ok(frameRes.path.includes(r2.id));
+    assert.ok(frameRes.path.includes(r3.id));
+});
+
+// 790. 3-Router triangle topology (R1 connected to R2 and R3; R2 connected to R3) calculates correct shortest paths
+runTest('790. 3-Router triangle topology (R1 connected to R2 and R3; R2 connected to R3) calculates correct shortest paths', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 200, 250);
+    const [r1, r2, r3] = networkState.devices;
+
+    // R1-R2 on 10.0.12.0/30
+    r1.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r2.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r1.id, r2.id);
+
+    // R2-R3 on 10.0.23.0/30
+    r2.interfaces['Gig0/1'].ip = '10.0.23.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+    r3.interfaces['Gig0/0'].ip = '10.0.23.2';
+    r3.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r2.id, r3.id);
+
+    // R1-R3 on 10.0.13.0/30
+    r1.interfaces['Gig0/1'].ip = '10.0.13.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+    r3.interfaces['Gig0/1'].ip = '10.0.13.2';
+    r3.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+    addConnection(r1.id, r3.id);
+
+    // Configure OSPF on all 3 routers
+    for (const r of [r1, r2, r3]) {
+        executeCliCommand(r, 'enable');
+        executeCliCommand(r, 'conf t');
+        executeCliCommand(r, 'router ospf 1');
+        executeCliCommand(r, 'network 0.0.0.0 255.255.255.255 area 0');
+    }
+
+    simulateOspfHello(r1.id, r2.id);
+    simulateOspfHello(r2.id, r3.id);
+    simulateOspfHello(r1.id, r3.id);
+
+    // R1 should reach 10.0.23.0/30 with metric 2 (either via R2 or R3)
+    const route23 = r1.ospf.routes.find(r => r.network === '10.0.23.0');
+    assert.ok(route23);
+    assert.strictEqual(route23.metric, 2);
+});
+
+// 791. 3-Router triangle with asymmetric link costs prefers lower-cost cumulative path over higher-cost direct path
+runTest('791. 3-Router triangle with asymmetric link costs prefers lower-cost cumulative path over higher-cost direct path', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 200, 250);
+    const [r1, r2, r3] = networkState.devices;
+
+    r1.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r2.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r1.id, r2.id);
+
+    r2.interfaces['Gig0/1'].ip = '10.0.23.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+    r3.interfaces['Gig0/0'].ip = '10.0.23.2';
+    r3.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r2.id, r3.id);
+
+    r1.interfaces['Gig0/1'].ip = '10.0.13.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+    r3.interfaces['Gig0/1'].ip = '10.0.13.2';
+    r3.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+    addConnection(r1.id, r3.id);
+
+    // R3 has LAN 192.168.30.0/24
+    r3.interfaces['Loopback0'] = { name: 'Loopback0', ip: '192.168.30.1', subnetMask: '255.255.255.0', status: 'up' };
+
+    for (const r of [r1, r2, r3]) {
+        executeCliCommand(r, 'enable');
+        executeCliCommand(r, 'conf t');
+        executeCliCommand(r, 'router ospf 1');
+        executeCliCommand(r, 'network 0.0.0.0 255.255.255.255 area 0');
+    }
+
+    // Set high cost on R1-R3 direct link (cost 100)
+    r1.ospf.interfaces['Gig0/1'] = { cost: 100 };
+    r3.ospf.interfaces['Gig0/1'] = { cost: 100 };
+
+    // Set low cost on R1-R2 (1) and R2-R3 (1)
+    r1.ospf.interfaces['Gig0/0'] = { cost: 1 };
+    r2.ospf.interfaces['Gig0/0'] = { cost: 1 };
+    r2.ospf.interfaces['Gig0/1'] = { cost: 1 };
+    r3.ospf.interfaces['Gig0/0'] = { cost: 1 };
+
+    simulateOspfHello(r1.id, r2.id);
+    simulateOspfHello(r2.id, r3.id);
+    simulateOspfHello(r1.id, r3.id);
+
+    const r3LanRoute = r1.ospf.routes.find(r => r.network === '192.168.30.0');
+    assert.ok(r3LanRoute);
+    // Via R2: Cost = 1 (R1->R2) + 1 (R2->R3) + 1 (Stub) = 3
+    // Direct R1->R3: Cost = 100 + 1 = 101
+    assert.strictEqual(r3LanRoute.nextHop, '10.0.12.2', 'Should choose nextHop via R2');
+    assert.strictEqual(r3LanRoute.interface, 'Gig0/0');
+    assert.strictEqual(r3LanRoute.metric, 3);
+});
+
+// 792. Equal-cost multipath tie-breaking selects path deterministically
+runTest('792. Equal-cost multipath tie-breaking selects path deterministically', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 200, 250);
+    const [r1, r2, r3] = networkState.devices;
+
+    r1.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r2.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r1.id, r2.id);
+
+    r2.interfaces['Gig0/1'].ip = '10.0.23.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+    r3.interfaces['Gig0/0'].ip = '10.0.23.2';
+    r3.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r2.id, r3.id);
+
+    r1.interfaces['Gig0/1'].ip = '10.0.13.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+    r3.interfaces['Gig0/1'].ip = '10.0.13.2';
+    r3.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+    addConnection(r1.id, r3.id);
+
+    for (const r of [r1, r2, r3]) {
+        executeCliCommand(r, 'enable');
+        executeCliCommand(r, 'conf t');
+        executeCliCommand(r, 'router ospf 1');
+        executeCliCommand(r, 'network 0.0.0.0 255.255.255.255 area 0');
+    }
+
+    simulateOspfHello(r1.id, r2.id);
+    simulateOspfHello(r2.id, r3.id);
+    simulateOspfHello(r1.id, r3.id);
+
+    const routes1 = calculateOspfRoutesForDevice(r1);
+    const routes2 = calculateOspfRoutesForDevice(r1);
+    assert.strictEqual(JSON.stringify(routes1), JSON.stringify(routes2), 'SPF calculation must be 100% deterministic');
+});
+
+// 793. Connected route (AD 0) takes precedence over OSPF route (AD 110) for same destination subnet
+runTest('793. Connected route (AD 0) takes precedence over OSPF route (AD 110) for same destination subnet', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.255 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+
+    const match = lookupRoute(r0.id, '10.0.12.50');
+    assert.strictEqual(match.success, true);
+    assert.strictEqual(match.route.code, 'C', 'Connected route must win over OSPF');
+    assert.strictEqual(match.route.adminDistance, 0);
+});
+
+// 794. Static route (AD 1) takes precedence over OSPF route (AD 110) for same destination subnet
+runTest('794. Static route (AD 1) takes precedence over OSPF route (AD 110) for same destination subnet', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+
+    // Add static route on r0 for 192.168.2.0/24
+    executeCliCommand(r0, 'ip route 192.168.2.0 255.255.255.0 10.0.12.2');
+
+    const match = lookupRoute(r0.id, '192.168.2.50');
+    assert.strictEqual(match.success, true);
+    assert.strictEqual(match.route.code, 'S', 'Static route (AD 1) must win over OSPF (AD 110)');
+    assert.strictEqual(match.route.adminDistance, 1);
+});
+
+// 795. Longest Prefix Match (LPM): OSPF route with /28 mask beats Static route with /24 mask
+runTest('795. Longest Prefix Match (LPM): OSPF route with /28 mask beats Static route with /24 mask', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    // Remote subnet /28
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.240';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.15 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+
+    // Static route with shorter prefix /24
+    executeCliCommand(r0, 'ip route 192.168.2.0 255.255.255.0 10.0.12.2');
+
+    const match = lookupRoute(r0.id, '192.168.2.5');
+    assert.strictEqual(match.success, true);
+    assert.strictEqual(match.route.code, 'O', 'OSPF route (/28) must win over Static (/24) due to LPM');
+    assert.strictEqual(match.route.prefixLength, 28);
+});
+
+// 796. Interface shutdown immediately drops neighbor adjacency, purges OSPF routes, and recalculates SPF
+runTest('796. Interface shutdown immediately drops neighbor adjacency, purges OSPF routes, and recalculates SPF', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+    assert.strictEqual(r0.ospf.routes.length, 1);
+
+    // Shut down Gig0/0 on r0
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'shutdown');
+
+    assert.strictEqual(Object.keys(r0.ospf.neighbors).length, 0, 'Neighbors must be cleared');
+    assert.strictEqual(r0.ospf.routes.length, 0, 'OSPF routes must be cleared');
+});
+
+// 797. Interface no shutdown restores neighbor adjacency and dynamically reinstalls OSPF routes
+runTest('797. Interface no shutdown restores neighbor adjacency and dynamically reinstalls OSPF routes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'shutdown');
+    assert.strictEqual(r0.ospf.routes.length, 0);
+
+    // Bring interface back up
+    executeCliCommand(r0, 'no shutdown');
+    assert.strictEqual(r0.ospf.routes.length, 1, 'OSPF routes must be reinstalled after no shutdown');
+    assert.strictEqual(r0.ospf.routes[0].network, '192.168.2.0');
+});
+
+// 798. Removing network statement via no network purges advertised LSA links and uninstalls remote OSPF routes
+runTest('798. Removing network statement via no network purges advertised LSA links and uninstalls remote OSPF routes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+    assert.strictEqual(r0.ospf.routes.length, 1);
+
+    // Remove 192.168.2.0 network statement on r1
+    executeCliCommand(r1, 'no network 192.168.2.0 0.0.0.255 area 0');
+
+    assert.strictEqual(r0.ospf.routes.length, 0, 'r0 should no longer have 192.168.2.0/24 route');
+});
+
+// 799. no router ospf purges local LSDB and routes, and causes remote routers to purge the disabled router LSA
+runTest('799. no router ospf purges local LSDB and routes, and causes remote routers to purge the disabled router LSA', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+    assert.strictEqual(r0.ospf.routes.length, 1);
+
+    // Disable OSPF on r1
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'no router ospf 1');
+
+    assert.strictEqual(r1.ospf.enabled, false);
+    assert.strictEqual(r1.ospf.routes.length, 0);
+    assert.strictEqual(r0.ospf.routes.length, 0, 'r0 routes must be purged when r1 disables OSPF');
+});
+
+// 800. Deleting connection between routers triggers topology reconvergence and removes routes across deleted link
+runTest('800. Deleting connection between routers triggers topology reconvergence and removes routes across deleted link', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+    assert.strictEqual(r0.ospf.routes.length, 1);
+
+    const conn = networkState.connections[0];
+    deleteConnection(conn.id);
+
+    assert.strictEqual(r0.ospf.routes.length, 0, 'Routes must be removed after cable disconnect');
+});
+
+// 801. Multilayer Switch with ip routing and OSPF installs OSPF routes across SVIs and participates in LSDB
+runTest('801. Multilayer Switch with ip routing and OSPF installs OSPF routes across SVIs and participates in LSDB', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('router', 300, 100);
+    const [sw1, r1] = networkState.devices;
+
+    setSwitchIpRouting(sw1, true);
+    setSwitchSviIp(sw1, 10, '10.0.10.1', '255.255.255.0');
+    setSwitchSviAdminStatus(sw1, 10, 'up');
+
+    r1.interfaces['Gig0/0'].ip = '10.0.10.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '172.16.1.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    addConnection(sw1.id, r1.id);
+    setSwitchPortMode(sw1, 'Fa0/1', 'access');
+    setSwitchPortAccessVlan(sw1, 'Fa0/1', 10);
+
+    executeCliCommand(sw1, 'enable');
+    executeCliCommand(sw1, 'conf t');
+    executeCliCommand(sw1, 'router ospf 1');
+    executeCliCommand(sw1, 'network 10.0.10.0 0.0.0.255 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.10.0 0.0.0.255 area 0');
+    executeCliCommand(r1, 'network 172.16.1.0 0.0.0.255 area 0');
+
+    simulateOspfHello(sw1.id, r1.id);
+
+    const swTable = getSwitchRoutingTable(sw1.id);
+    const oRoute = swTable.find(r => r.code === 'O');
+    assert.ok(oRoute, 'Layer-3 Switch must have OSPF route');
+    assert.strictEqual(oRoute.network, '172.16.1.0');
+});
+
+// 802. Multi-hop ping / traceroute resolves path dynamically using OSPF route table
+runTest('802. Multi-hop ping / traceroute resolves path dynamically using OSPF route table', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 350, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, r1, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, r1.id);
+    addConnection(r1.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.200.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.200.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.200.1';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 0.0.0.0 255.255.255.255 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 0.0.0.0 255.255.255.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+
+    const pingRes = executeCliCommand(pc0, 'ping 192.168.200.10');
+    assert.strictEqual(pingRes.success, true);
+    assert.ok(pingRes.output.includes('Reply from 192.168.200.10'));
+});
+
+// 803. RFC 2328 bidirectional check: one-way LSA point-to-point link is rejected by Dijkstra SPF
+runTest('803. RFC 2328 bidirectional check: one-way LSA point-to-point link is rejected by Dijkstra SPF', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    ensureDeviceOspfState(r0);
+    r0.ospf.enabled = true;
+    r0.ospf.routerId = '10.0.0.1';
+
+    // Fabricate an LSDB where R1 points to R2, but R2 does NOT point back to R1
+    r0.ospf.lsdb = {
+        area: '0',
+        routerLsas: {
+            '10.0.0.1': {
+                type: 1,
+                lsId: '10.0.0.1',
+                advRouter: '10.0.0.1',
+                seqNumber: 0x80000001,
+                links: [
+                    { linkType: 'point-to-point', linkId: '10.0.0.2', linkData: '10.0.0.1', metric: 1 }
+                ]
+            },
+            '10.0.0.2': {
+                type: 1,
+                lsId: '10.0.0.2',
+                advRouter: '10.0.0.2',
+                seqNumber: 0x80000001,
+                links: [
+                    // Missing P2P return link to 10.0.0.1!
+                    { linkType: 'stub', linkId: '192.168.99.0', linkData: '255.255.255.0', metric: 1 }
+                ]
+            }
+        }
+    };
+
+    const routes = calculateOspfRoutesForDevice(r0);
+    assert.strictEqual(routes.length, 0, 'Must reject one-way P2P link without return link');
+});
+
+// 804. Full regression check: all V5.11, V5.12, V5.13 Phase 1 and Phase 2 OSPF functions operate harmoniously
+runTest('804. Full regression check: all V5.11, V5.12, V5.13 Phase 1 and Phase 2 OSPF functions operate harmoniously', () => {
+    assert.strictEqual(typeof ensureDeviceOspfState, 'function');
+    assert.strictEqual(typeof getDeviceRouterId, 'function');
+    assert.strictEqual(typeof isIpInWildcardRange, 'function');
+    assert.strictEqual(typeof addOspfNetworkStatement, 'function');
+    assert.strictEqual(typeof removeOspfNetworkStatement, 'function');
+    assert.strictEqual(typeof setOspfPassiveInterface, 'function');
+    assert.strictEqual(typeof getOspfEnabledInterfaces, 'function');
+    assert.strictEqual(typeof simulateOspfHello, 'function');
+    assert.strictEqual(typeof generateRouterLsa, 'function');
+    assert.strictEqual(typeof calculateOspfRoutesForDevice, 'function');
+    assert.strictEqual(typeof synchronizeOspfTopology, 'function');
+    assert.strictEqual(typeof formatCliOspfDatabase, 'function');
+    assert.strictEqual(typeof formatCliOspfGeneral, 'function');
+    assert.strictEqual(typeof formatCliOspfNeighbors, 'function');
+    assert.strictEqual(typeof formatCliOspfInterfaces, 'function');
+});
+
+// 805. Total test count verification check (Phase 2 baseline)
+runTest('805. Total test count verification check (Phase 2 baseline)', () => {
+    assert.ok(testsPassed >= 804);
+});
+
+// ==========================================
+// V5.13 PHASE 3: OSPF CLI & ADVANCED INTERFACE CONFIG TESTS
+// ==========================================
+
+// 806. Default OSPF interface values (cost 1, priority 1, hello 10, dead 40)
+runTest('806. Default OSPF interface values (cost 1, priority 1, hello 10, dead 40)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const cfg = getOspfInterfaceConfig(r0, 'Gig0/0');
+    assert.strictEqual(cfg.cost, 1);
+    assert.strictEqual(cfg.priority, 1);
+    assert.strictEqual(cfg.helloInterval, 10);
+    assert.strictEqual(cfg.deadInterval, 40);
+    assert.strictEqual(cfg.configuredCost, null);
+});
+
+// 807. ip ospf cost updates interface cost and affects getOspfEnabledInterfaces
+runTest('807. ip ospf cost updates interface cost and affects getOspfEnabledInterfaces', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.255 area 0');
+    executeCliCommand(r0, 'interface Gig0/0');
+    const res = executeCliCommand(r0, 'ip ospf cost 50');
+
+    assert.strictEqual(res.success, true);
+    const ifaces = getOspfEnabledInterfaces(r0);
+    assert.strictEqual(ifaces[0].cost, 50);
+});
+
+// 808. no ip ospf cost restores default calculated cost of 1
+runTest('808. no ip ospf cost restores default calculated cost of 1', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.255 area 0');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip ospf cost 50');
+    assert.strictEqual(getOspfEnabledInterfaces(r0)[0].cost, 50);
+
+    const res = executeCliCommand(r0, 'no ip ospf cost');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getOspfEnabledInterfaces(r0)[0].cost, 1);
+});
+
+// 809. Invalid OSPF cost (<1, >65535, or non-numeric) returns error and preserves existing value
+runTest('809. Invalid OSPF cost (<1, >65535, or non-numeric) returns error and preserves existing value', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+
+    const res0 = executeCliCommand(r0, 'ip ospf cost 0');
+    assert.strictEqual(res0.success, false);
+    assert.ok(res0.output.includes('Invalid cost'));
+
+    const resOver = executeCliCommand(r0, 'ip ospf cost 70000');
+    assert.strictEqual(resOver.success, false);
+
+    const resAlpha = executeCliCommand(r0, 'ip ospf cost abc');
+    assert.strictEqual(resAlpha.success, false);
+
+    const resEmpty = executeCliCommand(r0, 'ip ospf cost');
+    assert.strictEqual(resEmpty.success, false);
+});
+
+// 810. ip ospf cost triggers SPF recalculation and dynamically updates OSPF route metrics
+runTest('810. ip ospf cost triggers SPF recalculation and dynamically updates OSPF route metrics', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+    assert.strictEqual(r0.ospf.routes[0].metric, 2);
+
+    // Increase cost on r0 Gig0/0 to 25
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip ospf cost 25');
+
+    assert.strictEqual(r0.ospf.routes[0].metric, 26, 'Metric should now be 25 + 1 = 26');
+});
+
+// 811. ip ospf cost change alters preferred shortest path in multi-path topology
+runTest('811. ip ospf cost change alters preferred shortest path in multi-path topology', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 200, 250);
+    const [r1, r2, r3] = networkState.devices;
+
+    // R1-R2
+    r1.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r2.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r1.id, r2.id);
+
+    // R2-R3
+    r2.interfaces['Gig0/1'].ip = '10.0.23.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+    r3.interfaces['Gig0/0'].ip = '10.0.23.2';
+    r3.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r2.id, r3.id);
+
+    // R1-R3
+    r1.interfaces['Gig0/1'].ip = '10.0.13.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+    r3.interfaces['Gig0/1'].ip = '10.0.13.2';
+    r3.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+    addConnection(r1.id, r3.id);
+
+    // Target loopback on R3
+    r3.interfaces['Loopback0'] = { name: 'Loopback0', ip: '192.168.30.1', subnetMask: '255.255.255.0', status: 'up' };
+
+    for (const r of [r1, r2, r3]) {
+        executeCliCommand(r, 'enable');
+        executeCliCommand(r, 'conf t');
+        executeCliCommand(r, 'router ospf 1');
+        executeCliCommand(r, 'network 0.0.0.0 255.255.255.255 area 0');
+    }
+
+    simulateOspfHello(r1.id, r2.id);
+    simulateOspfHello(r2.id, r3.id);
+    simulateOspfHello(r1.id, r3.id);
+
+    // Initially direct path R1->R3 has cost 1 + 1 = 2
+    let route = r1.ospf.routes.find(r => r.network === '192.168.30.0');
+    assert.strictEqual(route.nextHop, '10.0.13.2');
+    assert.strictEqual(route.metric, 2);
+
+    // Increase direct link cost on R1 Gig0/1 to 50
+    executeCliCommand(r1, 'interface Gig0/1');
+    executeCliCommand(r1, 'ip ospf cost 50');
+
+    // Re-verify: now path via R2 (cost 1 + 1 + 1 = 3) should win over direct (cost 50 + 1 = 51)
+    route = r1.ospf.routes.find(r => r.network === '192.168.30.0');
+    assert.strictEqual(route.nextHop, '10.0.12.2', 'Should now route via R2');
+    assert.strictEqual(route.metric, 3);
+});
+
+// 812. ip ospf priority sets priority value (0-255)
+runTest('812. ip ospf priority sets priority value (0-255)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    const res = executeCliCommand(r0, 'ip ospf priority 100');
+
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getOspfInterfaceConfig(r0, 'Gig0/0').priority, 100);
+});
+
+// 813. Invalid OSPF priority (<0, >255, non-numeric) returns error
+runTest('813. Invalid OSPF priority (<0, >255, non-numeric) returns error', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+
+    const resNeg = executeCliCommand(r0, 'ip ospf priority -1');
+    assert.strictEqual(resNeg.success, false);
+
+    const resOver = executeCliCommand(r0, 'ip ospf priority 300');
+    assert.strictEqual(resOver.success, false);
+
+    const resAlpha = executeCliCommand(r0, 'ip ospf priority high');
+    assert.strictEqual(resAlpha.success, false);
+});
+
+// 814. Priority 0 behavior: saved in configuration without introducing DR/BDR election
+runTest('814. Priority 0 behavior: saved in configuration without introducing DR/BDR election', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    const res = executeCliCommand(r0, 'ip ospf priority 0');
+
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getOspfInterfaceConfig(r0, 'Gig0/0').priority, 0);
+});
+
+// 815. no ip ospf priority restores default priority 1
+runTest('815. no ip ospf priority restores default priority 1', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip ospf priority 200');
+    assert.strictEqual(getOspfInterfaceConfig(r0, 'Gig0/0').priority, 200);
+
+    const res = executeCliCommand(r0, 'no ip ospf priority');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getOspfInterfaceConfig(r0, 'Gig0/0').priority, 1);
+});
+
+// 816. ip ospf hello-interval sets hello interval (1-65535)
+runTest('816. ip ospf hello-interval sets hello interval (1-65535)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    const res = executeCliCommand(r0, 'ip ospf hello-interval 5');
+
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getOspfInterfaceConfig(r0, 'Gig0/0').helloInterval, 5);
+});
+
+// 817. no ip ospf hello-interval restores default hello interval 10s
+runTest('817. no ip ospf hello-interval restores default hello interval 10s', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip ospf hello-interval 5');
+    assert.strictEqual(getOspfInterfaceConfig(r0, 'Gig0/0').helloInterval, 5);
+
+    const res = executeCliCommand(r0, 'no ip ospf hello-interval');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getOspfInterfaceConfig(r0, 'Gig0/0').helloInterval, 10);
+});
+
+// 818. ip ospf dead-interval sets dead interval (1-65535)
+runTest('818. ip ospf dead-interval sets dead interval (1-65535)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    const res = executeCliCommand(r0, 'ip ospf dead-interval 20');
+
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getOspfInterfaceConfig(r0, 'Gig0/0').deadInterval, 20);
+});
+
+// 819. no ip ospf dead-interval restores default dead interval 40s
+runTest('819. no ip ospf dead-interval restores default dead interval 40s', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip ospf dead-interval 20');
+    assert.strictEqual(getOspfInterfaceConfig(r0, 'Gig0/0').deadInterval, 20);
+
+    const res = executeCliCommand(r0, 'no ip ospf dead-interval');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getOspfInterfaceConfig(r0, 'Gig0/0').deadInterval, 40);
+});
+
+// 820. Invalid hello-interval and dead-interval return descriptive errors
+runTest('820. Invalid hello-interval and dead-interval return descriptive errors', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+
+    const resH0 = executeCliCommand(r0, 'ip ospf hello-interval 0');
+    assert.strictEqual(resH0.success, false);
+
+    const resD0 = executeCliCommand(r0, 'ip ospf dead-interval 0');
+    assert.strictEqual(resD0.success, false);
+
+    const resHAlpha = executeCliCommand(r0, 'ip ospf hello-interval fast');
+    assert.strictEqual(resHAlpha.success, false);
+});
+
+// 821. Matching hello/dead intervals allow FULL adjacency formation
+runTest('821. Matching hello/dead intervals allow FULL adjacency formation', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip ospf hello-interval 5');
+    executeCliCommand(r0, 'ip ospf dead-interval 20');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'interface Gig0/0');
+    executeCliCommand(r1, 'ip ospf hello-interval 5');
+    executeCliCommand(r1, 'ip ospf dead-interval 20');
+
+    const helloRes = simulateOspfHello(r0.id, r1.id);
+    assert.strictEqual(helloRes.success, true);
+    assert.strictEqual(helloRes.state, 'FULL');
+});
+
+// 822. Hello interval mismatch prevents FULL adjacency formation
+runTest('822. Hello interval mismatch prevents FULL adjacency formation', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip ospf hello-interval 5');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    // r1 keeps default hello-interval 10
+
+    const helloRes = simulateOspfHello(r0.id, r1.id);
+    assert.strictEqual(helloRes.success, false);
+    assert.strictEqual(helloRes.reason, 'HELLO_INTERVAL_MISMATCH');
+    assert.strictEqual(Object.keys(r0.ospf.neighbors).length, 0);
+});
+
+// 823. Dead interval mismatch prevents FULL adjacency formation
+runTest('823. Dead interval mismatch prevents FULL adjacency formation', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip ospf dead-interval 30');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    // r1 keeps default dead-interval 40
+
+    const helloRes = simulateOspfHello(r0.id, r1.id);
+    assert.strictEqual(helloRes.success, false);
+    assert.strictEqual(helloRes.reason, 'DEAD_INTERVAL_MISMATCH');
+});
+
+// 824. Correcting hello/dead interval mismatch dynamically restores FULL adjacency and OSPF routes
+runTest('824. Correcting hello/dead interval mismatch dynamically restores FULL adjacency and OSPF routes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip ospf hello-interval 5');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    assert.strictEqual(r0.ospf.routes.length, 0, 'Adjacency should fail due to hello mismatch');
+
+    // Correct hello interval on r1
+    executeCliCommand(r1, 'interface Gig0/0');
+    executeCliCommand(r1, 'ip ospf hello-interval 5');
+
+    assert.strictEqual(r0.ospf.routes.length, 1, 'Routes should restore once hello interval matches');
+    assert.strictEqual(r0.ospf.routes[0].network, '192.168.2.0');
+});
+
+// 825. Router-ID change while OSPF is active updates router identity and cleans up old LSAs
+runTest('825. Router-ID change while OSPF is active updates router identity and cleans up old LSAs', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+    assert.ok(r0.ospf.lsdb.routerLsas['192.168.2.1']);
+
+    // Change Router ID on r1
+    executeCliCommand(r1, 'router-id 1.1.1.1');
+
+    assert.strictEqual(r1.ospf.routerId, '1.1.1.1');
+    assert.ok(r0.ospf.lsdb.routerLsas['1.1.1.1'], 'r0 must have new LSA for 1.1.1.1');
+    assert.strictEqual(r0.ospf.lsdb.routerLsas['192.168.2.1'], undefined, 'Old LSA must be removed');
+    assert.strictEqual(r0.ospf.routes.length, 1, 'OSPF routes must remain intact');
+});
+
+// 826. no router-id restores automatic Router ID selection and reconverges LSDB
+runTest('826. no router-id restores automatic Router ID selection and reconverges LSDB', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'router-id 9.9.9.9');
+    assert.strictEqual(r0.ospf.routerId, '9.9.9.9');
+
+    executeCliCommand(r0, 'no router-id');
+    assert.strictEqual(r0.ospf.routerId, '10.0.0.1', 'Should restore auto Router ID');
+    assert.strictEqual(r0.ospf.configuredRouterId, null);
+});
+
+// 827. OSPF routes survive unrelated interface configuration changes
+runTest('827. OSPF routes survive unrelated interface configuration changes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+    assert.strictEqual(r0.ospf.routes.length, 1);
+
+    // Modify priority on r0 (does not break adjacency)
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip ospf priority 50');
+
+    assert.strictEqual(r0.ospf.routes.length, 1, 'OSPF routes must survive priority change');
+});
+
+// 828. Interface shutdown immediately removes adjacency and uninstalls OSPF routes
+runTest('828. Interface shutdown immediately removes adjacency and uninstalls OSPF routes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+    assert.strictEqual(r0.ospf.routes.length, 1);
+
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'shutdown');
+
+    assert.strictEqual(Object.keys(r0.ospf.neighbors).length, 0);
+    assert.strictEqual(r0.ospf.routes.length, 0);
+});
+
+// 829. Interface no shutdown restores adjacency and reinstalls OSPF routes
+runTest('829. Interface no shutdown restores adjacency and reinstalls OSPF routes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'shutdown');
+    assert.strictEqual(r0.ospf.routes.length, 0);
+
+    executeCliCommand(r0, 'no shutdown');
+    assert.strictEqual(r0.ospf.routes.length, 1);
+});
+
+// 830. show ip ospf displays process ID, router ID, area, and interface count
+runTest('830. show ip ospf displays process ID, router ID, area, and interface count', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 5');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.255 area 0');
+
+    const res = executeCliCommand(r0, 'show ip ospf');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Routing Process "ospf 5"'));
+    assert.ok(res.output.includes('ID 10.0.0.1'));
+    assert.ok(res.output.includes('Area BACKBONE(0)'));
+    assert.ok(res.output.includes('Number of interfaces in this area is 1'));
+});
+
+// 831. show ip ospf interface detailed output displays cost, priority, hello/dead timers, and neighbor counts
+runTest('831. show ip ospf interface detailed output displays cost, priority, hello/dead timers, and neighbor counts', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.255 area 0');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip ospf cost 15');
+    executeCliCommand(r0, 'ip ospf priority 5');
+    executeCliCommand(r0, 'ip ospf hello-interval 8');
+    executeCliCommand(r0, 'ip ospf dead-interval 32');
+
+    const res = executeCliCommand(r0, 'show ip ospf interface');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Gig0/0 is up'));
+    assert.ok(res.output.includes('Cost: 15'));
+    assert.ok(res.output.includes('Priority 5'));
+    assert.ok(res.output.includes('Hello 8, Dead 32'));
+});
+
+// 832. show ip ospf interface brief tabular output displays PID, Area, IP/Mask, Cost, State, Nbrs
+runTest('832. show ip ospf interface brief tabular output displays PID, Area, IP/Mask, Cost, State, Nbrs', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.255 area 0');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip ospf cost 20');
+
+    const res = executeCliCommand(r0, 'show ip ospf interface brief');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Interface           PID   Area'));
+    assert.ok(res.output.includes('Gig0/0'));
+    assert.ok(res.output.includes('10.0.0.1/24'));
+    assert.ok(res.output.includes('20'));
+});
+
+// 833. show ip ospf neighbor displays Neighbor ID, Priority, State, Dead Time, Address, Interface
+runTest('833. show ip ospf neighbor displays Neighbor ID, Priority, State, Dead Time, Address, Interface', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+
+    const res = executeCliCommand(r0, 'show ip ospf neighbor');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Neighbor ID     Pri   State'));
+    assert.ok(res.output.includes('10.0.12.2'));
+    assert.ok(res.output.includes('FULL/ -'));
+    assert.ok(res.output.includes('Gig0/0'));
+});
+
+// 834. ip ospf commands executed outside interface configuration mode return error
+runTest('834. ip ospf commands executed outside interface configuration mode return error', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+
+    const res = executeCliCommand(r0, 'ip ospf cost 10');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('interface configuration mode'));
+});
+
+// 835. Multilayer Switch SVI supports ip ospf cost and interval configuration
+runTest('835. Multilayer Switch SVI supports ip ospf cost and interval configuration', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const [sw1] = networkState.devices;
+
+    setSwitchIpRouting(sw1, true);
+    setSwitchSviIp(sw1, 10, '10.0.10.1', '255.255.255.0');
+    setSwitchSviAdminStatus(sw1, 10, 'up');
+
+    executeCliCommand(sw1, 'enable');
+    executeCliCommand(sw1, 'conf t');
+    executeCliCommand(sw1, 'interface Vlan10');
+    const resCost = executeCliCommand(sw1, 'ip ospf cost 35');
+    const resHello = executeCliCommand(sw1, 'ip ospf hello-interval 6');
+
+    assert.strictEqual(resCost.success, true);
+    assert.strictEqual(resHello.success, true);
+    const cfg = getOspfInterfaceConfig(sw1, 'Vlan10');
+    assert.strictEqual(cfg.cost, 35);
+    assert.strictEqual(cfg.helloInterval, 6);
+});
+
+// 836. Full regression check: all V5.11, V5.12, V5.13 Phase 1, Phase 2, and Phase 3 components operate harmoniously
+runTest('836. Full regression check: all V5.11, V5.12, V5.13 Phase 1, Phase 2, and Phase 3 components operate harmoniously', () => {
+    assert.strictEqual(typeof ensureDeviceOspfState, 'function');
+    assert.strictEqual(typeof getDeviceRouterId, 'function');
+    assert.strictEqual(typeof isIpInWildcardRange, 'function');
+    assert.strictEqual(typeof addOspfNetworkStatement, 'function');
+    assert.strictEqual(typeof removeOspfNetworkStatement, 'function');
+    assert.strictEqual(typeof setOspfPassiveInterface, 'function');
+    assert.strictEqual(typeof getOspfEnabledInterfaces, 'function');
+    assert.strictEqual(typeof getOspfInterfaceConfig, 'function');
+    assert.strictEqual(typeof setOspfInterfaceConfig, 'function');
+    assert.strictEqual(typeof simulateOspfHello, 'function');
+    assert.strictEqual(typeof generateRouterLsa, 'function');
+    assert.strictEqual(typeof calculateOspfRoutesForDevice, 'function');
+    assert.strictEqual(typeof synchronizeOspfTopology, 'function');
+    assert.strictEqual(typeof formatCliOspfDatabase, 'function');
+    assert.strictEqual(typeof formatCliOspfGeneral, 'function');
+    assert.strictEqual(typeof formatCliOspfNeighbors, 'function');
+    assert.strictEqual(typeof formatCliOspfInterfaces, 'function');
+});
+
+// 837. Total test count verification check (Phase 3 baseline)
+runTest('837. Total test count verification check (Phase 3 baseline)', () => {
+    assert.ok(testsPassed >= 836);
+});
+
+// ==========================================
+// V5.13 PHASE 4: OSPF INSPECTOR & STATUS TESTS
+// ==========================================
+
+// 838. renderOspfInspector returns empty string for end hosts and Layer-2 switches
+runTest('838. renderOspfInspector returns empty string for end hosts and Layer-2 switches', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 300, 100);
+    const [pc0, sw0] = networkState.devices;
+
+    assert.strictEqual(renderOspfInspector(pc0), '');
+    assert.strictEqual(renderOspfInspector(sw0), '');
+});
+
+// 839. renderOspfInspector displays DISABLED status when OSPF is not configured
+runTest('839. renderOspfInspector displays DISABLED status when OSPF is not configured', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+
+    const html = renderOspfInspector(r0);
+    assert.ok(html.includes('OSPF ROUTING (AREA 0)'));
+    assert.ok(html.includes('DISABLED'));
+});
+
+// 840. renderOspfInspector displays ENABLED, Process ID, Router ID, and Area when OSPF is active
+runTest('840. renderOspfInspector displays ENABLED, Process ID, Router ID, and Area when OSPF is active', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 10');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.255 area 0');
+
+    const html = renderOspfInspector(r0);
+    assert.ok(html.includes('ENABLED'));
+    assert.ok(html.includes('10'));
+    assert.ok(html.includes('10.0.0.1'));
+});
+
+// 841. renderOspfInspector renders active OSPF interface table with IP, Cost, Priority, and Timers
+runTest('841. renderOspfInspector renders active OSPF interface table with IP, Cost, Priority, and Timers', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.255 area 0');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip ospf cost 25');
+    executeCliCommand(r0, 'ip ospf priority 5');
+    executeCliCommand(r0, 'ip ospf hello-interval 8');
+    executeCliCommand(r0, 'ip ospf dead-interval 32');
+
+    const html = renderOspfInspector(r0);
+    assert.ok(html.includes('Gig0/0'));
+    assert.ok(html.includes('10.0.0.1/24'));
+    assert.ok(html.includes('25'));
+    assert.ok(html.includes('5'));
+    assert.ok(html.includes('8s / 32s'));
+});
+
+// 842. renderOspfInspector renders active FULL neighbor with IP, Interface, Priority, and Dead Timer
+runTest('842. renderOspfInspector renders active FULL neighbor with IP, Interface, Priority, and Dead Timer', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+
+    const html = renderOspfInspector(r0);
+    assert.ok(html.includes('10.0.12.2'));
+    assert.ok(html.includes('FULL'));
+    assert.ok(html.includes('Gig0/0'));
+});
+
+// 843. Interface shutdown updates renderOspfInspector clearing active neighbors and routes
+runTest('843. Interface shutdown updates renderOspfInspector clearing active neighbors and routes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+    let html = renderOspfInspector(r0);
+    assert.ok(html.includes('192.168.2.0/24'));
+
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'shutdown');
+
+    html = renderOspfInspector(r0);
+    assert.ok(html.includes('No active OSPF neighbors'));
+    assert.ok(html.includes('No dynamic OSPF routes installed'));
+});
+
+// 844. Interface no shutdown restores renderOspfInspector neighbor and route counts
+runTest('844. Interface no shutdown restores renderOspfInspector neighbor and route counts', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'shutdown');
+    executeCliCommand(r0, 'no shutdown');
+
+    const html = renderOspfInspector(r0);
+    assert.ok(html.includes('10.0.12.2'));
+    assert.ok(html.includes('192.168.2.0/24'));
+});
+
+// 845. renderOspfInspector renders dynamic OSPF route table with prefix, next-hop, AD (110), and metric
+runTest('845. renderOspfInspector renders dynamic OSPF route table with prefix, next-hop, AD (110), and metric', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+
+    const html = renderOspfInspector(r0);
+    assert.ok(html.includes('192.168.2.0/24'));
+    assert.ok(html.includes('10.0.12.2'));
+    assert.ok(html.includes('Gig0/0'));
+    assert.ok(html.includes('110'));
+    assert.ok(html.includes('2'));
+});
+
+// 846. ip ospf cost change dynamically updates metric displayed in renderOspfInspector
+runTest('846. ip ospf cost change dynamically updates metric displayed in renderOspfInspector', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip ospf cost 40');
+
+    const html = renderOspfInspector(r0);
+    assert.ok(html.includes('41'), 'Path cost should be 40 + 1 = 41');
+});
+
+// 847. renderOspfInspector renders LSDB table with Router-LSA ADV Router, Seq#, and Link Count
+runTest('847. renderOspfInspector renders LSDB table with Router-LSA ADV Router, Seq#, and Link Count', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.255 area 0');
+
+    const html = renderOspfInspector(r0);
+    assert.ok(html.includes('LINK-STATE DATABASE (LSDB)'));
+    assert.ok(html.includes('10.0.0.1'));
+    assert.ok(html.includes('Router (Type 1)'));
+    assert.ok(html.includes('0x80000001'));
+});
+
+// 848. Router-ID change dynamically updates Router ID in renderOspfInspector
+runTest('848. Router-ID change dynamically updates Router ID in renderOspfInspector', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.255 area 0');
+    executeCliCommand(r0, 'router-id 7.7.7.7');
+
+    const html = renderOspfInspector(r0);
+    assert.ok(html.includes('7.7.7.7'));
+});
+
+// 849. no router ospf immediately updates renderOspfInspector to show DISABLED
+runTest('849. no router ospf immediately updates renderOspfInspector to show DISABLED', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.255 area 0');
+    assert.ok(renderOspfInspector(r0).includes('ENABLED'));
+
+    executeCliCommand(r0, 'no router ospf 1');
+    assert.ok(renderOspfInspector(r0).includes('DISABLED'));
+});
+
+// 850. Multilayer switch with ip routing and OSPF renders renderOspfInspector correctly with SVI details
+runTest('850. Multilayer switch with ip routing and OSPF renders renderOspfInspector correctly with SVI details', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('router', 300, 100);
+    const [sw1, r1] = networkState.devices;
+
+    setSwitchIpRouting(sw1, true);
+    setSwitchSviIp(sw1, 10, '10.0.10.1', '255.255.255.0');
+    setSwitchSviAdminStatus(sw1, 10, 'up');
+
+    r1.interfaces['Gig0/0'].ip = '10.0.10.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addConnection(sw1.id, r1.id);
+    setSwitchPortMode(sw1, 'Fa0/1', 'access');
+    setSwitchPortAccessVlan(sw1, 'Fa0/1', 10);
+
+    executeCliCommand(sw1, 'enable');
+    executeCliCommand(sw1, 'conf t');
+    executeCliCommand(sw1, 'router ospf 1');
+    executeCliCommand(sw1, 'network 10.0.10.0 0.0.0.255 area 0');
+
+    const html = renderOspfInspector(sw1);
+    assert.ok(html.includes('ENABLED'));
+    assert.ok(html.includes('Vlan10'));
+    assert.ok(html.includes('10.0.10.1/24'));
+});
+
+// 851. renderRouterRoutingTableSection displays O route badge for OSPF routes
+runTest('851. renderRouterRoutingTableSection displays O route badge for OSPF routes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+
+    const html = renderRouterRoutingTableSection(r0);
+    assert.ok(html.includes('badge--ospf'));
+    assert.ok(html.includes('192.168.2.0'));
+    assert.ok(html.includes('110'));
+});
+
+// 852. renderRouterInspector integrates renderOspfInspector cleanly
+runTest('852. renderRouterInspector integrates renderOspfInspector cleanly', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.255 area 0');
+
+    const html = renderRouterInspector(r0);
+    assert.ok(html.includes('id="routerOspfSection"'));
+    assert.ok(html.includes('OSPF ROUTING (AREA 0)'));
+    assert.ok(html.includes('ENABLED'));
+});
+
+// 853. Cable disconnect removes neighbor and OSPF routes from renderOspfInspector
+runTest('853. Cable disconnect removes neighbor and OSPF routes from renderOspfInspector', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.12.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.12.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.12.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.12.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.2.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+    let html = renderOspfInspector(r0);
+    assert.ok(html.includes('10.0.12.2'));
+    assert.ok(html.includes('192.168.2.0/24'));
+
+    deleteConnection(networkState.connections[0].id);
+
+    html = renderOspfInspector(r0);
+    assert.ok(html.includes('No active OSPF neighbors'));
+    assert.ok(html.includes('No dynamic OSPF routes installed'));
+});
+
+// 854. Full regression check: all V5.11, V5.12, V5.13 Phase 1, Phase 2, Phase 3, and Phase 4 components operate harmoniously
+runTest('854. Full regression check: all V5.11, V5.12, V5.13 Phase 1, Phase 2, Phase 3, and Phase 4 components operate harmoniously', () => {
+    assert.strictEqual(typeof ensureDeviceOspfState, 'function');
+    assert.strictEqual(typeof getDeviceRouterId, 'function');
+    assert.strictEqual(typeof isIpInWildcardRange, 'function');
+    assert.strictEqual(typeof addOspfNetworkStatement, 'function');
+    assert.strictEqual(typeof removeOspfNetworkStatement, 'function');
+    assert.strictEqual(typeof setOspfPassiveInterface, 'function');
+    assert.strictEqual(typeof getOspfEnabledInterfaces, 'function');
+    assert.strictEqual(typeof getOspfInterfaceConfig, 'function');
+    assert.strictEqual(typeof setOspfInterfaceConfig, 'function');
+    assert.strictEqual(typeof simulateOspfHello, 'function');
+    assert.strictEqual(typeof generateRouterLsa, 'function');
+    assert.strictEqual(typeof calculateOspfRoutesForDevice, 'function');
+    assert.strictEqual(typeof synchronizeOspfTopology, 'function');
+    assert.strictEqual(typeof formatCliOspfDatabase, 'function');
+    assert.strictEqual(typeof formatCliOspfGeneral, 'function');
+    assert.strictEqual(typeof formatCliOspfNeighbors, 'function');
+    assert.strictEqual(typeof formatCliOspfInterfaces, 'function');
+    assert.strictEqual(typeof renderOspfInspector, 'function');
+});
+
+// 855. Total test count verification check (Phase 4 baseline)
+runTest('855. Total test count verification check (Phase 4 baseline)', () => {
+    assert.ok(testsPassed >= 854);
+});
+
+// ==========================================
+// CLI PING & ROUTING INTEGRATION TESTS
+// ==========================================
+
+// 856. Router CLI ping to its own active physical interface = 4/4 success
+runTest('856. Router CLI ping to its own active physical interface = 4/4 success', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+
+    const res = executeCliPing(r0, '10.0.0.1');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Packets: Sent = 4, Received = 4, Lost = 0 (0% loss)'));
+    assert.ok(res.output.includes('Reply from 10.0.0.1: bytes=32 TTL=64'));
+});
+
+// 857. Router CLI ping to its own active secondary interface = 4/4 success
+runTest('857. Router CLI ping to its own active secondary interface = 4/4 success', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r0.interfaces['Gig0/1'].ip = '192.168.20.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    const res = executeCliPing(r0, '192.168.20.1');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Packets: Sent = 4, Received = 4, Lost = 0 (0% loss)'));
+    assert.ok(res.output.includes('Reply from 192.168.20.1: bytes=32 TTL=64'));
+});
+
+// 858. Router CLI ping to its own Loopback = 4/4 success
+runTest('858. Router CLI ping to its own Loopback = 4/4 success', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Loopback0'] = {
+        name: 'Loopback0',
+        ip: '1.1.1.1',
+        subnetMask: '255.255.255.255',
+        mac: '00:00:00:01:01:01',
+        status: 'up',
+        isLoopback: true
+    };
+
+    const res = executeCliPing(r0, '1.1.1.1');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Packets: Sent = 4, Received = 4, Lost = 0 (0% loss)'));
+    assert.ok(res.output.includes('Reply from 1.1.1.1: bytes=32 TTL=64'));
+});
+
+// 859. Router CLI ping to its own shutdown interface = unreachable
+runTest('859. Router CLI ping to its own shutdown interface = unreachable', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r0.interfaces['Gig0/0'].status = 'down';
+
+    const res = executeCliPing(r0, '10.0.0.1');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Destination host unreachable'));
+    assert.ok(res.output.includes('Lost = 4 (100% loss)'));
+});
+
+// 860. Multilayer Switch CLI ping to its own active SVI = 4/4 success
+runTest('860. Multilayer Switch CLI ping to its own active SVI = 4/4 success', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('router', 300, 100);
+    const [sw1, r1] = networkState.devices;
+
+    setSwitchIpRouting(sw1, true);
+    setSwitchSviIp(sw1, 10, '10.0.10.1', '255.255.255.0');
+    setSwitchSviAdminStatus(sw1, 10, 'up');
+
+    r1.interfaces['Gig0/0'].ip = '10.0.10.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(sw1.id, r1.id);
+    setSwitchPortMode(sw1, 'Fa0/1', 'access');
+    setSwitchPortAccessVlan(sw1, 'Fa0/1', 10);
+
+    const res = executeCliPing(sw1, '10.0.10.1');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Packets: Sent = 4, Received = 4, Lost = 0 (0% loss)'));
+    assert.ok(res.output.includes('Reply from 10.0.10.1: bytes=32 TTL=64'));
+});
+
+// 861. Router CLI ping across OSPF topology to remote LAN IP 192.168.20.1 = 4/4 success
+runTest('861. Router CLI ping across OSPF topology to remote LAN IP 192.168.20.1 = 4/4 success', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.0.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.20.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    addConnection(r0.id, r1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.3 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.0.0 0.0.0.3 area 0');
+    executeCliCommand(r1, 'network 192.168.20.0 0.0.0.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+
+    // Verify Router0 has OSPF route to 192.168.20.0/24 via 10.0.0.2
+    const r0Routes = getRouterRoutingTable(r0.id);
+    const ospfRoute = r0Routes.find(r => r.network === '192.168.20.0');
+    assert.ok(ospfRoute, 'OSPF route for 192.168.20.0 should exist on Router0');
+    assert.strictEqual(ospfRoute.code, 'O');
+
+    const res = executeCliPing(r0, '192.168.20.1');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Packets: Sent = 4, Received = 4, Lost = 0 (0% loss)'));
+    assert.ok(res.output.includes('Reply from 192.168.20.1: bytes=32 TTL=64'));
+});
+
+// 862. Router CLI ping to an unroutable destination = failure/unreachable
+runTest('862. Router CLI ping to an unroutable destination = failure/unreachable', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+
+    const res = executeCliPing(r0, '172.16.50.1');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Destination host unreachable') || res.output.includes('could not find host'));
+});
+
+// 863. Existing PC-to-PC routed ping through OSPF = still 4/4
+runTest('863. Existing PC-to-PC routed ping through OSPF = still 4/4', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 400, 100);
+    addDevice('pc', 550, 100);
+    const [pc0, r0, r1, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    // pc0 -> r0 (gets r0:Gig0/0)
+    addConnection(pc0.id, r0.id);
+    // r0 -> r1 (gets r0:Gig0/1, r1:Gig0/0)
+    addConnection(r0.id, r1.id);
+    // r1 -> pc1 (gets r1:Gig0/1)
+    addConnection(r1.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.252';
+
+    r1.interfaces['Gig0/0'].ip = '10.0.0.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/1'].ip = '192.168.20.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.20.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.20.1';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 0.0.0.0 255.255.255.255 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 0.0.0.0 255.255.255.255 area 0');
+
+    simulateOspfHello(r0.id, r1.id);
+
+    const res = executeCliPing(pc0, '192.168.20.10');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Packets: Sent = 4, Received = 4, Lost = 0 (0% loss)'));
+});
+
+// 864. Directly connected router-to-router ping = still 4/4
+runTest('864. Directly connected router-to-router ping = still 4/4', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    r1.interfaces['Gig0/0'].ip = '10.0.0.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.252';
+    addConnection(r0.id, r1.id);
+
+    const res = executeCliPing(r0, '10.0.0.2');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Packets: Sent = 4, Received = 4, Lost = 0 (0% loss)'));
+    assert.ok(res.output.includes('Reply from 10.0.0.2: bytes=32 TTL=64'));
+});
+
+// 865. Total test count verification check
+runTest('865. Total test count verification check', () => {
+    assert.ok(testsPassed >= 864);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

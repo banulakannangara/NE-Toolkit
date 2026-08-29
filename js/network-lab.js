@@ -447,6 +447,16 @@ function addDevice(type, x, y) {
                     mac: mac2,
                     status: 'up'
                 }
+            },
+            ospf: {
+                enabled: false,
+                processId: null,
+                configuredRouterId: null,
+                routerId: null,
+                networks: [],
+                passiveInterfaces: [],
+                neighbors: {},
+                interfaces: {}
             }
         };
     } else if (type === 'switch') {
@@ -634,6 +644,7 @@ function deleteDevice(deviceId) {
     delete inspectorDrafts[deviceId];
 
     updateStatus(`${device.name} removed.`);
+    updateOspfAdjacencies();
     render();
 }
 
@@ -658,6 +669,7 @@ function deleteConnection(connectionId) {
     }
 
     updateStatus(`Connection ${connection.id} removed.`);
+    updateOspfAdjacencies();
     render();
 }
 
@@ -3232,13 +3244,16 @@ function renderRouterRoutingTableSection(router) {
 
     const rows = routes.map((route) => {
         const isConnected = route.code === 'C';
+        const isOspf = route.code === 'O';
         const codeBadge = isConnected
             ? '<span class="badge badge--connected" title="Connected Route">C</span>'
-            : '<span class="badge badge--static" title="Static Route">S</span>';
+            : isOspf
+                ? '<span class="badge badge--ospf" style="background: rgba(237, 137, 54, 0.2); border: 1px solid rgba(237, 137, 54, 0.4); color: #ed8936;" title="OSPF Route">O</span>'
+                : '<span class="badge badge--static" title="Static Route">S</span>';
         const nextHopDisplay = route.nextHop ? `<code>${escapeHtml(route.nextHop)}</code>` : '—';
         const ifaceDisplay = route.interface ? escapeHtml(route.interface) : '—';
-        const adDisplay = typeof route.adminDistance === 'number' ? escapeHtml(String(route.adminDistance)) : (isConnected ? '0' : '1');
-        const metricDisplay = !isConnected && typeof route.metric === 'number' ? escapeHtml(String(route.metric)) : '—';
+        const adDisplay = typeof route.adminDistance === 'number' ? escapeHtml(String(route.adminDistance)) : (isConnected ? '0' : (isOspf ? '110' : '1'));
+        const metricDisplay = typeof route.metric === 'number' ? escapeHtml(String(route.metric)) : (isConnected ? '—' : '0');
         const statusClass = route.status === 'down' ? 'route-status--down' : 'route-status--active';
         const statusDisplay = `<span class="route-status ${statusClass}">${escapeHtml(route.status || 'active')}</span>`;
         const actionDisplay = !isConnected && route.id
@@ -3691,6 +3706,7 @@ function renderRouterInspector(selected) {
             </div>
             ${renderRouterRoutingTableSection(selected)}
             ${renderRouterStaticRouteFormSection(selected)}
+            ${renderOspfInspector(selected)}
             ${renderRouterAclSection(selected)}
             ${renderDhcpServerInspector(selected)}
             ${renderArpTableInspector(selected)}
@@ -3701,6 +3717,202 @@ function renderRouterInspector(selected) {
                 </button>
             </div>
             <p class="property-info">Configuration updates are applied only when you click Apply Changes, so invalid data never overwrites the current device state.</p>
+        </div>
+    `;
+}
+
+/**
+ * Renders the OSPF Routing & Live Topology Status section in the device properties inspector.
+ */
+function renderOspfInspector(device) {
+    if (!device || (device.type !== 'router' && !(device.type === 'switch' && device.ipRouting))) {
+        return '';
+    }
+    ensureDeviceOspfState(device);
+    const isEnabled = Boolean(device.ospf && device.ospf.enabled);
+    const processId = isEnabled ? (device.ospf.processId || 1) : '-';
+    const rid = isEnabled ? (device.ospf.routerId || getDeviceRouterId(device)) : '-';
+    const enabledIfaces = isEnabled ? getOspfEnabledInterfaces(device) : [];
+    const neighbors = isEnabled ? Object.values(device.ospf.neighbors || {}) : [];
+    const routes = isEnabled ? (device.ospf.routes || []) : [];
+    const lsas = isEnabled ? Object.values(device.ospf.lsdb?.routerLsas || {}) : [];
+
+    const ifaceRows = enabledIfaces.map((iface) => {
+        const prefix = iface.subnetMask ? getPrefixLengthFromMask(iface.subnetMask) : 24;
+        const ipMask = `${iface.ip}/${prefix}`;
+        const isPassive = iface.isPassive;
+        const stateBadge = isPassive
+            ? '<span class="status-badge" style="background: rgba(160, 174, 192, 0.2); color: #a0aec0; border: 1px solid rgba(160, 174, 192, 0.4);">PASSIVE</span>'
+            : '<span class="status-badge status-up">P2P</span>';
+        const timers = `${iface.helloInterval}s / ${iface.deadInterval}s`;
+        return `
+            <tr>
+                <td><strong>${escapeHtml(iface.name)}</strong></td>
+                <td><code>${escapeHtml(ipMask)}</code></td>
+                <td>Area ${escapeHtml(String(iface.area))}</td>
+                <td>${stateBadge}</td>
+                <td>${escapeHtml(String(iface.cost))}</td>
+                <td>${escapeHtml(String(iface.priority))}</td>
+                <td>${escapeHtml(timers)}</td>
+            </tr>
+        `;
+    }).join('');
+
+    const neighborRows = neighbors.map((nbr) => {
+        const isFull = nbr.state === 'FULL';
+        const stateBadge = isFull
+            ? '<span class="status-badge status-up">FULL</span>'
+            : '<span class="status-badge status-down">DOWN</span>';
+        const deadStr = `00:00:${String(nbr.deadTime || 40).padStart(2, '0')}`;
+        return `
+            <tr>
+                <td><code>${escapeHtml(nbr.routerId)}</code></td>
+                <td><code>${escapeHtml(nbr.ip)}</code></td>
+                <td>${escapeHtml(nbr.interface)}</td>
+                <td>${stateBadge}</td>
+                <td>${escapeHtml(String(nbr.priority !== undefined ? nbr.priority : 1))}</td>
+                <td>${escapeHtml(deadStr)}</td>
+            </tr>
+        `;
+    }).join('');
+
+    const routeRows = routes.map((r) => {
+        return `
+            <tr>
+                <td><span class="badge" style="background: rgba(237, 137, 54, 0.2); border: 1px solid rgba(237, 137, 54, 0.4); color: #ed8936;">O</span></td>
+                <td><code>${escapeHtml(r.network)}/${escapeHtml(String(r.prefixLength))}</code></td>
+                <td><code>${escapeHtml(r.nextHop || '—')}</code></td>
+                <td>${escapeHtml(r.interface || '—')}</td>
+                <td>${escapeHtml(String(r.adminDistance))}</td>
+                <td>${escapeHtml(String(r.metric))}</td>
+            </tr>
+        `;
+    }).join('');
+
+    const lsaRows = lsas.map((lsa) => {
+        const seqHex = '0x' + (lsa.seqNumber || 0x80000001).toString(16).padStart(8, '0');
+        const linkCount = lsa.links ? lsa.links.length : 0;
+        const linkSummary = (lsa.links || []).map(l => `${l.linkType === 'point-to-point' ? 'P2P' : 'Stub'}: ${l.linkId}`).join(', ') || 'None';
+        return `
+            <tr>
+                <td><code>${escapeHtml(lsa.advRouter)}</code></td>
+                <td>Router (Type 1)</td>
+                <td>${escapeHtml(seqHex)}</td>
+                <td>${escapeHtml(String(linkCount))}</td>
+                <td style="font-size: 11px; color: #a0aec0;">${escapeHtml(linkSummary)}</td>
+            </tr>
+        `;
+    }).join('');
+
+    return `
+        <div class="property-summary" id="routerOspfSection">
+            <h4>OSPF ROUTING (AREA 0)</h4>
+            <div class="property-summary-grid">
+                <div class="property-summary-item">
+                    <span>STATUS</span>
+                    <strong style="color: ${isEnabled ? '#48bb78' : '#e53e3e'};">${isEnabled ? 'ENABLED' : 'DISABLED'}</strong>
+                </div>
+                <div class="property-summary-item">
+                    <span>PROCESS ID</span>
+                    <strong>${escapeHtml(String(processId))}</strong>
+                </div>
+                <div class="property-summary-item">
+                    <span>ROUTER ID</span>
+                    <strong>${escapeHtml(String(rid))}</strong>
+                </div>
+                <div class="property-summary-item">
+                    <span>NEIGHBORS</span>
+                    <strong>${neighbors.length}</strong>
+                </div>
+                <div class="property-summary-item">
+                    <span>OSPF ROUTES</span>
+                    <strong>${routes.length}</strong>
+                </div>
+                <div class="property-summary-item">
+                    <span>LSDB ENTRIES</span>
+                    <strong>${lsas.length}</strong>
+                </div>
+            </div>
+
+            ${isEnabled ? `
+                <div class="ospf-inspector-details" style="margin-top: 10px;">
+                    <h5 style="font-size: 11px; margin: 8px 0 4px 0; color: #a0aec0;">OSPF INTERFACES</h5>
+                    ${enabledIfaces.length > 0 ? `
+                        <table class="property-table ospf-interfaces-table">
+                            <thead>
+                                <tr>
+                                    <th>Interface</th>
+                                    <th>IP/Prefix</th>
+                                    <th>Area</th>
+                                    <th>State</th>
+                                    <th>Cost</th>
+                                    <th>Pri</th>
+                                    <th>Timers (H/D)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${ifaceRows}
+                            </tbody>
+                        </table>
+                    ` : '<p class="empty-state" style="font-size: 11px; margin: 4px 0;">No active OSPF interfaces matching network statements.</p>'}
+
+                    <h5 style="font-size: 11px; margin: 12px 0 4px 0; color: #a0aec0;">OSPF NEIGHBORS</h5>
+                    ${neighbors.length > 0 ? `
+                        <table class="property-table ospf-neighbors-table">
+                            <thead>
+                                <tr>
+                                    <th>Neighbor ID</th>
+                                    <th>IP Address</th>
+                                    <th>Interface</th>
+                                    <th>State</th>
+                                    <th>Pri</th>
+                                    <th>Dead Time</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${neighborRows}
+                            </tbody>
+                        </table>
+                    ` : '<p class="empty-state" style="font-size: 11px; margin: 4px 0;">No active OSPF neighbors.</p>'}
+
+                    <h5 style="font-size: 11px; margin: 12px 0 4px 0; color: #a0aec0;">DYNAMIC OSPF ROUTES</h5>
+                    ${routes.length > 0 ? `
+                        <table class="property-table ospf-routes-table">
+                            <thead>
+                                <tr>
+                                    <th>Code</th>
+                                    <th>Prefix</th>
+                                    <th>Next Hop</th>
+                                    <th>Interface</th>
+                                    <th>AD</th>
+                                    <th>Metric</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${routeRows}
+                            </tbody>
+                        </table>
+                    ` : '<p class="empty-state" style="font-size: 11px; margin: 4px 0;">No dynamic OSPF routes installed.</p>'}
+
+                    <h5 style="font-size: 11px; margin: 12px 0 4px 0; color: #a0aec0;">LINK-STATE DATABASE (LSDB)</h5>
+                    ${lsas.length > 0 ? `
+                        <table class="property-table ospf-lsdb-table">
+                            <thead>
+                                <tr>
+                                    <th>ADV Router</th>
+                                    <th>LSA Type</th>
+                                    <th>Seq#</th>
+                                    <th>Links</th>
+                                    <th>Advertised Subnets / P2P</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${lsaRows}
+                            </tbody>
+                        </table>
+                    ` : '<p class="empty-state" style="font-size: 11px; margin: 4px 0;">LSDB is empty.</p>'}
+                </div>
+            ` : ''}
         </div>
     `;
 }
@@ -4008,6 +4220,7 @@ function renderSwitchInspector(selected) {
                 <button id="clearMacTable" class="toolbar-button" type="button">Clear MAC Table</button>
             </div>
         </div>
+        ${targetSw.ipRouting ? renderOspfInspector(targetSw) : ''}
     `;
 }
 
@@ -6427,7 +6640,11 @@ function getSwitchRoutingTable(switchOrId) {
         };
     });
 
-    return [...connectedRoutes, ...operationalStaticRoutes];
+    const ospfRoutes = (sw.ospf && sw.ospf.enabled && Array.isArray(sw.ospf.routes))
+        ? sw.ospf.routes
+        : [];
+
+    return [...connectedRoutes, ...operationalStaticRoutes, ...ospfRoutes];
 }
 
 let staticRouteCounter = 0;
@@ -7048,6 +7265,7 @@ function toggleRouterInterfaceStatus(routerId, ifName) {
 
     pushHistory();
     iface.status = newStatus;
+    updateOspfAdjacencies();
 
     updateStatus(`${router.name} interface ${ifName} is now ${newStatus.toUpperCase()}.`);
     render();
@@ -7144,7 +7362,11 @@ function getRouterRoutingTable(routerId) {
         };
     });
 
-    return [...connectedRoutes, ...operationalStaticRoutes];
+    const ospfRoutes = (router.ospf && router.ospf.enabled && Array.isArray(router.ospf.routes))
+        ? router.ospf.routes
+        : [];
+
+    return [...connectedRoutes, ...operationalStaticRoutes, ...ospfRoutes];
 }
 
 /**
@@ -7703,6 +7925,16 @@ function resolveNextHopIp(sourceDevice, destinationDevice) {
 
     if (sameSubnet) {
         return destinationDevice.ip;
+    }
+
+    // For routers and Layer-3 switches, consult routing table (Connected, Static, OSPF)
+    const isSourceL3 = sourceDevice.type === 'router' || (sourceDevice.type === 'switch' && sourceDevice.ipRouting);
+    if (isSourceL3) {
+        const routeMatch = lookupRoute(sourceDevice.id, destinationDevice.ip);
+        if (routeMatch && routeMatch.success && routeMatch.route) {
+            return routeMatch.route.nextHop || destinationDevice.ip;
+        }
+        return null;
     }
 
     const rawGateway = typeof sourceDevice.gateway === 'string' ? sourceDevice.gateway.trim() : '';
@@ -9644,7 +9876,9 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
         };
     }
 
-    if (!sameSubnet) {
+    const isSourceL3 = sourceDevice.type === 'router' || (sourceDevice.type === 'switch' && sourceDevice.ipRouting);
+
+    if (!sameSubnet && !isSourceL3) {
         if (!sourceDevice.gateway || !isValidIPv4(sourceDevice.gateway)) {
             return {
                 success: false,
@@ -10569,6 +10803,9 @@ function getDeviceCliPrompt(deviceOrId) {
     const name = dev.name || dev.id;
     if (dev.type === 'router') {
         const session = getDeviceTerminalSession(dev.id);
+        if (session.mode === 'config-router') {
+            return `${name}(config-router)#`;
+        }
         if (session.mode === 'dhcp-config' || session.mode === 'config-dhcp') {
             return `${name}(dhcp-config)#`;
         }
@@ -10585,6 +10822,9 @@ function getDeviceCliPrompt(deviceOrId) {
     }
     if (dev.type === 'switch') {
         const session = getDeviceTerminalSession(dev.id);
+        if (session.mode === 'config-router') {
+            return `${name}(config-router)#`;
+        }
         if (session.mode === 'dhcp-config' || session.mode === 'config-dhcp') {
             return `${name}(dhcp-config)#`;
         }
@@ -11006,8 +11246,18 @@ function formatCliRouterIpInterfaceBrief(router) {
     return lines.join('\n');
 }
 
-function formatCliRouterRoutingTable(router) {
-    const routes = getRouterRoutingTable(router.id);
+function formatCliRouterRoutingTable(router, filterProtocol = null) {
+    let routes = getRouterRoutingTable(router.id);
+    if (filterProtocol) {
+        const p = String(filterProtocol).toLowerCase();
+        if (p === 'ospf' || p === 'o') {
+            routes = routes.filter(r => r.code === 'O' || r.type === 'ospf');
+        } else if (p === 'static' || p === 's') {
+            routes = routes.filter(r => r.code === 'S' || r.code === 'S*' || r.type === 'static');
+        } else if (p === 'connected' || p === 'c') {
+            routes = routes.filter(r => r.code === 'C' || r.type === 'connected');
+        }
+    }
     const defaultRoute = routes ? routes.find((r) => (r.network === '0.0.0.0' && (r.prefixLength === 0 || r.subnetMask === '0.0.0.0')) && r.status !== 'down') : null;
     const gatewayText = defaultRoute
         ? `Gateway of last resort is ${defaultRoute.nextHop || defaultRoute.interface} to network 0.0.0.0`
@@ -11028,13 +11278,13 @@ function formatCliRouterRoutingTable(router) {
 
     routes.forEach((route) => {
         const isDefault = route.network === '0.0.0.0' && (route.prefixLength === 0 || route.subnetMask === '0.0.0.0');
-        let code = route.code || (route.type === 'connected' ? 'C' : (isDefault ? 'S*' : 'S'));
+        let code = route.code || (route.type === 'connected' ? 'C' : (route.type === 'ospf' ? 'O' : (isDefault ? 'S*' : 'S')));
         if (isDefault && code === 'S') {
             code = 'S*';
         }
         const net = `${route.network}/${route.prefixLength}`;
         const iface = route.interface || '—';
-        const ad = typeof route.adminDistance === 'number' ? route.adminDistance : (code === 'C' ? 0 : 1);
+        const ad = typeof route.adminDistance === 'number' ? route.adminDistance : (code === 'C' ? 0 : (code === 'O' ? 110 : 1));
         const metric = typeof route.metric === 'number' ? route.metric : 0;
         const isDown = route.status === 'down';
 
@@ -11359,7 +11609,7 @@ function formatCliSwitchIpInterfaceBrief(switchOrId) {
     return lines.join('\n');
 }
 
-function formatCliSwitchRoutingTable(switchOrId) {
+function formatCliSwitchRoutingTable(switchOrId, filterProtocol = null) {
     const sw = getSwitchDevice(switchOrId);
     if (!sw) return '% Switch not found.';
     ensureSwitchVlanState(sw);
@@ -11368,9 +11618,20 @@ function formatCliSwitchRoutingTable(switchOrId) {
         return `% IP routing is disabled. Use 'ip routing' in global configuration mode to enable routing table.`;
     }
 
-    const routingTable = getSwitchRoutingTable(sw.id);
+    let routingTable = getSwitchRoutingTable(sw.id);
+    if (filterProtocol) {
+        const p = String(filterProtocol).toLowerCase();
+        if (p === 'ospf' || p === 'o') {
+            routingTable = routingTable.filter(r => r.code === 'O' || r.type === 'ospf');
+        } else if (p === 'static' || p === 's') {
+            routingTable = routingTable.filter(r => r.code === 'S' || r.code === 'S*' || r.type === 'static');
+        } else if (p === 'connected' || p === 'c') {
+            routingTable = routingTable.filter(r => r.code === 'C' || r.type === 'connected');
+        }
+    }
+
     const lines = [
-        'Codes: C - connected, S - static',
+        'Codes: C - connected, S - static, O - OSPF',
         'Gateway of last resort is not set',
         ''
     ];
@@ -11383,6 +11644,8 @@ function formatCliSwitchRoutingTable(switchOrId) {
     routingTable.forEach((r) => {
         if (r.code === 'C' || r.type === 'connected') {
             lines.push(`C    ${r.cidr} is directly connected, ${r.interface}`);
+        } else if (r.code === 'O' || r.type === 'ospf') {
+            lines.push(`O    ${r.cidr} [${r.adminDistance}/${r.metric}] via ${r.nextHop}, ${r.interface}`);
         } else if (r.code === 'S' || r.type === 'static') {
             if (r.nextHop && r.interface) {
                 lines.push(`S    ${r.cidr} [${r.adminDistance}/${r.metric}] via ${r.nextHop}, ${r.interface}`);
@@ -11686,6 +11949,48 @@ function executeCliPing(sourceDev, targetIpArg) {
             output: lines.join('\n'),
             clear: false,
             status: 'error'
+        };
+    }
+
+    // Local ICMP delivery: pinging an IP belonging to the source device itself
+    if (targetMatch.device && targetMatch.device.id === sourceDev.id) {
+        if (targetMatch.status === 'down') {
+            const errLine = 'Destination host unreachable.';
+            const lines = [
+                `Pinging ${rawTarget}...`,
+                '',
+                errLine,
+                errLine,
+                errLine,
+                errLine,
+                '',
+                `Ping statistics for ${rawTarget}:`,
+                '    Packets: Sent = 4, Received = 0, Lost = 4 (100% loss)'
+            ];
+            return {
+                success: false,
+                output: lines.join('\n'),
+                clear: false,
+                status: 'error'
+            };
+        }
+
+        const lines = [
+            `Pinging ${rawTarget}...`,
+            '',
+            `Reply from ${rawTarget}: bytes=32 TTL=64`,
+            `Reply from ${rawTarget}: bytes=32 TTL=64`,
+            `Reply from ${rawTarget}: bytes=32 TTL=64`,
+            `Reply from ${rawTarget}: bytes=32 TTL=64`,
+            '',
+            `Ping statistics for ${rawTarget}:`,
+            '    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss)'
+        ];
+        return {
+            success: true,
+            output: lines.join('\n'),
+            clear: false,
+            status: 'success'
         };
     }
 
@@ -12071,10 +12376,24 @@ function executeCliCommand(deviceId, rawInput) {
   hostname <name>               - Set device system name
   interface <name>              - Enter interface configuration mode (alias: int)
   ip route <net> <mask> <next-hop> [ad] [metric] - Configure a static route
-   no ip route <net> <mask> [next-hop]            - Delete a static route
+  no ip route <net> <mask> [next-hop]            - Delete a static route
+  router ospf <process-id>      - Configure OSPF routing process (enters router config mode)
+  no router ospf [process-id]   - Disable OSPF routing process
   ip dhcp pool <name>           - Configure DHCP pool (enters DHCP config mode)
   ip dhcp excluded-address <low> [high] - Configure excluded IP addresses
   exit                          - Return to Privileged EXEC mode
+  end                           - Return to Privileged EXEC mode
+  do <command>                  - Execute an operational command
+  help, ?                       - Show available commands`;
+            } else if (session.mode === 'config-router') {
+                helpText = `Commands available in Router OSPF Configuration mode on ${dev.name}:
+  network <network-ip> <wildcard> area <area-id> - Enable OSPF on interfaces matching network
+  no network <network-ip> <wildcard> [area <id>] - Remove network statement
+  router-id <ip-address>        - Explicitly configure OSPF Router ID
+  no router-id                  - Reset to automatic Router ID selection
+  passive-interface <interface> - Suppress OSPF routing updates on interface
+  no passive-interface <interface> - Re-enable OSPF routing updates on interface
+  exit                          - Return to Global Configuration mode
   end                           - Return to Privileged EXEC mode
   do <command>                  - Execute an operational command
   help, ?                       - Show available commands`;
@@ -12095,6 +12414,9 @@ function executeCliCommand(deviceId, rawInput) {
   hostname <name>        - Set device system name
   interface <name>       - Enter interface configuration mode (alias: int)
   show ip route          - Display current IPv4 routing table
+  show ip ospf           - Display general OSPF routing information
+  show ip ospf neighbor  - Display OSPF neighbor information (alias: show ip ospf nei)
+  show ip ospf interface - Display OSPF interface details
   show interfaces        - Display router interfaces and status (alias: show int)
   show ip interface brief- Display summary table of IP interfaces (alias: show ip int brief)
   show ip dhcp binding   - Display DHCP server active address leases
@@ -12230,6 +12552,11 @@ function executeCliCommand(deviceId, rawInput) {
 
     // 4. EXIT
     if (mainCmd === 'exit') {
+        if (session.mode === 'config-router') {
+            session.mode = 'config';
+            session.ospfProcessId = null;
+            return { success: true, output: '', clear: false, status: 'info', command, device: dev };
+        }
         if (session.mode === 'dhcp-config' || session.mode === 'config-dhcp') {
             session.mode = 'config';
             session.selectedPool = null;
@@ -12255,6 +12582,7 @@ function executeCliCommand(deviceId, rawInput) {
             session.selectedInterface = null;
             session.selectedVlan = null;
             session.selectedPool = null;
+            session.ospfProcessId = null;
             return { success: true, output: '', clear: false, status: 'info', command, device: dev };
         }
         return { success: true, output: '', clear: false, status: 'info', command, device: dev };
@@ -12267,6 +12595,7 @@ function executeCliCommand(deviceId, rawInput) {
             session.selectedInterface = null;
             session.selectedVlan = null;
             session.selectedPool = null;
+            session.ospfProcessId = null;
             return { success: true, output: '', clear: false, status: 'info', command, device: dev };
         }
         return { success: true, output: '', clear: false, status: 'info', command, device: dev };
@@ -12502,6 +12831,215 @@ function executeCliCommand(deviceId, rawInput) {
                     render();
                     return { success: true, output: '', clear: false, status: 'success', command, device: dev };
                 }
+            }
+        }
+    }
+
+    // 5c. ROUTER OSPF CONFIGURATION MODE COMMANDS
+    if (session.mode === 'config-router') {
+        ensureDeviceOspfState(dev);
+
+        // network <network-ip> <wildcard-mask> area <area-id>
+        if (mainCmd === 'network' || mainCmd === 'net') {
+            const netIp = tokens[1];
+            const wildcard = tokens[2];
+            const areaKeyword = tokens[3];
+            const areaId = tokens[4];
+
+            if (!netIp || !wildcard || areaKeyword !== 'area' || areaId === undefined) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: network <network-ip> <wildcard-mask> area <area-id>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (!isValidIPv4(netIp)) {
+                return {
+                    success: false,
+                    output: `% Invalid network IP address: "${netIp}"`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (!isValidIPv4(wildcard)) {
+                return {
+                    success: false,
+                    output: `% Invalid wildcard mask: "${wildcard}"`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+
+            try {
+                pushHistory();
+                addOspfNetworkStatement(dev, netIp, wildcard, areaId);
+                updateOspfAdjacencies();
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            } catch (err) {
+                return {
+                    success: false,
+                    output: `% Error configuring OSPF network: ${err.message}`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+        }
+
+        // router-id <ipv4-address>
+        if (mainCmd === 'router-id') {
+            const rid = tokens[1];
+            if (!rid) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: router-id <ip-address>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (!isValidIPv4(rid)) {
+                return {
+                    success: false,
+                    output: `% Invalid Router ID IP address: "${rid}"`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            pushHistory();
+            dev.ospf.configuredRouterId = rid;
+            dev.ospf.routerId = rid;
+            updateOspfAdjacencies();
+            render();
+            return {
+                success: true,
+                output: '% Reload or use "clear ip ospf process" to force neighbor re-establishment if needed.',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // passive-interface <interface>
+        if (mainCmd === 'passive-interface' || (mainCmd === 'passive' && tokens[1] === 'interface')) {
+            const ifaceToken = mainCmd === 'passive-interface' ? tokens[1] : tokens[2];
+            if (!ifaceToken) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: passive-interface <interface>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const ifaceName = normalizeRouterInterfaceName(ifaceToken) || ifaceToken;
+            pushHistory();
+            setOspfPassiveInterface(dev, ifaceName, true);
+            updateOspfAdjacencies();
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // no network / no router-id / no passive-interface
+        if (mainCmd === 'no') {
+            if (tokens[1] === 'network' || tokens[1] === 'net') {
+                const netIp = tokens[2];
+                const wildcard = tokens[3];
+                const areaKeyword = tokens[4];
+                const areaId = tokens[5];
+                if (!netIp || !wildcard) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: no network <network-ip> <wildcard-mask> [area <area-id>]',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                removeOspfNetworkStatement(dev, netIp, wildcard, areaId);
+                updateOspfAdjacencies();
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+
+            if (tokens[1] === 'router-id') {
+                pushHistory();
+                dev.ospf.configuredRouterId = null;
+                dev.ospf.routerId = getDeviceRouterId(dev);
+                updateOspfAdjacencies();
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+
+            if (tokens[1] === 'passive-interface' || (tokens[1] === 'passive' && tokens[2] === 'interface')) {
+                const ifaceToken = tokens[1] === 'passive-interface' ? tokens[2] : tokens[3];
+                if (!ifaceToken) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: no passive-interface <interface>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                const ifaceName = normalizeRouterInterfaceName(ifaceToken) || ifaceToken;
+                pushHistory();
+                setOspfPassiveInterface(dev, ifaceName, false);
+                updateOspfAdjacencies();
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
             }
         }
     }
@@ -13201,6 +13739,7 @@ function executeCliCommand(deviceId, rawInput) {
             if (iface && iface.status !== 'down') {
                 pushHistory();
                 iface.status = 'down';
+                updateOspfAdjacencies();
                 render();
             }
         }
@@ -13331,6 +13870,7 @@ function executeCliCommand(deviceId, rawInput) {
                 if (iface && iface.status !== 'up') {
                     pushHistory();
                     iface.status = 'up';
+                    updateOspfAdjacencies();
                     render();
                 }
             }
@@ -13508,6 +14048,7 @@ function executeCliCommand(deviceId, rawInput) {
             }
             iface.ip = '';
             iface.subnetMask = '';
+            updateOspfAdjacencies();
             render();
             return {
                 success: true,
@@ -13658,6 +14199,105 @@ function executeCliCommand(deviceId, rawInput) {
                     device: dev
                 };
             }
+        }
+
+        // no ip ospf [cost|priority|hello-interval|dead-interval]
+        if (sub1 === 'ip' && sub2 === 'ospf') {
+            if (!isRouter && !(isSwitch && dev.ipRouting)) {
+                return {
+                    success: false,
+                    output: "% 'no ip ospf' is a router or Layer-3 switch interface command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if ((session.mode !== 'config-if' && session.mode !== 'config-subif') || !session.selectedInterface) {
+                return {
+                    success: false,
+                    output: '% "no ip ospf" interface commands must be executed inside interface configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const ifaceName = session.selectedInterface;
+            const sub3 = (tokens[3] || '').toLowerCase();
+            pushHistory();
+            if (sub3 === 'cost') {
+                setOspfInterfaceConfig(dev, ifaceName, 'cost', null);
+            } else if (sub3 === 'priority' || sub3 === 'prio') {
+                setOspfInterfaceConfig(dev, ifaceName, 'priority', 1);
+            } else if (sub3 === 'hello-interval' || sub3 === 'hello') {
+                setOspfInterfaceConfig(dev, ifaceName, 'helloInterval', 10);
+            } else if (sub3 === 'dead-interval' || sub3 === 'dead') {
+                setOspfInterfaceConfig(dev, ifaceName, 'deadInterval', 40);
+            } else {
+                return {
+                    success: false,
+                    output: '% Incomplete or unrecognized command: no ip ospf [cost|priority|hello-interval|dead-interval]',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // no router ospf [process-id]
+        if (tokens[1] === 'router' && tokens[2] === 'ospf') {
+            if (!isRouter && !(isSwitch && dev.ipRouting)) {
+                return {
+                    success: false,
+                    output: "% 'no router ospf' is a router or Layer-3 switch command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode !== 'config' && session.mode !== 'config-router') {
+                return {
+                    success: false,
+                    output: '% "no router ospf" must be executed in configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            ensureDeviceOspfState(dev);
+            pushHistory();
+            dev.ospf.enabled = false;
+            dev.ospf.processId = null;
+            dev.ospf.networks = [];
+            dev.ospf.passiveInterfaces = [];
+            dev.ospf.neighbors = {};
+            if (session.mode === 'config-router') {
+                session.mode = 'config';
+                session.ospfProcessId = null;
+            }
+            updateOspfAdjacencies();
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
         }
 
         // no ip route <network> <mask/prefix> [next-hop/interface]
@@ -14008,8 +14648,247 @@ function executeCliCommand(deviceId, rawInput) {
         }
     }
 
+    // 12b. ROUTER OSPF <process-id>
+    if (mainCmd === 'router') {
+        if (!isRouter && !(isSwitch && dev.ipRouting)) {
+            return {
+                success: false,
+                output: "% 'router' is a router or Layer-3 switch command.",
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (session.mode !== 'config') {
+            return {
+                success: false,
+                output: '% "router" must be executed in global configuration mode.',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (tokens[1] === 'ospf') {
+            const rawPid = tokens[2];
+            const pid = parseInt(rawPid, 10);
+            if (!rawPid || isNaN(pid) || pid < 1 || pid > 65535) {
+                return {
+                    success: false,
+                    output: '% Incomplete or invalid command: router ospf <1-65535>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            ensureDeviceOspfState(dev);
+            pushHistory();
+            dev.ospf.enabled = true;
+            dev.ospf.processId = pid;
+            dev.ospf.routerId = getDeviceRouterId(dev);
+            session.prevMode = session.mode;
+            session.mode = 'config-router';
+            session.ospfProcessId = pid;
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+        return {
+            success: false,
+            output: `% Unrecognized routing protocol: "${rawTokens[1] || ''}". Supported: ospf`,
+            clear: false,
+            status: 'error',
+            command,
+            device: dev
+        };
+    }
+
     // 13. IP ROUTING / IP DEFAULT-GATEWAY / IP ADDRESS / IP DHCP / IP HELPER-ADDRESS
     if (mainCmd === 'ip') {
+        // ip ospf [cost|priority|hello-interval|dead-interval]
+        if (tokens[1] === 'ospf') {
+            if (!isRouter && !(isSwitch && dev.ipRouting)) {
+                return {
+                    success: false,
+                    output: "% 'ip ospf' is a router or Layer-3 switch interface command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if ((session.mode !== 'config-if' && session.mode !== 'config-subif') || !session.selectedInterface) {
+                return {
+                    success: false,
+                    output: '% "ip ospf" interface commands must be executed inside interface configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const ifaceName = session.selectedInterface;
+            const sub2 = (tokens[2] || '').toLowerCase();
+            const valStr = tokens[3];
+
+            if (sub2 === 'cost') {
+                if (!valStr) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: ip ospf cost <1-65535>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                const cost = parseInt(valStr, 10);
+                if (isNaN(cost) || cost < 1 || cost > 65535) {
+                    return {
+                        success: false,
+                        output: `% Invalid cost: "${valStr}". Must be an integer between 1 and 65535.`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                setOspfInterfaceConfig(dev, ifaceName, 'cost', cost);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+
+            if (sub2 === 'priority' || sub2 === 'prio') {
+                if (!valStr) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: ip ospf priority <0-255>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                const prio = parseInt(valStr, 10);
+                if (isNaN(prio) || prio < 0 || prio > 255) {
+                    return {
+                        success: false,
+                        output: `% Invalid priority: "${valStr}". Must be an integer between 0 and 255.`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                setOspfInterfaceConfig(dev, ifaceName, 'priority', prio);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+
+            if (sub2 === 'hello-interval' || sub2 === 'hello') {
+                if (!valStr) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: ip ospf hello-interval <1-65535>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                const hello = parseInt(valStr, 10);
+                if (isNaN(hello) || hello < 1 || hello > 65535) {
+                    return {
+                        success: false,
+                        output: `% Invalid hello-interval: "${valStr}". Must be an integer between 1 and 65535.`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                setOspfInterfaceConfig(dev, ifaceName, 'helloInterval', hello);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+
+            if (sub2 === 'dead-interval' || sub2 === 'dead') {
+                if (!valStr) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: ip ospf dead-interval <1-65535>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                const dead = parseInt(valStr, 10);
+                if (isNaN(dead) || dead < 1 || dead > 65535) {
+                    return {
+                        success: false,
+                        output: `% Invalid dead-interval: "${valStr}". Must be an integer between 1 and 65535.`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                setOspfInterfaceConfig(dev, ifaceName, 'deadInterval', dead);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+
+            return {
+                success: false,
+                output: '% Incomplete or unrecognized command: ip ospf [cost|priority|hello-interval|dead-interval]',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
         // ip dhcp pool <name>
         if (tokens[1] === 'dhcp' && tokens[2] === 'pool') {
             if (!isRouter && !(isSwitch && dev.ipRouting)) {
@@ -14456,6 +15335,7 @@ function executeCliCommand(deviceId, rawInput) {
             }
             iface.ip = rawIp;
             iface.subnetMask = normMask;
+            updateOspfAdjacencies();
             render();
             return {
                 success: true,
@@ -14964,7 +15844,7 @@ function executeCliCommand(deviceId, rawInput) {
                     device: dev
                 };
             }
-            if (!isRouter) {
+            if (!isRouter && !isSwitch) {
                 return {
                     success: false,
                     output: `% 'show ip route' is a Cisco IOS router command. End hosts use 'ipconfig' or their default gateway for routing.`,
@@ -14974,9 +15854,10 @@ function executeCliCommand(deviceId, rawInput) {
                     device: dev
                 };
             }
+            const protoFilter = tokens[3] || null;
             return {
                 success: true,
-                output: formatCliRouterRoutingTable(dev),
+                output: isRouter ? formatCliRouterRoutingTable(dev, protoFilter) : formatCliSwitchRoutingTable(dev, protoFilter),
                 clear: false,
                 status: 'success',
                 command,
@@ -15077,6 +15958,95 @@ function executeCliCommand(deviceId, rawInput) {
             return {
                 success: true,
                 output: formatCliDhcpPools(dev, poolFilter),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // show ip ospf database [data|db]
+        if (sub1 === 'ip' && sub2 === 'ospf' && (tokens[3] === 'database' || tokens[3] === 'data' || tokens[3] === 'db')) {
+            if (!isRouter && !(isSwitch && dev.ipRouting)) {
+                return {
+                    success: false,
+                    output: `% 'show ip ospf database' is a router or Layer-3 switch command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: formatCliOspfDatabase(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // show ip ospf neighbor [detail]
+        if (sub1 === 'ip' && sub2 === 'ospf' && (tokens[3] === 'neighbor' || tokens[3] === 'neighbors' || tokens[3] === 'nei')) {
+            if (!isRouter && !(isSwitch && dev.ipRouting)) {
+                return {
+                    success: false,
+                    output: `% 'show ip ospf neighbor' is a router or Layer-3 switch command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: formatCliOspfNeighbors(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // show ip ospf interface [brief]
+        if (sub1 === 'ip' && sub2 === 'ospf' && (tokens[3] === 'interface' || tokens[3] === 'interfaces' || tokens[3] === 'int')) {
+            if (!isRouter && !(isSwitch && dev.ipRouting)) {
+                return {
+                    success: false,
+                    output: `% 'show ip ospf interface' is a router or Layer-3 switch command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const isBrief = tokens[4] === 'brief' || tokens[4] === 'br';
+            return {
+                success: true,
+                output: formatCliOspfInterfaces(dev, isBrief),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // show ip ospf
+        if (sub1 === 'ip' && sub2 === 'ospf') {
+            if (!isRouter && !(isSwitch && dev.ipRouting)) {
+                return {
+                    success: false,
+                    output: `% 'show ip ospf' is a router or Layer-3 switch command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: formatCliOspfGeneral(dev),
                 clear: false,
                 status: 'success',
                 command,
@@ -16999,6 +17969,941 @@ function simulateDhcpRelease(clientDeviceId, options = {}) {
         packets: [releasePacket],
         events
     };
+}
+
+// ==========================================
+// OSPF V5.13 FOUNDATION & LSDB / SPF ENGINE
+// ==========================================
+
+/**
+ * Ensures the device has an initialized OSPF state structure.
+ */
+/**
+ * Retrieves per-interface OSPF configuration with default fallbacks.
+ */
+function getOspfInterfaceConfig(deviceOrId, ifaceName) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return { cost: 1, priority: 1, helloInterval: 10, deadInterval: 40, configuredCost: null };
+    ensureDeviceOspfState(dev);
+    const normName = normalizeRouterInterfaceName(ifaceName) || ifaceName;
+    const cfg = dev.ospf.interfaces[normName] || {};
+    return {
+        cost: typeof cfg.cost === 'number' && cfg.cost >= 1 && cfg.cost <= 65535 ? cfg.cost : 1,
+        priority: typeof cfg.priority === 'number' && cfg.priority >= 0 && cfg.priority <= 255 ? cfg.priority : 1,
+        helloInterval: typeof cfg.helloInterval === 'number' && cfg.helloInterval >= 1 && cfg.helloInterval <= 65535 ? cfg.helloInterval : 10,
+        deadInterval: typeof cfg.deadInterval === 'number' && cfg.deadInterval >= 1 && cfg.deadInterval <= 65535 ? cfg.deadInterval : 40,
+        configuredCost: typeof cfg.cost === 'number' ? cfg.cost : null
+    };
+}
+
+/**
+ * Sets or removes per-interface OSPF configuration.
+ */
+function setOspfInterfaceConfig(deviceOrId, ifaceName, key, value) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return false;
+    ensureDeviceOspfState(dev);
+    const normName = normalizeRouterInterfaceName(ifaceName) || ifaceName;
+    if (!dev.ospf.interfaces[normName] || typeof dev.ospf.interfaces[normName] !== 'object') {
+        dev.ospf.interfaces[normName] = {
+            cost: null,
+            priority: 1,
+            helloInterval: 10,
+            deadInterval: 40
+        };
+    }
+    if (value === null || value === undefined) {
+        if (key === 'cost') dev.ospf.interfaces[normName].cost = null;
+        else if (key === 'priority') dev.ospf.interfaces[normName].priority = 1;
+        else if (key === 'helloInterval') dev.ospf.interfaces[normName].helloInterval = 10;
+        else if (key === 'deadInterval') dev.ospf.interfaces[normName].deadInterval = 40;
+    } else {
+        dev.ospf.interfaces[normName][key] = value;
+    }
+    updateOspfAdjacencies();
+    return true;
+}
+
+function ensureDeviceOspfState(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return null;
+
+    if (!dev.ospf || typeof dev.ospf !== 'object') {
+        dev.ospf = {
+            enabled: false,
+            processId: null,
+            configuredRouterId: null,
+            routerId: null,
+            networks: [],
+            passiveInterfaces: [],
+            neighbors: {},
+            interfaces: {},
+            lsdb: { area: '0', routerLsas: {} },
+            routes: []
+        };
+    }
+    if (!Array.isArray(dev.ospf.networks)) dev.ospf.networks = [];
+    if (!Array.isArray(dev.ospf.passiveInterfaces)) dev.ospf.passiveInterfaces = [];
+    if (!dev.ospf.neighbors || typeof dev.ospf.neighbors !== 'object') dev.ospf.neighbors = {};
+    if (!dev.ospf.interfaces || typeof dev.ospf.interfaces !== 'object') dev.ospf.interfaces = {};
+    if (!dev.ospf.lsdb || typeof dev.ospf.lsdb !== 'object') dev.ospf.lsdb = { area: '0', routerLsas: {} };
+    if (!dev.ospf.lsdb.routerLsas || typeof dev.ospf.lsdb.routerLsas !== 'object') dev.ospf.lsdb.routerLsas = {};
+    if (!Array.isArray(dev.ospf.routes)) dev.ospf.routes = [];
+
+    return dev.ospf;
+}
+
+/**
+ * Calculates or retrieves the OSPF Router ID using the Cisco standard hierarchy:
+ * 1. Explicit configured router-id
+ * 2. Highest IPv4 address on any active Loopback interface
+ * 3. Highest IPv4 address on any active physical interface
+ * 4. Fallback to '0.0.0.0'
+ */
+function getDeviceRouterId(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return '0.0.0.0';
+    ensureDeviceOspfState(dev);
+
+    if (dev.ospf.configuredRouterId && isValidIPv4(dev.ospf.configuredRouterId)) {
+        return dev.ospf.configuredRouterId;
+    }
+
+    const loopbacks = [];
+    const physicals = [];
+
+    if (dev.interfaces && typeof dev.interfaces === 'object') {
+        for (const [ifName, iface] of Object.entries(dev.interfaces)) {
+            if (!iface || !iface.ip || !isValidIPv4(iface.ip) || iface.status === 'down') continue;
+            const ipInt = ipv4ToInteger(iface.ip);
+            if (/^(loopback|lo)/i.test(ifName)) {
+                loopbacks.push({ name: ifName, ip: iface.ip, int: ipInt });
+            } else {
+                physicals.push({ name: ifName, ip: iface.ip, int: ipInt });
+            }
+        }
+    }
+
+    if (dev.type === 'switch' && dev.svis && typeof dev.svis === 'object') {
+        for (const [vlanIdStr, svi] of Object.entries(dev.svis)) {
+            const vlanId = parseInt(vlanIdStr, 10);
+            if (!svi || !svi.ip || !isValidIPv4(svi.ip) || getEffectiveSviStatus(dev, vlanId) === 'down') continue;
+            const ipInt = ipv4ToInteger(svi.ip);
+            physicals.push({ name: `Vlan${vlanId}`, ip: svi.ip, int: ipInt });
+        }
+    }
+
+    if (loopbacks.length > 0) {
+        loopbacks.sort((a, b) => b.int - a.int);
+        return loopbacks[0].ip;
+    }
+
+    if (physicals.length > 0) {
+        physicals.sort((a, b) => b.int - a.int);
+        return physicals[0].ip;
+    }
+
+    return '0.0.0.0';
+}
+
+/**
+ * Normalizes OSPF area to standard string (e.g. 0, 1, 0.0.0.0 -> '0').
+ */
+function normalizeOspfArea(areaStr) {
+    if (areaStr === undefined || areaStr === null) return '0';
+    const s = String(areaStr).trim();
+    if (/^\d+$/.test(s)) {
+        return s;
+    }
+    if (isValidIPv4(s)) {
+        const parts = s.split('.').map(Number);
+        if (parts[0] === 0 && parts[1] === 0 && parts[2] === 0) {
+            return String(parts[3]);
+        }
+        return s;
+    }
+    return s;
+}
+
+/**
+ * Checks whether an IP matches a network statement with an inverse wildcard mask.
+ */
+function isIpInWildcardRange(ip, networkIp, wildcardMask) {
+    if (!isValidIPv4(ip) || !isValidIPv4(networkIp) || !isValidIPv4(wildcardMask)) return false;
+    const ipInt = ipv4ToInteger(ip);
+    const netInt = ipv4ToInteger(networkIp);
+    const wildInt = ipv4ToInteger(wildcardMask);
+
+    const mask = (~wildInt) >>> 0;
+    return ((ipInt & mask) >>> 0) === ((netInt & mask) >>> 0);
+}
+
+/**
+ * Adds an OSPF network statement to a router.
+ */
+function addOspfNetworkStatement(deviceOrId, network, wildcardMask, area) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) throw new Error('Device not found');
+    ensureDeviceOspfState(dev);
+
+    const netStr = String(network || '').trim();
+    const wildStr = String(wildcardMask || '').trim();
+    const areaStr = normalizeOspfArea(area);
+
+    if (!isValidIPv4(netStr)) throw new Error(`Invalid network IP: ${network}`);
+    if (!isValidIPv4(wildStr)) throw new Error(`Invalid wildcard mask: ${wildcardMask}`);
+
+    const exists = dev.ospf.networks.some(
+        n => n.network === netStr && n.wildcardMask === wildStr && n.area === areaStr
+    );
+    if (!exists) {
+        dev.ospf.networks.push({
+            network: netStr,
+            wildcardMask: wildStr,
+            area: areaStr
+        });
+    }
+
+    dev.ospf.routerId = getDeviceRouterId(dev);
+    return { network: netStr, wildcardMask: wildStr, area: areaStr };
+}
+
+/**
+ * Removes an OSPF network statement from a router.
+ */
+function removeOspfNetworkStatement(deviceOrId, network, wildcardMask, area = null) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return false;
+    ensureDeviceOspfState(dev);
+
+    const netStr = String(network || '').trim();
+    const wildStr = String(wildcardMask || '').trim();
+    const areaStr = area !== null && area !== undefined ? normalizeOspfArea(area) : null;
+
+    const initialLen = dev.ospf.networks.length;
+    dev.ospf.networks = dev.ospf.networks.filter(n => {
+        if (n.network !== netStr || n.wildcardMask !== wildStr) return true;
+        if (areaStr !== null && n.area !== areaStr) return true;
+        return false;
+    });
+
+    return dev.ospf.networks.length < initialLen;
+}
+
+/**
+ * Sets or unsets an interface as passive in OSPF.
+ */
+function setOspfPassiveInterface(deviceOrId, ifaceName, isPassive = true) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return false;
+    ensureDeviceOspfState(dev);
+
+    const normName = normalizeRouterInterfaceName(ifaceName) || ifaceName;
+    if (isPassive) {
+        if (!dev.ospf.passiveInterfaces.includes(normName)) {
+            dev.ospf.passiveInterfaces.push(normName);
+        }
+    } else {
+        dev.ospf.passiveInterfaces = dev.ospf.passiveInterfaces.filter(name => name !== normName);
+    }
+    return true;
+}
+
+/**
+ * Returns all OSPF-enabled interfaces for a router.
+ */
+function getOspfEnabledInterfaces(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || !dev.ospf || !dev.ospf.enabled) return [];
+
+    const result = [];
+    if (dev.interfaces && typeof dev.interfaces === 'object') {
+        for (const [ifName, iface] of Object.entries(dev.interfaces)) {
+            if (!iface || !iface.ip || !isValidIPv4(iface.ip) || iface.status === 'down') continue;
+
+            for (const netStmt of dev.ospf.networks) {
+                if (isIpInWildcardRange(iface.ip, netStmt.network, netStmt.wildcardMask)) {
+                    const isPassive = dev.ospf.passiveInterfaces.includes(ifName);
+                    const ifCfg = getOspfInterfaceConfig(dev, ifName);
+                    result.push({
+                        name: ifName,
+                        ip: iface.ip,
+                        subnetMask: iface.subnetMask,
+                        area: netStmt.area,
+                        isPassive,
+                        cost: ifCfg.cost,
+                        priority: ifCfg.priority,
+                        helloInterval: ifCfg.helloInterval,
+                        deadInterval: ifCfg.deadInterval,
+                        state: isPassive ? 'PASSIVE' : 'P2P'
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    if (dev.type === 'switch' && dev.ipRouting && dev.svis && typeof dev.svis === 'object') {
+        for (const [vlanIdStr, svi] of Object.entries(dev.svis)) {
+            const vlanId = parseInt(vlanIdStr, 10);
+            if (!svi || !svi.ip || !isValidIPv4(svi.ip) || getEffectiveSviStatus(dev, vlanId) === 'down') continue;
+            const ifName = `Vlan${vlanId}`;
+
+            for (const netStmt of dev.ospf.networks) {
+                if (isIpInWildcardRange(svi.ip, netStmt.network, netStmt.wildcardMask)) {
+                    const isPassive = dev.ospf.passiveInterfaces.includes(ifName);
+                    const ifCfg = getOspfInterfaceConfig(dev, ifName);
+                    result.push({
+                        name: ifName,
+                        ip: svi.ip,
+                        subnetMask: svi.subnetMask,
+                        area: netStmt.area,
+                        isPassive,
+                        cost: ifCfg.cost,
+                        priority: ifCfg.priority,
+                        helloInterval: ifCfg.helloInterval,
+                        deadInterval: ifCfg.deadInterval,
+                        state: isPassive ? 'PASSIVE' : 'P2P'
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+/**
+ * Checks if a specific interface on a router is OSPF-enabled.
+ */
+function isInterfaceOspfEnabled(deviceOrId, ifaceName) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return null;
+    const normName = normalizeRouterInterfaceName(ifaceName) || ifaceName;
+    const enabledList = getOspfEnabledInterfaces(dev);
+    return enabledList.find(i => i.name === normName) || null;
+}
+
+/**
+ * Generates the Type 1 Router-LSA for an OSPF-enabled device.
+ */
+function generateRouterLsa(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || !dev.ospf || !dev.ospf.enabled) return null;
+
+    ensureDeviceOspfState(dev);
+    const rid = dev.ospf.routerId || getDeviceRouterId(dev);
+    const enabledIfaces = getOspfEnabledInterfaces(dev);
+    const links = [];
+
+    for (const iface of enabledIfaces) {
+        const netAddr = calculateNetworkAddress(iface.ip, iface.subnetMask);
+        const ifCost = typeof iface.cost === 'number' && iface.cost > 0 ? iface.cost : 1;
+
+        // Check if there is an active FULL neighbor on this interface
+        const neighbor = Object.values(dev.ospf.neighbors || {}).find(
+            n => n.interface === iface.name && n.state === 'FULL'
+        );
+
+        if (neighbor && !iface.isPassive) {
+            // Point-to-point connection to neighbor
+            links.push({
+                linkType: 'point-to-point',
+                linkId: neighbor.routerId,
+                linkData: iface.ip,
+                metric: ifCost
+            });
+            // Stub connection to the attached subnet
+            links.push({
+                linkType: 'stub',
+                linkId: netAddr,
+                linkData: iface.subnetMask,
+                metric: ifCost
+            });
+        } else {
+            // Stub network connection (passive interface or no neighbor)
+            links.push({
+                linkType: 'stub',
+                linkId: netAddr,
+                linkData: iface.subnetMask,
+                metric: ifCost
+            });
+        }
+    }
+
+    // Check for active loopback interfaces matching OSPF network statements
+    if (dev.interfaces && typeof dev.interfaces === 'object') {
+        for (const [ifName, iface] of Object.entries(dev.interfaces)) {
+            if (/^(loopback|lo)/i.test(ifName) && iface.ip && isValidIPv4(iface.ip) && iface.status !== 'down') {
+                const isOspf = dev.ospf.networks.some(n => isIpInWildcardRange(iface.ip, n.network, n.wildcardMask));
+                if (isOspf) {
+                    const alreadyAdded = links.some(l => l.linkType === 'stub' && l.linkId === iface.ip && l.linkData === '255.255.255.255');
+                    if (!alreadyAdded) {
+                        links.push({
+                            linkType: 'stub',
+                            linkId: iface.ip,
+                            linkData: '255.255.255.255',
+                            metric: 1
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    const prevLsa = dev.ospf.lsdb?.routerLsas?.[rid];
+    const seqNumber = prevLsa && prevLsa.seqNumber ? prevLsa.seqNumber + 1 : 0x80000001;
+
+    return {
+        type: 1,
+        lsId: rid,
+        advRouter: rid,
+        seqNumber,
+        age: 0,
+        checksum: '0x0000',
+        area: '0',
+        links
+    };
+}
+
+/**
+ * Calculates shortest-path OSPF routes for a device using Dijkstra's algorithm.
+ */
+function calculateOspfRoutesForDevice(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || !dev.ospf || !dev.ospf.enabled) return [];
+
+    ensureDeviceOspfState(dev);
+    const rootRid = dev.ospf.routerId || getDeviceRouterId(dev);
+    const lsdb = dev.ospf.lsdb?.routerLsas || {};
+
+    if (!lsdb[rootRid]) {
+        return [];
+    }
+
+    // Dijkstra SPF calculation
+    const dist = {};
+    const nextHops = {};
+    dist[rootRid] = 0;
+    nextHops[rootRid] = { ip: null, interface: null };
+
+    const visited = new Set();
+    const candidateQueue = [{ rid: rootRid, cost: 0 }];
+
+    while (candidateQueue.length > 0) {
+        // Sort candidates by cost ascending, tie-break deterministically by routerId
+        candidateQueue.sort((a, b) => {
+            if (a.cost !== b.cost) return a.cost - b.cost;
+            return a.rid.localeCompare(b.rid);
+        });
+
+        const current = candidateQueue.shift();
+        const u = current.rid;
+        if (visited.has(u)) continue;
+        visited.add(u);
+
+        const uLsa = lsdb[u];
+        if (!uLsa || !Array.isArray(uLsa.links)) continue;
+
+        for (const link of uLsa.links) {
+            if (link.linkType === 'point-to-point') {
+                const v = link.linkId; // Neighbor Router ID
+                const vLsa = lsdb[v];
+
+                // RFC 2328 Two-Way Check: v must have a point-to-point link back to u
+                if (!vLsa || !Array.isArray(vLsa.links)) continue;
+                const hasReturnLink = vLsa.links.some(
+                    l => l.linkType === 'point-to-point' && l.linkId === u
+                );
+                if (!hasReturnLink) continue;
+
+                const edgeCost = typeof link.metric === 'number' && link.metric > 0 ? link.metric : 1;
+                const newCost = dist[u] + edgeCost;
+
+                if (dist[v] === undefined || newCost < dist[v]) {
+                    dist[v] = newCost;
+
+                    if (u === rootRid) {
+                        // Direct neighbor of root: find neighbor's IP and local egress interface
+                        const directNbr = dev.ospf.neighbors?.[v];
+                        if (directNbr) {
+                            nextHops[v] = {
+                                ip: directNbr.ip,
+                                interface: directNbr.interface
+                            };
+                        } else {
+                            const directIface = getOspfEnabledInterfaces(dev).find(i => i.ip === link.linkData);
+                            nextHops[v] = {
+                                ip: v,
+                                interface: directIface?.name || 'Gig0/0'
+                            };
+                        }
+                    } else {
+                        // Inherit next-hop from parent node u
+                        nextHops[v] = { ...nextHops[u] };
+                    }
+
+                    candidateQueue.push({ rid: v, cost: newCost });
+                }
+            }
+        }
+    }
+
+    // Second stage: Collect candidate routes for stub networks
+    const prefixRoutes = new Map();
+
+    // Directly connected subnets on root router (to avoid installing OSPF routes for local interfaces)
+    const localDirectSubnets = new Set();
+    for (const [ifName, iface] of Object.entries(dev.interfaces || {})) {
+        if (iface && iface.ip && iface.subnetMask && iface.status !== 'down') {
+            const net = calculateNetworkAddress(iface.ip, iface.subnetMask);
+            const pfx = getPrefixLengthFromMask(iface.subnetMask);
+            if (net && pfx !== null) {
+                localDirectSubnets.add(`${net}/${pfx}`);
+            }
+        }
+    }
+    if (dev.type === 'switch' && dev.svis && typeof dev.svis === 'object') {
+        for (const [vlanIdStr, svi] of Object.entries(dev.svis)) {
+            const vlanId = parseInt(vlanIdStr, 10);
+            if (svi && svi.ip && svi.subnetMask && getEffectiveSviStatus(dev, vlanId) !== 'down') {
+                const net = calculateNetworkAddress(svi.ip, svi.subnetMask);
+                const pfx = getPrefixLengthFromMask(svi.subnetMask);
+                if (net && pfx !== null) {
+                    localDirectSubnets.add(`${net}/${pfx}`);
+                }
+            }
+        }
+    }
+
+    for (const [rId, rCost] of Object.entries(dist)) {
+        // Skip root's own stubs (they are directly connected)
+        if (rId === rootRid) continue;
+
+        const rLsa = lsdb[rId];
+        if (!rLsa || !Array.isArray(rLsa.links)) continue;
+        const nexthopInfo = nextHops[rId];
+        if (!nexthopInfo || !nexthopInfo.ip || !nexthopInfo.interface) continue;
+
+        for (const link of rLsa.links) {
+            if (link.linkType === 'stub') {
+                const destNet = link.linkId;
+                const destMask = link.linkData;
+                const prefixLength = getPrefixLengthFromMask(destMask);
+                if (prefixLength === null) continue;
+
+                const cidr = `${destNet}/${prefixLength}`;
+
+                // Do not install OSPF routes for networks directly configured on root
+                if (localDirectSubnets.has(cidr)) continue;
+
+                const stubCost = typeof link.metric === 'number' && link.metric > 0 ? link.metric : 1;
+                const totalCost = rCost + stubCost;
+
+                const candidate = {
+                    id: `ospf_${dev.id}_${destNet}_${prefixLength}`,
+                    type: 'ospf',
+                    code: 'O',
+                    network: destNet,
+                    subnetMask: destMask,
+                    prefixLength,
+                    cidr,
+                    interface: nexthopInfo.interface,
+                    nextHop: nexthopInfo.ip,
+                    adminDistance: 110,
+                    metric: totalCost,
+                    status: 'active'
+                };
+
+                if (!prefixRoutes.has(cidr)) {
+                    prefixRoutes.set(cidr, candidate);
+                } else {
+                    const existing = prefixRoutes.get(cidr);
+                    if (candidate.metric < existing.metric) {
+                        prefixRoutes.set(cidr, candidate);
+                    } else if (candidate.metric === existing.metric) {
+                        // Deterministic tie-breaking: prefer lower nextHop IP string
+                        if (candidate.nextHop.localeCompare(existing.nextHop) < 0) {
+                            prefixRoutes.set(cidr, candidate);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return Array.from(prefixRoutes.values());
+}
+
+/**
+ * Synchronizes the Link-State Database across all OSPF routers in the active topology
+ * and recalculates OSPF routes.
+ */
+function synchronizeOspfTopology() {
+    const ospfDevices = (networkState.devices || []).filter(
+        d => (d.type === 'router' || (d.type === 'switch' && d.ipRouting)) && d.ospf?.enabled
+    );
+
+    // Step A: Generate local Router-LSAs
+    const allLsas = {};
+    for (const dev of ospfDevices) {
+        ensureDeviceOspfState(dev);
+        dev.ospf.lsdb = { area: '0', routerLsas: {} };
+        dev.ospf.routes = [];
+
+        const lsa = generateRouterLsa(dev);
+        if (lsa) {
+            allLsas[lsa.advRouter] = lsa;
+            dev.ospf.lsdb.routerLsas[lsa.advRouter] = lsa;
+        }
+    }
+
+    // Step B: Flood LSAs across FULL neighbor connected components
+    const visited = new Set();
+    for (const dev of ospfDevices) {
+        const rid = dev.ospf.routerId;
+        if (visited.has(rid)) continue;
+
+        const componentRids = [];
+        const queue = [rid];
+        visited.add(rid);
+
+        while (queue.length > 0) {
+            const currentRid = queue.shift();
+            componentRids.push(currentRid);
+
+            const currDev = ospfDevices.find(d => d.ospf.routerId === currentRid);
+            if (currDev) {
+                for (const nbrRid of Object.keys(currDev.ospf.neighbors || {})) {
+                    if (!visited.has(nbrRid)) {
+                        visited.add(nbrRid);
+                        queue.push(nbrRid);
+                    }
+                }
+            }
+        }
+
+        const componentLsas = {};
+        for (const cRid of componentRids) {
+            if (allLsas[cRid]) {
+                componentLsas[cRid] = allLsas[cRid];
+            }
+        }
+
+        for (const cRid of componentRids) {
+            const cDev = ospfDevices.find(d => d.ospf.routerId === cRid);
+            if (cDev) {
+                cDev.ospf.lsdb.routerLsas = { ...componentLsas };
+            }
+        }
+    }
+
+    // Step C: Execute Dijkstra SPF per router to install routes
+    for (const dev of ospfDevices) {
+        dev.ospf.routes = calculateOspfRoutesForDevice(dev);
+    }
+}
+
+/**
+ * Updates and synchronizes OSPF neighbor adjacencies and LSDBs across the active topology.
+ */
+function updateOspfAdjacencies() {
+    const ospfDevices = (networkState.devices || []).filter(
+        d => (d.type === 'router' || (d.type === 'switch' && d.ipRouting)) && d.ospf?.enabled
+    );
+
+    for (const dev of ospfDevices) {
+        dev.ospf.routerId = getDeviceRouterId(dev);
+        dev.ospf.neighbors = {};
+    }
+
+    for (let i = 0; i < ospfDevices.length; i++) {
+        for (let j = i + 1; j < ospfDevices.length; j++) {
+            const devA = ospfDevices[i];
+            const devB = ospfDevices[j];
+
+            const ifacesA = getOspfEnabledInterfaces(devA);
+            const ifacesB = getOspfEnabledInterfaces(devB);
+
+            for (const ifA of ifacesA) {
+                if (ifA.isPassive) continue;
+
+                for (const ifB of ifacesB) {
+                    if (ifB.isPassive) continue;
+
+                    if (ifA.area !== ifB.area) continue;
+
+                    const netA = calculateNetworkAddress(ifA.ip, ifA.subnetMask);
+                    const netB = calculateNetworkAddress(ifB.ip, ifB.subnetMask);
+                    if (netA !== netB) continue;
+
+                    const directlyConnected = areDevicesDirectlyConnected(devA, devB);
+                    const portA = getPortForRouterAndNeighbor(devA.id, devB.id);
+                    const portB = getPortForRouterAndNeighbor(devB.id, devA.id);
+
+                    let isReachable = false;
+                    if (directlyConnected) {
+                        if (devA.type === 'router' && devB.type === 'router') {
+                            isReachable = portA === ifA.name && portB === ifB.name;
+                        } else if (devA.type === 'router' && devB.type === 'switch') {
+                            const swPort = getPortForSwitchAndNeighbor(devB.id, devA.id);
+                            const portCfg = getSwitchPortConfig(devB, swPort);
+                            const vlanId = getSviVlanId(ifB.name);
+                            const carriesVlan = portCfg.mode === 'access' ? (portCfg.accessVlan || 1) === vlanId : isVlanAllowedOnTrunk(portCfg, vlanId);
+                            isReachable = portA === ifA.name && carriesVlan;
+                        } else if (devA.type === 'switch' && devB.type === 'router') {
+                            const swPort = getPortForSwitchAndNeighbor(devA.id, devB.id);
+                            const portCfg = getSwitchPortConfig(devA, swPort);
+                            const vlanId = getSviVlanId(ifA.name);
+                            const carriesVlan = portCfg.mode === 'access' ? (portCfg.accessVlan || 1) === vlanId : isVlanAllowedOnTrunk(portCfg, vlanId);
+                            isReachable = carriesVlan && portB === ifB.name;
+                        } else if (devA.type === 'switch' && devB.type === 'switch') {
+                            isReachable = true;
+                        }
+                    }
+                    if (isReachable) {
+                        if (ifA.helloInterval !== ifB.helloInterval) continue;
+                        if (ifA.deadInterval !== ifB.deadInterval) continue;
+
+                        const ridA = devA.ospf.routerId;
+                        const ridB = devB.ospf.routerId;
+
+                        devA.ospf.neighbors[ridB] = {
+                            routerId: ridB,
+                            ip: ifB.ip,
+                            interface: ifA.name,
+                            area: ifA.area,
+                            state: 'FULL',
+                            priority: ifB.priority !== undefined ? ifB.priority : 1,
+                            deadTime: ifA.deadInterval || 40,
+                            dr: 'none',
+                            bdr: 'none'
+                        };
+
+                        devB.ospf.neighbors[ridA] = {
+                            routerId: ridA,
+                            ip: ifA.ip,
+                            interface: ifB.name,
+                            area: ifB.area,
+                            state: 'FULL',
+                            priority: ifA.priority !== undefined ? ifA.priority : 1,
+                            deadTime: ifB.deadInterval || 40,
+                            dr: 'none',
+                            bdr: 'none'
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    synchronizeOspfTopology();
+}
+
+/**
+ * Simulates a Hello exchange between two routers and returns event logs.
+ */
+function simulateOspfHello(deviceAOrId, deviceBOrId) {
+    const devA = typeof deviceAOrId === 'object' && deviceAOrId ? deviceAOrId : getDeviceById(deviceAOrId);
+    const devB = typeof deviceBOrId === 'object' && deviceBOrId ? deviceBOrId : getDeviceById(deviceBOrId);
+
+    if (!devA || !devB) {
+        return { success: false, reason: 'DEVICE_NOT_FOUND', events: ['Device not found'] };
+    }
+
+    ensureDeviceOspfState(devA);
+    ensureDeviceOspfState(devB);
+
+    if (!devA.ospf.enabled || !devB.ospf.enabled) {
+        return { success: false, reason: 'OSPF_NOT_ENABLED', events: ['OSPF is not enabled on both routers'] };
+    }
+
+    const ifacesA = getOspfEnabledInterfaces(devA);
+    const ifacesB = getOspfEnabledInterfaces(devB);
+
+    const portA = getPortForRouterAndNeighbor(devA.id, devB.id);
+    const portB = getPortForRouterAndNeighbor(devB.id, devA.id);
+
+    const activeIfA = ifacesA.find(i => i.name === portA);
+    const activeIfB = ifacesB.find(i => i.name === portB);
+
+    if (!activeIfA || !activeIfB) {
+        return { success: false, reason: 'NO_OSPF_INTERFACE', events: ['Connecting interfaces do not match any active OSPF network statements'] };
+    }
+
+    if (activeIfA.isPassive || activeIfB.isPassive) {
+        return { success: false, reason: 'PASSIVE_INTERFACE', events: ['One or both connecting interfaces are configured as passive-interface'] };
+    }
+
+    if (activeIfA.area !== activeIfB.area) {
+        return { success: false, reason: 'AREA_MISMATCH', events: [`Area mismatch: ${devA.name} is in Area ${activeIfA.area}, ${devB.name} is in Area ${activeIfB.area}`] };
+    }
+
+    const netA = calculateNetworkAddress(activeIfA.ip, activeIfA.subnetMask);
+    const netB = calculateNetworkAddress(activeIfB.ip, activeIfB.subnetMask);
+    if (netA !== netB) {
+        return { success: false, reason: 'SUBNET_MISMATCH', events: [`Subnet mismatch: ${activeIfA.ip} vs ${activeIfB.ip}`] };
+    }
+
+    if (activeIfA.helloInterval !== activeIfB.helloInterval) {
+        return {
+            success: false,
+            reason: 'HELLO_INTERVAL_MISMATCH',
+            events: [`Hello interval mismatch: ${devA.name} (${activeIfA.helloInterval}s) vs ${devB.name} (${activeIfB.helloInterval}s)`]
+        };
+    }
+
+    if (activeIfA.deadInterval !== activeIfB.deadInterval) {
+        return {
+            success: false,
+            reason: 'DEAD_INTERVAL_MISMATCH',
+            events: [`Dead interval mismatch: ${devA.name} (${activeIfA.deadInterval}s) vs ${devB.name} (${activeIfB.deadInterval}s)`]
+        };
+    }
+
+    updateOspfAdjacencies();
+
+    const ridA = devA.ospf.routerId;
+    const ridB = devB.ospf.routerId;
+
+    const events = [
+        `${devA.name} (${ridA}) sent OSPF Hello packet on ${activeIfA.name} to 224.0.0.5`,
+        `${devB.name} (${ridB}) received Hello from ${ridA} on ${activeIfB.name}`,
+        `${devB.name} (${ridB}) sent OSPF Hello packet on ${activeIfB.name} with neighbor list [${ridA}]`,
+        `${devA.name} (${ridA}) received Hello acknowledging self in neighbor list -> 2-WAY`,
+        `${devA.name} and ${devB.name} completed P2P adjacency exchange -> FULL`
+    ];
+
+    return {
+        success: true,
+        state: 'FULL',
+        routerA: { id: devA.id, routerId: ridA, interface: activeIfA.name, area: activeIfA.area },
+        routerB: { id: devB.id, routerId: ridB, interface: activeIfB.name, area: activeIfB.area },
+        events
+    };
+}
+
+/**
+ * Formats "show ip ospf database" output.
+ */
+function formatCliOspfDatabase(device) {
+    if (!device.ospf || !device.ospf.enabled) {
+        return '% OSPF is not enabled';
+    }
+    const rid = device.ospf.routerId || getDeviceRouterId(device);
+    const lsdb = device.ospf.lsdb?.routerLsas || {};
+    const lsas = Object.values(lsdb);
+
+    const lines = [
+        `            OSPF Router with ID (${rid}) (Process ID ${device.ospf.processId || 1})`,
+        '',
+        `                Router Link States (Area ${device.ospf.lsdb?.area || 0})`,
+        '',
+        'Link ID         ADV Router      Age         Seq#       Checksum Link count'
+    ];
+
+    for (const lsa of lsas) {
+        const linkIdStr = (lsa.lsId || lsa.advRouter).padEnd(16);
+        const advStr = lsa.advRouter.padEnd(16);
+        const ageStr = String(lsa.age || 0).padEnd(12);
+        const seqHex = '0x' + (lsa.seqNumber || 0x80000001).toString(16).padStart(8, '0');
+        const seqStr = seqHex.padEnd(11);
+        const chkStr = (lsa.checksum || '0x0000').padEnd(9);
+        const countStr = String(lsa.links ? lsa.links.length : 0);
+        lines.push(`${linkIdStr}${advStr}${ageStr}${seqStr}${chkStr}${countStr}`);
+    }
+
+    return lines.join('\n');
+}
+
+/**
+ * Formats "show ip ospf" output.
+ */
+function formatCliOspfGeneral(device) {
+    if (!device.ospf || !device.ospf.enabled) {
+        return '% OSPF is not enabled';
+    }
+    const rid = device.ospf.routerId || getDeviceRouterId(device);
+    const enabledIfs = getOspfEnabledInterfaces(device);
+    const lines = [
+        ` Routing Process "ospf ${device.ospf.processId}" with ID ${rid}`,
+        ` Supports only single TOS(TOS0) routes`,
+        ` Supports opaque LSA`,
+        ` It is an autonomous system boundary router`,
+        ` Number of areas in this router is 1. 1 normal 0 stub 0 nssa`,
+        `    Area BACKBONE(0)`,
+        `        Number of interfaces in this area is ${enabledIfs.length}`,
+        `        SPF algorithm last executed 00:00:00 ago`
+    ];
+    return lines.join('\n');
+}
+
+/**
+ * Formats "show ip ospf neighbor" output.
+ */
+function formatCliOspfNeighbors(device) {
+    if (!device.ospf || !device.ospf.enabled) {
+        return '% OSPF is not enabled';
+    }
+    updateOspfAdjacencies();
+    const neighbors = Object.values(device.ospf.neighbors || {});
+    const lines = [
+        'Neighbor ID     Pri   State           Dead Time   Address         Interface'
+    ];
+    for (const n of neighbors) {
+        const stateStr = `${n.state}/ -`;
+        const deadStr = `00:00:${String(n.deadTime || 40).padStart(2, '0')}`;
+        lines.push(
+            `${n.routerId.padEnd(16)}${String(n.priority || 1).padEnd(6)}${stateStr.padEnd(16)}${deadStr.padEnd(12)}${n.ip.padEnd(16)}${n.interface}`
+        );
+    }
+    return lines.join('\n');
+}
+
+/**
+ * Formats "show ip ospf interface [brief]" output.
+ */
+function formatCliOspfInterfaces(device, isBrief = false) {
+    if (!device.ospf || !device.ospf.enabled) {
+        return '% OSPF is not enabled';
+    }
+    const ifaces = getOspfEnabledInterfaces(device);
+    if (ifaces.length === 0) {
+        return '% No OSPF-enabled interfaces configured';
+    }
+
+    if (isBrief) {
+        const lines = [
+            'Interface           PID   Area            IP Address/Mask    Cost  State Nbrs F/C'
+        ];
+        for (const iface of ifaces) {
+            const prefix = iface.subnetMask ? getPrefixLengthFromMask(iface.subnetMask) : 24;
+            const ipMask = `${iface.ip}/${prefix}`;
+            const nbrCount = Object.values(device.ospf.neighbors || {}).filter(n => n.interface === iface.name && n.state === 'FULL').length;
+            lines.push(
+                `${iface.name.padEnd(20)}${String(device.ospf.processId || 1).padEnd(6)}${String(iface.area).padEnd(16)}${ipMask.padEnd(19)}${String(iface.cost).padEnd(6)}${iface.state.padEnd(6)}${nbrCount}/1`
+            );
+        }
+        return lines.join('\n');
+    }
+
+    const lines = [];
+    for (const iface of ifaces) {
+        const prefix = iface.subnetMask ? getPrefixLengthFromMask(iface.subnetMask) : 24;
+        const rid = device.ospf.routerId || getDeviceRouterId(device);
+        const nbrs = Object.values(device.ospf.neighbors || {}).filter(n => n.interface === iface.name);
+        const fullNbrs = nbrs.filter(n => n.state === 'FULL');
+        lines.push(`${iface.name} is up, line protocol is up`);
+        lines.push(`  Internet Address ${iface.ip}/${prefix}, Area ${iface.area}, Attached via Network Statement`);
+        lines.push(`  Process ID ${device.ospf.processId || 1}, Router ID ${rid}, Network Type POINT_TO_POINT, Cost: ${iface.cost}`);
+        lines.push(`  Transmit Delay is 1 sec, State ${iface.state}, Priority ${iface.priority}`);
+        lines.push(`  Timer intervals configured, Hello ${iface.helloInterval}, Dead ${iface.deadInterval}, Wait ${iface.deadInterval}, Retransmit 5`);
+        lines.push(`  Hello due in 00:00:07`);
+        lines.push(`  Neighbor Count is ${nbrs.length}, Adjacent neighbor count is ${fullNbrs.length}`);
+        lines.push('');
+    }
+    return lines.join('\n').trimEnd();
 }
 
 document.addEventListener('DOMContentLoaded', initializeLab);
