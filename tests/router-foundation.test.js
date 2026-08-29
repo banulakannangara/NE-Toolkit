@@ -19831,8 +19831,170 @@ runTest('753. Static IP endpoints preserve manual configuration and do not pollu
     assert.strictEqual(pc.ip, '192.168.1.99');
 });
 
-// 754. Full regression check: all V5.11 and V5.12 foundation, relay, CLI, and UI components operate harmoniously
-runTest('754. Full regression check: all V5.11 and V5.12 foundation, relay, CLI, and UI components operate harmoniously', () => {
+// 754. show ip dhcp pool CLI output displays configured default-router, dns-server, domain-name, and lease duration
+runTest('754. show ip dhcp pool CLI output displays configured default-router, dns-server, domain-name, and lease duration', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '192.168.10.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip dhcp pool LAN_POOL');
+    executeCliCommand(r0, 'network 192.168.10.0 255.255.255.0');
+    executeCliCommand(r0, 'default-router 192.168.10.1');
+    executeCliCommand(r0, 'dns-server 1.1.1.1');
+    executeCliCommand(r0, 'domain-name lab.local');
+    executeCliCommand(r0, 'lease 1');
+
+    const res = executeCliCommand(r0, 'show ip dhcp pool LAN_POOL');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Pool LAN_POOL :'));
+    assert.ok(res.output.includes('Default router                 : 192.168.10.1'));
+    assert.ok(res.output.includes('DNS server                     : 1.1.1.1'));
+    assert.ok(res.output.includes('Domain name                    : lab.local'));
+    assert.ok(res.output.includes('Lease                          : 86400 secs'));
+    assert.ok(res.output.includes('192.168.10.1') && res.output.includes('192.168.10.254'));
+});
+
+// 755. show ip dhcp pool displays infinite lease and unconfigured attribute fallbacks gracefully
+runTest('755. show ip dhcp pool displays infinite lease and unconfigured attribute fallbacks gracefully', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createDhcpPool(r0, { name: 'MIN_POOL', network: '10.0.0.0', subnetMask: '255.255.255.0', leaseTime: 0 });
+
+    const res = executeCliCommand(r0, 'show ip dhcp pool MIN_POOL');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Pool MIN_POOL :'));
+    assert.ok(res.output.includes('Default router                 : none'));
+    assert.ok(res.output.includes('DNS server                     : none'));
+    assert.ok(res.output.includes('Domain name                    : none'));
+    assert.ok(res.output.includes('Lease                          : infinite'));
+});
+
+// 756. End-to-end DORA populates client dhcpClient.serverIp, lease timestamps, and domainName on client
+runTest('756. End-to-end DORA populates client dhcpClient.serverIp, lease timestamps, and domainName on client', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '192.168.10.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(r0, {
+        name: 'LAN_POOL',
+        network: '192.168.10.0',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.10.1',
+        dnsServer: '1.1.1.1',
+        domainName: 'lab.local',
+        leaseTime: 86400
+    });
+    addConnection(pc.id, r0.id);
+
+    const dora = simulateDhcpDora(pc.id);
+    assert.strictEqual(dora.success, true);
+    assert.strictEqual(pc.dhcpClient.serverIp, '192.168.10.1');
+    assert.strictEqual(pc.domainName, 'lab.local');
+    assert.strictEqual(pc.dhcpClient.lease.serverIp, '192.168.10.1');
+    assert.strictEqual(pc.dhcpClient.lease.domainName, 'lab.local');
+    assert.ok(typeof pc.dhcpClient.lease.obtainedAt === 'number');
+    assert.ok(typeof pc.dhcpClient.lease.expiresAt === 'number');
+    assert.strictEqual(pc.dhcpClient.lease.expiresAt - pc.dhcpClient.lease.obtainedAt, 86400 * 1000);
+});
+
+// 757. ipconfig and ipconfig /all display Connection-specific DNS Suffix, DHCP Server IP, and formatted lease timestamps
+runTest('757. ipconfig and ipconfig /all display Connection-specific DNS Suffix, DHCP Server IP, and formatted lease timestamps', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '192.168.10.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(r0, {
+        name: 'LAN_POOL',
+        network: '192.168.10.0',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.10.1',
+        dnsServer: '1.1.1.1',
+        domainName: 'lab.local',
+        leaseTime: 86400
+    });
+    addConnection(pc.id, r0.id);
+
+    simulateDhcpDora(pc.id);
+
+    const basicRes = executeCliCommand(pc, 'ipconfig');
+    assert.strictEqual(basicRes.success, true);
+    assert.ok(basicRes.output.includes('Connection-specific DNS Suffix  . : lab.local'));
+    assert.ok(basicRes.output.includes('192.168.10.2'));
+
+    const allRes = executeCliCommand(pc, 'ipconfig /all');
+    assert.strictEqual(allRes.success, true);
+    assert.ok(allRes.output.includes('Connection-specific DNS Suffix  . : lab.local'));
+    assert.ok(allRes.output.includes('DHCP Server . . . . . . . . . . . : 192.168.10.1'));
+    assert.ok(allRes.output.includes('DNS Servers . . . . . . . . . . . : 1.1.1.1'));
+    assert.ok(!allRes.output.includes('Lease Obtained. . . . . . . . . . : N/A'));
+    assert.ok(!allRes.output.includes('Lease Expires . . . . . . . . . . : N/A'));
+    assert.ok(allRes.output.includes('Lease Obtained. . . . . . . . . . : '));
+    assert.ok(allRes.output.includes('Lease Expires . . . . . . . . . . : '));
+});
+
+// 758. ipconfig /release clears DHCP metadata (domainName, serverIp, lease) and /renew restores all metadata
+runTest('758. ipconfig /release clears DHCP metadata (domainName, serverIp, lease) and /renew restores all metadata', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '192.168.10.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    createDhcpPool(r0, {
+        name: 'LAN_POOL',
+        network: '192.168.10.0',
+        subnetMask: '255.255.255.0',
+        defaultRouter: '192.168.10.1',
+        dnsServer: '1.1.1.1',
+        domainName: 'lab.local',
+        leaseTime: 86400
+    });
+    addConnection(pc.id, r0.id);
+
+    simulateDhcpDora(pc.id);
+    assert.strictEqual(pc.ip, '192.168.10.2');
+
+    // /release clears IP and metadata
+    const relRes = executeCliCommand(pc, 'ipconfig /release');
+    assert.strictEqual(relRes.success, true);
+    assert.strictEqual(pc.ip, '');
+    assert.strictEqual(pc.domainName, '');
+    assert.strictEqual(pc.dhcpClient.serverIp, null);
+    assert.strictEqual(pc.dhcpClient.lease, null);
+
+    const relAll = executeCliCommand(pc, 'ipconfig /all');
+    assert.ok(relAll.output.includes('Connection-specific DNS Suffix  . :'));
+    assert.ok(relAll.output.includes('DHCP Server . . . . . . . . . . . : 0.0.0.0'));
+    assert.ok(relAll.output.includes('Lease Obtained. . . . . . . . . . : N/A'));
+    assert.ok(relAll.output.includes('Lease Expires . . . . . . . . . . : N/A'));
+
+    // /renew restores IP and metadata
+    const renRes = executeCliCommand(pc, 'ipconfig /renew');
+    assert.strictEqual(renRes.success, true);
+    assert.ok(renRes.output.includes('Connection-specific DNS Suffix  . : lab.local'));
+    assert.ok(renRes.output.includes('192.168.10.2'));
+    assert.strictEqual(pc.ip, '192.168.10.2');
+    assert.strictEqual(pc.domainName, 'lab.local');
+    assert.strictEqual(pc.dhcpClient.serverIp, '192.168.10.1');
+    assert.ok(pc.dhcpClient.lease !== null);
+
+    const renAll = executeCliCommand(pc, 'ipconfig /all');
+    assert.ok(renAll.output.includes('Connection-specific DNS Suffix  . : lab.local'));
+    assert.ok(renAll.output.includes('DHCP Server . . . . . . . . . . . : 192.168.10.1'));
+    assert.ok(!renAll.output.includes('Lease Obtained. . . . . . . . . . : N/A'));
+});
+
+// 759. Full regression check: all V5.11 and V5.12 foundation, relay, CLI, and UI components operate harmoniously
+runTest('759. Full regression check: all V5.11 and V5.12 foundation, relay, CLI, and UI components operate harmoniously', () => {
     assert.strictEqual(typeof formatCliDhcpBindings, 'function');
     assert.strictEqual(typeof formatCliDhcpPools, 'function');
     assert.strictEqual(typeof formatCliRouterIpInterfaceDetail, 'function');
@@ -19840,9 +20002,9 @@ runTest('754. Full regression check: all V5.11 and V5.12 foundation, relay, CLI,
     assert.strictEqual(typeof renderDhcpServerInspector, 'function');
 });
 
-// 755. Total test count verification check
-runTest('755. Total test count verification check', () => {
-    assert.ok(testsPassed >= 754);
+// 760. Total test count verification check
+runTest('760. Total test count verification check', () => {
+    assert.ok(testsPassed >= 759);
 });
 
 console.log('----------------------------------------------------');

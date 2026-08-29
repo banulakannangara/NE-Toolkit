@@ -10642,6 +10642,7 @@ function clearCliTerminal(deviceId) {
 
 function formatCliIpconfig(device) {
     const lines = ['Windows IP Configuration', ''];
+    const domainSuffix = device.domainName || device.dhcpClient?.lease?.domainName || '';
     if (device.interfaces && typeof device.interfaces === 'object' && Object.keys(device.interfaces).length > 0) {
         Object.entries(device.interfaces).forEach(([ifName, iface]) => {
             const ip = iface.ip || '0.0.0.0';
@@ -10650,7 +10651,7 @@ function formatCliIpconfig(device) {
             const mac = iface.mac ? iface.mac.replace(/:/g, '-').toUpperCase() : '00-00-00-00-00-00';
             lines.push(`Ethernet adapter ${ifName}:`);
             lines.push('');
-            lines.push('   Connection-specific DNS Suffix  . :');
+            lines.push(`   Connection-specific DNS Suffix  . : ${domainSuffix}`);
             lines.push('   Link-local IPv6 Address . . . . . : fe80::1');
             lines.push(`   IPv4 Address. . . . . . . . . . . : ${ip}`);
             lines.push(`   Subnet Mask . . . . . . . . . . . : ${mask}`);
@@ -10665,7 +10666,7 @@ function formatCliIpconfig(device) {
         const mac = device.mac ? device.mac.replace(/:/g, '-').toUpperCase() : '00-00-00-00-00-00';
         lines.push('Ethernet adapter Local Area Connection:');
         lines.push('');
-        lines.push('   Connection-specific DNS Suffix  . :');
+        lines.push(`   Connection-specific DNS Suffix  . : ${domainSuffix}`);
         lines.push('   Link-local IPv6 Address . . . . . : fe80::1');
         lines.push(`   IPv4 Address. . . . . . . . . . . : ${ip}`);
         lines.push(`   Subnet Mask . . . . . . . . . . . : ${mask}`);
@@ -10681,7 +10682,10 @@ function formatCliIpconfigAll(device) {
     const isDhcp = dhcpClient.enabled !== false;
     const lease = dhcpClient.lease || {};
     const dns = device.dnsServer || lease.dnsServer || '0.0.0.0';
-    const dhcpServer = dhcpClient.serverIp || lease.serverId || '0.0.0.0';
+    const dhcpServer = dhcpClient.serverIp || lease.serverIp || lease.serverId || '0.0.0.0';
+    const domainSuffix = device.domainName || lease.domainName || '';
+    const obtained = lease.obtainedAt || lease.leaseStart;
+    const expires = lease.expiresAt || lease.leaseExpires;
 
     if (device.interfaces && typeof device.interfaces === 'object' && Object.keys(device.interfaces).length > 0) {
         Object.entries(device.interfaces).forEach(([ifName, iface]) => {
@@ -10691,7 +10695,7 @@ function formatCliIpconfigAll(device) {
             const mac = iface.mac ? iface.mac.replace(/:/g, '-').toUpperCase() : '00-00-00-00-00-00';
             lines.push(`Ethernet adapter ${ifName}:`);
             lines.push('');
-            lines.push('   Connection-specific DNS Suffix  . :');
+            lines.push(`   Connection-specific DNS Suffix  . : ${domainSuffix}`);
             lines.push(`   Physical Address. . . . . . . . . : ${mac}`);
             lines.push(`   DHCP Enabled. . . . . . . . . . . : ${isDhcp ? 'Yes' : 'No'}`);
             lines.push('   Autoconfiguration Enabled . . . . : Yes');
@@ -10701,8 +10705,8 @@ function formatCliIpconfigAll(device) {
             lines.push(`   Default Gateway . . . . . . . . . : ${gateway}`);
             lines.push(`   DHCP Server . . . . . . . . . . . : ${dhcpServer}`);
             lines.push(`   DNS Servers . . . . . . . . . . . : ${dns}`);
-            lines.push(`   Lease Obtained. . . . . . . . . . : ${lease.obtainedAt ? new Date(lease.obtainedAt).toLocaleString() : 'N/A'}`);
-            lines.push(`   Lease Expires . . . . . . . . . . : ${lease.expiresAt ? new Date(lease.expiresAt).toLocaleString() : 'N/A'}`);
+            lines.push(`   Lease Obtained. . . . . . . . . . : ${obtained ? new Date(obtained).toLocaleString() : 'N/A'}`);
+            lines.push(`   Lease Expires . . . . . . . . . . : ${expires ? new Date(expires).toLocaleString() : 'N/A'}`);
             lines.push('');
         });
     } else {
@@ -10712,7 +10716,7 @@ function formatCliIpconfigAll(device) {
         const mac = device.mac ? device.mac.replace(/:/g, '-').toUpperCase() : '00-00-00-00-00-00';
         lines.push('Ethernet adapter Local Area Connection:');
         lines.push('');
-        lines.push('   Connection-specific DNS Suffix  . :');
+        lines.push(`   Connection-specific DNS Suffix  . : ${domainSuffix}`);
         lines.push(`   Physical Address. . . . . . . . . : ${mac}`);
         lines.push(`   DHCP Enabled. . . . . . . . . . . : ${isDhcp ? 'Yes' : 'No'}`);
         lines.push('   Autoconfiguration Enabled . . . . : Yes');
@@ -10722,8 +10726,8 @@ function formatCliIpconfigAll(device) {
         lines.push(`   Default Gateway . . . . . . . . . : ${gateway}`);
         lines.push(`   DHCP Server . . . . . . . . . . . : ${dhcpServer}`);
         lines.push(`   DNS Servers . . . . . . . . . . . : ${dns}`);
-        lines.push(`   Lease Obtained. . . . . . . . . . : ${lease.obtainedAt ? new Date(lease.obtainedAt).toLocaleString() : 'N/A'}`);
-        lines.push(`   Lease Expires . . . . . . . . . . : ${lease.expiresAt ? new Date(lease.expiresAt).toLocaleString() : 'N/A'}`);
+        lines.push(`   Lease Obtained. . . . . . . . . . : ${obtained ? new Date(obtained).toLocaleString() : 'N/A'}`);
+        lines.push(`   Lease Expires . . . . . . . . . . : ${expires ? new Date(expires).toLocaleString() : 'N/A'}`);
     }
     return lines.join('\n').trimEnd();
 }
@@ -10918,11 +10922,16 @@ function formatCliDhcpPools(device, poolFilter = null) {
         const total = pool.subnetMask ? getDhcpPoolTotalAddresses(pool) : 0;
         const leased = getDhcpBindings(device).filter(b => b.poolName === pool.name).length;
         const excluded = (device.dhcpServer?.excludedRanges || []).length;
+        const leaseStr = pool.leaseTime === 0 ? 'infinite' : `${pool.leaseTime || 86400} secs`;
         lines.push(`Pool ${pool.name} :`);
         lines.push(` Total addresses                : ${total}`);
         lines.push(` Leased addresses               : ${leased}`);
         lines.push(` Excluded addresses             : ${excluded}`);
         lines.push(` Pending event                  : none`);
+        lines.push(` Default router                 : ${pool.defaultRouter || 'none'}`);
+        lines.push(` DNS server                     : ${pool.dnsServer || 'none'}`);
+        lines.push(` Domain name                    : ${pool.domainName || 'none'}`);
+        lines.push(` Lease                          : ${leaseStr}`);
         lines.push(`1 subnet is currently in the pool :`);
         lines.push(` Current index        IP address range                    Leased/Excluded/Total`);
         const firstIp = pool.network && pool.subnetMask ? integerToIPv4(ipv4ToInteger(pool.network) + 1) : '0.0.0.0';
@@ -14688,12 +14697,13 @@ function executeCliCommand(deviceId, rawInput) {
             const doraRes = simulateDhcpDora(dev.id);
             render();
             if (doraRes.success) {
+                const domainSuffix = dev.domainName || dev.dhcpClient?.lease?.domainName || '';
                 const output = [
                     'Windows IP Configuration',
                     '',
                     'Ethernet adapter FastEthernet0:',
                     '',
-                    '   Connection-specific DNS Suffix  . :',
+                    `   Connection-specific DNS Suffix  . : ${domainSuffix}`,
                     `   IPv4 Address. . . . . . . . . . . : ${dev.ip || doraRes.assignedIp || '0.0.0.0'}`,
                     `   Subnet Mask . . . . . . . . . . . : ${dev.subnetMask || doraRes.subnetMask || '0.0.0.0'}`,
                     `   Default Gateway . . . . . . . . . : ${dev.gateway || doraRes.defaultRouter || '0.0.0.0'}`
@@ -15945,7 +15955,7 @@ function createDhcpLease(deviceOrId, poolName, clientMac, requestedIp = null, op
     }
 
     const now = typeof options.now === 'number' ? options.now : Date.now();
-    const leaseDuration = typeof options.leaseDuration === 'number' && options.leaseDuration > 0
+    const leaseDuration = typeof options.leaseDuration === 'number' && options.leaseDuration >= 0
         ? options.leaseDuration
         : pool.leaseTime;
 
@@ -15962,6 +15972,10 @@ function createDhcpLease(deviceOrId, poolName, clientMac, requestedIp = null, op
         leaseDuration,
         leaseStart: now,
         leaseExpires: now + (leaseDuration * 1000),
+        obtainedAt: now,
+        expiresAt: now + (leaseDuration * 1000),
+        serverIp: options.serverIp || options.serverIdentifier || '',
+        serverId: options.serverId || dev.id,
         state: 'active',
         type: options.type || 'dynamic'
     };
@@ -15995,13 +16009,15 @@ function renewDhcpLease(deviceOrId, clientMac, ip, options = {}) {
     }
 
     const now = typeof options.now === 'number' ? options.now : Date.now();
-    const leaseDuration = typeof options.leaseDuration === 'number' && options.leaseDuration > 0
+    const leaseDuration = typeof options.leaseDuration === 'number' && options.leaseDuration >= 0
         ? options.leaseDuration
         : binding.leaseDuration;
 
     binding.leaseStart = now;
     binding.leaseDuration = leaseDuration;
     binding.leaseExpires = now + (leaseDuration * 1000);
+    binding.obtainedAt = now;
+    binding.expiresAt = now + (leaseDuration * 1000);
     binding.state = 'active';
 
     return {
@@ -16089,9 +16105,21 @@ function applyDhcpLeaseToClient(deviceOrId, lease) {
     if (lease.dnsServer) {
         dev.dnsServer = lease.dnsServer;
     }
+    if (lease.domainName) {
+        dev.domainName = lease.domainName;
+    }
+    if (lease.serverIp) {
+        dev.dhcpClient.serverIp = lease.serverIp;
+    } else if (lease.serverId && isValidIPv4(lease.serverId)) {
+        dev.dhcpClient.serverIp = lease.serverId;
+    }
 
     dev.dhcpClient.state = 'BOUND';
-    dev.dhcpClient.lease = { ...lease };
+    dev.dhcpClient.lease = {
+        ...lease,
+        obtainedAt: lease.obtainedAt || lease.leaseStart,
+        expiresAt: lease.expiresAt || lease.leaseExpires
+    };
     return true;
 }
 
@@ -16107,11 +16135,14 @@ function clearDhcpClientLease(deviceOrId) {
     dev.dhcpClient.lease = null;
     dev.dhcpClient.lastOffer = null;
     dev.dhcpClient.lastServerId = null;
+    dev.dhcpClient.serverIp = null;
 
     if (dev.ipMode === 'dhcp') {
         dev.ip = '';
         dev.subnetMask = '';
         dev.gateway = '';
+        dev.dnsServer = '';
+        dev.domainName = '';
     }
 
     return true;
@@ -16814,9 +16845,10 @@ function simulateDhcpRequest(clientDeviceId, offeredIp = null, serverId = null, 
         now: typeof opts.now === 'number' ? opts.now : Date.now(),
         leaseDuration: tx.leaseTime,
         hostname: clientDev.name,
-        giaddr: isRelay ? giaddr : null
+        giaddr: isRelay ? giaddr : null,
+        serverIp: tx.serverIp,
+        serverId: tx.serverId || serverDev.id
     });
-
 
     if (!leaseRes.success) {
         tx.state = 'FAILED';
@@ -16834,6 +16866,8 @@ function simulateDhcpRequest(clientDeviceId, offeredIp = null, serverId = null, 
     }
 
     const committedLease = leaseRes.lease;
+    committedLease.serverIp = tx.serverIp;
+    committedLease.serverId = tx.serverId || serverDev.id;
 
     const ackPacket = createDhcpPacket('ACK', {
         transactionId: txId,
