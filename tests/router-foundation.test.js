@@ -22989,6 +22989,393 @@ runTest('865. Total test count verification check', () => {
     assert.ok(testsPassed >= 864);
 });
 
+// ==========================================
+// V5.14 PHASE 1: NAT DATA MODEL & INTERFACE ROLES
+// ==========================================
+
+// 866. NAT state initializes safely for a router
+runTest('866. NAT state initializes safely for a router', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const nat = getRouterNatState(r0.id);
+    assert.ok(nat, 'NAT state should be defined');
+    assert.deepStrictEqual(nat.insideInterfaces, []);
+    assert.deepStrictEqual(nat.outsideInterfaces, []);
+    assert.deepStrictEqual(nat.staticRules, []);
+    assert.deepStrictEqual(nat.pools, {});
+    assert.deepStrictEqual(nat.dynamicRules, []);
+    assert.deepStrictEqual(nat.translations, []);
+    assert.strictEqual(nat.stats.hits, 0);
+    assert.strictEqual(nat.stats.misses, 0);
+    assert.strictEqual(nat.stats.activeTranslations, 0);
+});
+
+// 867. NAT state retrieval is idempotent
+runTest('867. NAT state retrieval is idempotent', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const nat1 = getRouterNatState(r0);
+    const nat2 = getRouterNatState(r0.id);
+    assert.strictEqual(nat1, nat2);
+});
+
+// 868. Router Gig0/0 can be configured as NAT inside via CLI
+runTest('868. Router Gig0/0 can be configured as NAT inside via CLI', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/0');
+    const res = executeCliCommand(r0, 'ip nat inside');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/0'), true);
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/0'), false);
+});
+
+// 869. Router Gig0/1 can be configured as NAT outside via CLI
+runTest('869. Router Gig0/1 can be configured as NAT outside via CLI', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/1');
+    const res = executeCliCommand(r0, 'ip nat outside');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/1'), true);
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/1'), false);
+});
+
+// 870. NAT inside role helper reports configured state correctly
+runTest('870. NAT inside role helper reports configured state correctly', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/0'), false);
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/0'), true);
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/1'), false);
+});
+
+// 871. NAT outside role helper reports configured state correctly
+runTest('871. NAT outside role helper reports configured state correctly', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/1'), false);
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/1'), true);
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/0'), false);
+});
+
+// 872. Same interface cannot remain both inside and outside
+runTest('872. Same interface cannot remain both inside and outside', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/0'), true);
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/0'), false);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'outside');
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/0'), false);
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/0'), true);
+});
+
+// 873. Changing inside to outside replaces the previous role
+runTest('873. Changing inside to outside replaces the previous role', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/0');
+    executeCliCommand(r0, 'ip nat inside');
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/0'), true);
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/0'), false);
+
+    executeCliCommand(r0, 'ip nat outside');
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/0'), false);
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/0'), true);
+});
+
+// 874. Changing outside to inside replaces the previous role
+runTest('874. Changing outside to inside replaces the previous role', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/0');
+    executeCliCommand(r0, 'ip nat outside');
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/0'), true);
+
+    executeCliCommand(r0, 'ip nat inside');
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/0'), true);
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/0'), false);
+});
+
+// 875. Reapplying inside is idempotent with no duplicates
+runTest('875. Reapplying inside is idempotent with no duplicates', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/0');
+    executeCliCommand(r0, 'ip nat inside');
+    executeCliCommand(r0, 'ip nat inside');
+    const nat = getRouterNatState(r0);
+    assert.deepStrictEqual(nat.insideInterfaces, ['Gig0/0']);
+});
+
+// 876. Reapplying outside is idempotent with no duplicates
+runTest('876. Reapplying outside is idempotent with no duplicates', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/1');
+    executeCliCommand(r0, 'ip nat outside');
+    executeCliCommand(r0, 'ip nat outside');
+    const nat = getRouterNatState(r0);
+    assert.deepStrictEqual(nat.outsideInterfaces, ['Gig0/1']);
+});
+
+// 877. no ip nat inside removes the inside role
+runTest('877. no ip nat inside removes the inside role', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/0');
+    executeCliCommand(r0, 'ip nat inside');
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/0'), true);
+
+    const res = executeCliCommand(r0, 'no ip nat inside');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/0'), false);
+});
+
+// 878. no ip nat outside removes the outside role
+runTest('878. no ip nat outside removes the outside role', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/1');
+    executeCliCommand(r0, 'ip nat outside');
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/1'), true);
+
+    const res = executeCliCommand(r0, 'no ip nat outside');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/1'), false);
+});
+
+// 879. Repeated no ip nat inside is safe
+runTest('879. Repeated no ip nat inside is safe', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/0');
+    const res1 = executeCliCommand(r0, 'no ip nat inside');
+    const res2 = executeCliCommand(r0, 'no ip nat inside');
+    assert.strictEqual(res1.success, true);
+    assert.strictEqual(res2.success, true);
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/0'), false);
+});
+
+// 880. Repeated no ip nat outside is safe
+runTest('880. Repeated no ip nat outside is safe', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/1');
+    const res1 = executeCliCommand(r0, 'no ip nat outside');
+    const res2 = executeCliCommand(r0, 'no ip nat outside');
+    assert.strictEqual(res1.success, true);
+    assert.strictEqual(res2.success, true);
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/1'), false);
+});
+
+// 881. Invalid NAT role command is rejected
+runTest('881. Invalid NAT role command is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/0');
+    const res = executeCliCommand(r0, 'ip nat invalidrole');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Invalid or unsupported NAT command'));
+});
+
+// 882. Incomplete ip nat command is rejected
+runTest('882. Incomplete ip nat command is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/0');
+    const res1 = executeCliCommand(r0, 'ip nat');
+    assert.strictEqual(res1.success, false);
+    assert.ok(res1.output.includes('Incomplete command'));
+
+    const res2 = executeCliCommand(r0, 'no ip nat');
+    assert.strictEqual(res2.success, false);
+    assert.ok(res2.output.includes('Incomplete command'));
+});
+
+// 883. NAT interface commands in invalid CLI mode are rejected
+runTest('883. NAT interface commands in invalid CLI mode are rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    const res1 = executeCliCommand(r0, 'ip nat inside');
+    assert.strictEqual(res1.success, false);
+    assert.ok(res1.output.includes('must be executed inside interface configuration mode'));
+
+    executeCliCommand(r0, 'conf t');
+    const res2 = executeCliCommand(r0, 'ip nat inside');
+    assert.strictEqual(res2.success, false);
+    assert.ok(res2.output.includes('must be executed inside interface configuration mode'));
+});
+
+// 884. NAT role configuration does not alter existing routing table behavior
+runTest('884. NAT role configuration does not alter existing routing table behavior', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    const routesBefore = getRouterRoutingTable(r0.id);
+    assert.strictEqual(routesBefore.length, 2);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    const routesAfter = getRouterRoutingTable(r0.id);
+    assert.strictEqual(routesAfter.length, 2);
+    assert.deepStrictEqual(routesBefore, routesAfter);
+});
+
+// 885. NAT role configuration does not break existing packet forwarding
+runTest('885. NAT role configuration does not break existing packet forwarding', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    const res = executeCliPing(pc0, '192.168.2.10');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Packets: Sent = 4, Received = 4, Lost = 0 (0% loss)'));
+});
+
+// 886. setNatInterfaceRole and clearNatInterfaceRole return error for nonexistent interface or non-router
+runTest('886. setNatInterfaceRole and clearNatInterfaceRole return error for nonexistent interface or non-router', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 200, 100);
+    const [pc0, r0] = networkState.devices;
+
+    const resPc = setNatInterfaceRole(pc0, 'eth0', 'inside');
+    assert.strictEqual(resPc.success, false);
+    assert.strictEqual(resPc.reason, 'Router not found.');
+
+    const resBadIf = setNatInterfaceRole(r0, 'Gig0/99', 'inside');
+    assert.strictEqual(resBadIf.success, false);
+    assert.ok(resBadIf.reason.includes('does not exist on router'));
+
+    const resBadRole = setNatInterfaceRole(r0, 'Gig0/0', 'middle');
+    assert.strictEqual(resBadRole.success, false);
+    assert.ok(resBadRole.reason.includes('must be "inside" or "outside"'));
+});
+
+// 887. Subinterface config-subif supports ip nat inside and ip nat outside
+runTest('887. Subinterface config-subif supports ip nat inside and ip nat outside', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/0.10');
+    executeCliCommand(r0, 'encap dot1q 10');
+    executeCliCommand(r0, 'ip address 10.10.10.1 255.255.255.0');
+
+    const resIn = executeCliCommand(r0, 'ip nat inside');
+    assert.strictEqual(resIn.success, true);
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/0.10'), true);
+
+    const resOut = executeCliCommand(r0, 'ip nat outside');
+    assert.strictEqual(resOut.success, true);
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/0.10'), true);
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/0.10'), false);
+
+    const resNo = executeCliCommand(r0, 'no ip nat outside');
+    assert.strictEqual(resNo.success, true);
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/0.10'), false);
+});
+
+// 888. Full regression check: all V5.13 and V5.14 Phase 1 NAT state components operate harmoniously
+runTest('888. Full regression check: all V5.13 and V5.14 Phase 1 NAT state components operate harmoniously', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/0');
+    executeCliCommand(r0, 'ip address 10.0.0.1 255.255.255.0');
+    executeCliCommand(r0, 'ip nat inside');
+    executeCliCommand(r0, 'int Gig0/1');
+    executeCliCommand(r0, 'ip address 172.16.0.1 255.255.255.0');
+    executeCliCommand(r0, 'ip nat outside');
+
+    const nat = getRouterNatState(r0);
+    assert.deepStrictEqual(nat.insideInterfaces, ['Gig0/0']);
+    assert.deepStrictEqual(nat.outsideInterfaces, ['Gig0/1']);
+});
+
+// 889. Total test count verification check (Phase 1 baseline)
+runTest('889. Total test count verification check (Phase 1 baseline)', () => {
+    assert.ok(testsPassed >= 888);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

@@ -6658,7 +6658,20 @@ function getRouterRuntime(routerId) {
             ports: {},
             staticRoutes: [],
             acls: {},
-            interfaceAcls: {}
+            interfaceAcls: {},
+            nat: {
+                insideInterfaces: [],
+                outsideInterfaces: [],
+                staticRules: [],
+                pools: {},
+                dynamicRules: [],
+                translations: [],
+                stats: {
+                    hits: 0,
+                    misses: 0,
+                    activeTranslations: 0
+                }
+            }
         };
     }
     if (!Array.isArray(networkState.routerRuntime[routerId].staticRoutes)) {
@@ -6670,7 +6683,122 @@ function getRouterRuntime(routerId) {
     if (!networkState.routerRuntime[routerId].interfaceAcls || typeof networkState.routerRuntime[routerId].interfaceAcls !== 'object') {
         networkState.routerRuntime[routerId].interfaceAcls = {};
     }
+    if (!networkState.routerRuntime[routerId].nat || typeof networkState.routerRuntime[routerId].nat !== 'object') {
+        networkState.routerRuntime[routerId].nat = {
+            insideInterfaces: [],
+            outsideInterfaces: [],
+            staticRules: [],
+            pools: {},
+            dynamicRules: [],
+            translations: [],
+            stats: {
+                hits: 0,
+                misses: 0,
+                activeTranslations: 0
+            }
+        };
+    } else {
+        const nat = networkState.routerRuntime[routerId].nat;
+        if (!Array.isArray(nat.insideInterfaces)) nat.insideInterfaces = [];
+        if (!Array.isArray(nat.outsideInterfaces)) nat.outsideInterfaces = [];
+        if (!Array.isArray(nat.staticRules)) nat.staticRules = [];
+        if (!nat.pools || typeof nat.pools !== 'object') nat.pools = {};
+        if (!Array.isArray(nat.dynamicRules)) nat.dynamicRules = [];
+        if (!Array.isArray(nat.translations)) nat.translations = [];
+        if (!nat.stats || typeof nat.stats !== 'object') {
+            nat.stats = { hits: 0, misses: 0, activeTranslations: 0 };
+        }
+    }
     return networkState.routerRuntime[routerId];
+}
+
+function getRouterNatState(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return null;
+    }
+    const runtime = getRouterRuntime(dev.id);
+    return runtime.nat;
+}
+
+function isNatInsideInterface(deviceOrId, ifaceName) {
+    const nat = getRouterNatState(deviceOrId);
+    if (!nat || !Array.isArray(nat.insideInterfaces) || !ifaceName) {
+        return false;
+    }
+    const norm = String(ifaceName).trim();
+    return nat.insideInterfaces.includes(norm);
+}
+
+function isNatOutsideInterface(deviceOrId, ifaceName) {
+    const nat = getRouterNatState(deviceOrId);
+    if (!nat || !Array.isArray(nat.outsideInterfaces) || !ifaceName) {
+        return false;
+    }
+    const norm = String(ifaceName).trim();
+    return nat.outsideInterfaces.includes(norm);
+}
+
+function setNatInterfaceRole(deviceOrId, ifaceName, role) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+    const normIface = String(ifaceName || '').trim();
+    if (!normIface || !dev.interfaces || !dev.interfaces[normIface]) {
+        return { success: false, reason: `Interface ${normIface} does not exist on router ${dev.name}.` };
+    }
+    const normRole = String(role || '').toLowerCase().trim();
+    if (normRole !== 'inside' && normRole !== 'outside') {
+        return { success: false, reason: 'Role must be "inside" or "outside".' };
+    }
+
+    const nat = getRouterNatState(dev.id);
+    if (!nat) {
+        return { success: false, reason: 'NAT state unavailable.' };
+    }
+
+    if (normRole === 'inside') {
+        nat.outsideInterfaces = nat.outsideInterfaces.filter(i => i !== normIface);
+        if (!nat.insideInterfaces.includes(normIface)) {
+            nat.insideInterfaces.push(normIface);
+        }
+    } else if (normRole === 'outside') {
+        nat.insideInterfaces = nat.insideInterfaces.filter(i => i !== normIface);
+        if (!nat.outsideInterfaces.includes(normIface)) {
+            nat.outsideInterfaces.push(normIface);
+        }
+    }
+
+    return { success: true, interface: normIface, role: normRole };
+}
+
+function clearNatInterfaceRole(deviceOrId, ifaceName, role) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+    const normIface = String(ifaceName || '').trim();
+    if (!normIface) {
+        return { success: false, reason: 'Interface name required.' };
+    }
+
+    const nat = getRouterNatState(dev.id);
+    if (!nat) {
+        return { success: false, reason: 'NAT state unavailable.' };
+    }
+
+    const normRole = role ? String(role).toLowerCase().trim() : null;
+    if (normRole === 'inside') {
+        nat.insideInterfaces = nat.insideInterfaces.filter(i => i !== normIface);
+    } else if (normRole === 'outside') {
+        nat.outsideInterfaces = nat.outsideInterfaces.filter(i => i !== normIface);
+    } else {
+        nat.insideInterfaces = nat.insideInterfaces.filter(i => i !== normIface);
+        nat.outsideInterfaces = nat.outsideInterfaces.filter(i => i !== normIface);
+    }
+
+    return { success: true, interface: normIface };
 }
 
 function parseAclAddressSpec(rawIp, rawMaskOrWildcard) {
@@ -12353,6 +12481,8 @@ function executeCliCommand(deviceId, rawInput) {
   encapsulation dot1q <vlan-id> - Configure IEEE 802.1Q encapsulation for this subinterface
   ip address <IP> <mask/prefix> - Set IPv4 address and subnet mask on this subinterface
   no ip address                 - Remove IPv4 address from this subinterface
+  ip nat <inside|outside>       - Enable NAT inside or outside on this subinterface
+  no ip nat <inside|outside>    - Remove NAT role from this subinterface
   shutdown                      - Administratively disable this subinterface
   no shutdown                   - Administratively enable this subinterface
   interface <name>              - Switch to another interface/subinterface (alias: int)
@@ -12364,6 +12494,13 @@ function executeCliCommand(deviceId, rawInput) {
                 helpText = `Commands available in Interface Configuration mode on ${dev.name}:
   ip address <IP> <mask/prefix> - Set IPv4 address and subnet mask on this interface
   no ip address                 - Remove IPv4 address from this interface
+  ip ospf cost <1-65535>        - Set OSPF interface metric cost
+  ip ospf priority <0-255>      - Set OSPF router priority
+  ip ospf hello-interval <sec>  - Set OSPF hello interval
+  ip ospf dead-interval <sec>   - Set OSPF dead interval
+  ip helper-address <IP>        - Add DHCP helper address (relay)
+  ip nat <inside|outside>       - Enable NAT inside or outside on this interface
+  no ip nat <inside|outside>    - Remove NAT role from this interface
   shutdown                      - Administratively disable this interface
   no shutdown                   - Administratively enable this interface
   interface <name>              - Switch to another interface (alias: int)
@@ -14255,6 +14392,74 @@ function executeCliCommand(deviceId, rawInput) {
             };
         }
 
+        // no ip nat [inside|outside]
+        if (sub1 === 'ip' && sub2 === 'nat') {
+            if (!isRouter) {
+                return {
+                    success: false,
+                    output: "% 'no ip nat' is a router interface command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if ((session.mode !== 'config-if' && session.mode !== 'config-subif') || !session.selectedInterface) {
+                return {
+                    success: false,
+                    output: '% "no ip nat" interface commands must be executed inside interface configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const ifaceName = session.selectedInterface;
+            const sub3 = (tokens[3] || '').toLowerCase().trim();
+            if (!sub3) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: no ip nat [inside|outside]',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (tokens.length > 4) {
+                return {
+                    success: false,
+                    output: '% Too many parameters: no ip nat [inside|outside]',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (sub3 === 'inside' || sub3 === 'outside') {
+                pushHistory();
+                clearNatInterfaceRole(dev, ifaceName, sub3);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            } else {
+                return {
+                    success: false,
+                    output: `% Invalid or unsupported command: "no ip nat ${tokens[3]}". Available: "no ip nat inside", "no ip nat outside".`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+        }
+
         // no router ospf [process-id]
         if (tokens[1] === 'router' && tokens[2] === 'ospf') {
             if (!isRouter && !(isSwitch && dev.ipRouting)) {
@@ -14713,6 +14918,74 @@ function executeCliCommand(deviceId, rawInput) {
 
     // 13. IP ROUTING / IP DEFAULT-GATEWAY / IP ADDRESS / IP DHCP / IP HELPER-ADDRESS
     if (mainCmd === 'ip') {
+        // ip nat [inside|outside]
+        if (tokens[1] === 'nat') {
+            if (!isRouter) {
+                return {
+                    success: false,
+                    output: "% 'ip nat' is a router interface command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if ((session.mode !== 'config-if' && session.mode !== 'config-subif') || !session.selectedInterface) {
+                return {
+                    success: false,
+                    output: '% "ip nat" interface commands must be executed inside interface configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const ifaceName = session.selectedInterface;
+            const role = (tokens[2] || '').toLowerCase().trim();
+            if (!role) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: ip nat [inside|outside]',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (tokens.length > 3) {
+                return {
+                    success: false,
+                    output: '% Too many parameters: ip nat [inside|outside]',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (role === 'inside' || role === 'outside') {
+                pushHistory();
+                setNatInterfaceRole(dev, ifaceName, role);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            } else {
+                return {
+                    success: false,
+                    output: `% Invalid or unsupported NAT command: "ip nat ${tokens[2]}". Available: "ip nat inside", "ip nat outside".`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+        }
+
         // ip ospf [cost|priority|hello-interval|dead-interval]
         if (tokens[1] === 'ospf') {
             if (!isRouter && !(isSwitch && dev.ipRouting)) {
