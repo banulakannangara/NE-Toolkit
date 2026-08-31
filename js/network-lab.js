@@ -6801,6 +6801,109 @@ function clearNatInterfaceRole(deviceOrId, ifaceName, role) {
     return { success: true, interface: normIface };
 }
 
+function getStaticNatRules(deviceOrId) {
+    const nat = getRouterNatState(deviceOrId);
+    if (!nat || !Array.isArray(nat.staticRules)) {
+        return [];
+    }
+    return nat.staticRules;
+}
+
+function findStaticNatRuleByInsideLocal(deviceOrId, ip) {
+    const rules = getStaticNatRules(deviceOrId);
+    if (!ip || !rules.length) return null;
+    const normIp = String(ip).trim();
+    return rules.find(r => r && r.insideLocal === normIp && r.enabled !== false) || null;
+}
+
+function findStaticNatRuleByInsideGlobal(deviceOrId, ip) {
+    const rules = getStaticNatRules(deviceOrId);
+    if (!ip || !rules.length) return null;
+    const normIp = String(ip).trim();
+    return rules.find(r => r && r.insideGlobal === normIp && r.enabled !== false) || null;
+}
+
+function addStaticNatRule(deviceOrId, insideLocal, insideGlobal) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+
+    const normLocal = String(insideLocal || '').trim();
+    const normGlobal = String(insideGlobal || '').trim();
+
+    if (!isValidIPv4(normLocal)) {
+        return { success: false, reason: `Invalid inside local IPv4 address: "${insideLocal}"` };
+    }
+    if (!isValidIPv4(normGlobal)) {
+        return { success: false, reason: `Invalid inside global IPv4 address: "${insideGlobal}"` };
+    }
+    if (normLocal === normGlobal) {
+        return { success: false, reason: 'Inside local and inside global IP addresses cannot be identical.' };
+    }
+
+    const nat = getRouterNatState(dev.id);
+    if (!nat) {
+        return { success: false, reason: 'NAT state unavailable.' };
+    }
+    if (!Array.isArray(nat.staticRules)) {
+        nat.staticRules = [];
+    }
+
+    const existingExact = nat.staticRules.find(r => r.insideLocal === normLocal && r.insideGlobal === normGlobal);
+    if (existingExact) {
+        return { success: true, rule: existingExact, duplicate: true };
+    }
+
+    const existingLocal = nat.staticRules.find(r => r.insideLocal === normLocal);
+    if (existingLocal) {
+        return { success: false, reason: `Inside local address ${normLocal} is already mapped to ${existingLocal.insideGlobal}.` };
+    }
+
+    const existingGlobal = nat.staticRules.find(r => r.insideGlobal === normGlobal);
+    if (existingGlobal) {
+        return { success: false, reason: `Inside global address ${normGlobal} is already mapped to ${existingGlobal.insideLocal}.` };
+    }
+
+    const rule = {
+        id: `static-${normLocal}-${normGlobal}`,
+        insideLocal: normLocal,
+        insideGlobal: normGlobal,
+        enabled: true
+    };
+
+    nat.staticRules.push(rule);
+    return { success: true, rule };
+}
+
+function removeStaticNatRule(deviceOrId, insideLocal, insideGlobal) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+
+    const normLocal = String(insideLocal || '').trim();
+    const normGlobal = String(insideGlobal || '').trim();
+
+    const nat = getRouterNatState(dev.id);
+    if (!nat || !Array.isArray(nat.staticRules)) {
+        return { success: true };
+    }
+
+    nat.staticRules = nat.staticRules.filter(r => !(r.insideLocal === normLocal && r.insideGlobal === normGlobal));
+    return { success: true };
+}
+
+function translateStaticNatInsideToGlobal(deviceOrId, ip) {
+    const rule = findStaticNatRuleByInsideLocal(deviceOrId, ip);
+    return rule ? rule.insideGlobal : ip;
+}
+
+function translateStaticNatGlobalToInside(deviceOrId, ip) {
+    const rule = findStaticNatRuleByInsideGlobal(deviceOrId, ip);
+    return rule ? rule.insideLocal : ip;
+}
+
 function parseAclAddressSpec(rawIp, rawMaskOrWildcard) {
     const ipStr = String(rawIp || '').trim();
     if (!ipStr || ipStr.toLowerCase() === 'any') {
@@ -8905,6 +9008,33 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                 }
             }
 
+            // Inbound Static NAT (Outside -> Inside)
+            let originalDestinationIp = frame.packet.destinationIp;
+            if (activeIngressIfaceName && isNatOutsideInterface(toDevice.id, activeIngressIfaceName)) {
+                const staticRule = findStaticNatRuleByInsideGlobal(toDevice.id, frame.packet.destinationIp);
+                if (staticRule) {
+                    const specRouteResult = lookupRoute(toDevice.id, staticRule.insideLocal);
+                    if (specRouteResult.success && specRouteResult.route) {
+                        const specNextHop = resolveRouteNextHop(toDevice.id, specRouteResult.route, staticRule.insideLocal);
+                        if (specNextHop.success && specNextHop.egressInterface && isNatInsideInterface(toDevice.id, specNextHop.egressInterface)) {
+                            frame.packet.destinationIp = staticRule.insideLocal;
+                            frame.packet.nat = {
+                                translated: true,
+                                direction: 'outside-to-inside',
+                                type: 'static',
+                                originalDestinationIp,
+                                translatedDestinationIp: staticRule.insideLocal
+                            };
+                            frame.events.push(`Router ${toDevice.name} applied Static NAT (outside -> inside): destination IP ${originalDestinationIp} -> ${staticRule.insideLocal}`);
+                            const natState = getRouterNatState(toDevice.id);
+                            if (natState?.stats) {
+                                natState.stats.hits = (natState.stats.hits || 0) + 1;
+                            }
+                        }
+                    }
+                }
+            }
+
             const routeResult = lookupRoute(toDevice.id, frame.packet.destinationIp);
             if (!routeResult.success) {
                 const isInterfaceDown = routeResult.reason === 'INTERFACE_DOWN';
@@ -9076,6 +9206,27 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                 }
             }
 
+            // Outbound Static NAT (Inside -> Outside)
+            if (activeIngressIfaceName && egressPort && isNatInsideInterface(toDevice.id, activeIngressIfaceName) && isNatOutsideInterface(toDevice.id, egressPort)) {
+                const staticRule = findStaticNatRuleByInsideLocal(toDevice.id, frame.packet.sourceIp);
+                if (staticRule) {
+                    const originalSourceIp = frame.packet.sourceIp;
+                    frame.packet.sourceIp = staticRule.insideGlobal;
+                    frame.packet.nat = {
+                        translated: true,
+                        direction: 'inside-to-outside',
+                        type: 'static',
+                        originalSourceIp,
+                        translatedSourceIp: staticRule.insideGlobal
+                    };
+                    frame.events.push(`Router ${toDevice.name} applied Static NAT (inside -> outside): source IP ${originalSourceIp} -> ${staticRule.insideGlobal}`);
+                    const natState = getRouterNatState(toDevice.id);
+                    if (natState?.stats) {
+                        natState.stats.hits = (natState.stats.hits || 0) + 1;
+                    }
+                }
+            }
+
             frame.packet.ttl = Math.max(0, frame.packet.ttl - 1);
             frame.events.push(`Router ${toDevice.name} decremented IP TTL to ${frame.packet.ttl}`);
 
@@ -9181,7 +9332,8 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                 ttl: frame.packet.ttl,
                 sourceMac: egressIface.mac,
                 destinationMac: frame.destinationMac,
-                route: selectedRoute
+                route: selectedRoute,
+                nat: frame.packet.nat || null
             });
         }
     }
@@ -11924,6 +12076,30 @@ function findDeviceByIp(ip) {
             };
         }
     }
+
+    // Check if IP is an insideGlobal address of a Static NAT rule on any router
+    for (const dev of (networkState.devices || [])) {
+        if (dev.type === 'router') {
+            const rule = findStaticNatRuleByInsideGlobal(dev.id, targetIp);
+            if (rule && rule.insideLocal) {
+                const targetHostMatch = findDeviceByIp(rule.insideLocal);
+                if (targetHostMatch) {
+                    return {
+                        device: targetHostMatch.device,
+                        interfaceName: targetHostMatch.interfaceName,
+                        ip: targetIp,
+                        subnetMask: targetHostMatch.subnetMask,
+                        mac: targetHostMatch.mac,
+                        status: targetHostMatch.status,
+                        isStaticNatTarget: true,
+                        natRouter: dev,
+                        insideLocalIp: rule.insideLocal
+                    };
+                }
+            }
+        }
+    }
+
     return null;
 }
 
@@ -12518,6 +12694,8 @@ function executeCliCommand(deviceId, rawInput) {
   no router ospf [process-id]   - Disable OSPF routing process
   ip dhcp pool <name>           - Configure DHCP pool (enters DHCP config mode)
   ip dhcp excluded-address <low> [high] - Configure excluded IP addresses
+  ip nat inside source static <local> <global> - Configure 1:1 Static NAT rule
+  no ip nat inside source static <local> <global> - Remove 1:1 Static NAT rule
   exit                          - Return to Privileged EXEC mode
   end                           - Return to Privileged EXEC mode
   do <command>                  - Execute an operational command
@@ -14392,18 +14570,121 @@ function executeCliCommand(deviceId, rawInput) {
             };
         }
 
-        // no ip nat [inside|outside]
+        // no ip nat
         if (sub1 === 'ip' && sub2 === 'nat') {
             if (!isRouter) {
                 return {
                     success: false,
-                    output: "% 'no ip nat' is a router interface command.",
+                    output: "% 'no ip nat' is a router command.",
                     clear: false,
                     status: 'error',
                     command,
                     device: dev
                 };
             }
+
+            // Global Config Mode: no ip nat inside source static <local-ip> <global-ip>
+            if (tokens[3] === 'inside' && tokens[4] === 'source') {
+                if (session.mode !== 'config') {
+                    return {
+                        success: false,
+                        output: '% "no ip nat inside source static" must be executed in global configuration mode.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                const natType = (tokens[5] || '').toLowerCase().trim();
+                if (!natType) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: no ip nat inside source static <local-ip> <global-ip>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (natType === 'static') {
+                    const localIp = (tokens[6] || '').trim();
+                    const globalIp = (tokens[7] || '').trim();
+                    if (!localIp || !globalIp) {
+                        return {
+                            success: false,
+                            output: '% Incomplete command: no ip nat inside source static <local-ip> <global-ip>',
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    if (tokens.length > 8) {
+                        return {
+                            success: false,
+                            output: '% Too many parameters: no ip nat inside source static <local-ip> <global-ip>',
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    if (!isValidIPv4(localIp) || !isValidIPv4(globalIp)) {
+                        return {
+                            success: false,
+                            output: '% Invalid IPv4 address in static NAT command.',
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    pushHistory();
+                    removeStaticNatRule(dev, localIp, globalIp);
+                    render();
+                    return {
+                        success: true,
+                        output: '',
+                        clear: false,
+                        status: 'success',
+                        command,
+                        device: dev
+                    };
+                } else {
+                    return {
+                        success: false,
+                        output: `% Invalid or unsupported command: "no ip nat inside source ${tokens[5]}". Available: "no ip nat inside source static <local-ip> <global-ip>".`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+            }
+
+            // Global Config mode when not "inside source"
+            if (session.mode === 'config') {
+                if ((tokens[3] === 'inside' || tokens[3] === 'outside') && !tokens[4]) {
+                    return {
+                        success: false,
+                        output: '% "no ip nat" interface commands must be executed inside interface configuration mode.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                return {
+                    success: false,
+                    output: '% Incomplete or unrecognized command: no ip nat inside source static <local-ip> <global-ip>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+
+            // Interface NAT: no ip nat [inside|outside] in config-if / config-subif
             if ((session.mode !== 'config-if' && session.mode !== 'config-subif') || !session.selectedInterface) {
                 return {
                     success: false,
@@ -14918,18 +15199,160 @@ function executeCliCommand(deviceId, rawInput) {
 
     // 13. IP ROUTING / IP DEFAULT-GATEWAY / IP ADDRESS / IP DHCP / IP HELPER-ADDRESS
     if (mainCmd === 'ip') {
-        // ip nat [inside|outside]
+        // ip nat
         if (tokens[1] === 'nat') {
             if (!isRouter) {
                 return {
                     success: false,
-                    output: "% 'ip nat' is a router interface command.",
+                    output: "% 'ip nat' is a router command.",
                     clear: false,
                     status: 'error',
                     command,
                     device: dev
                 };
             }
+
+            // Global Config Mode: ip nat inside source static <local-ip> <global-ip>
+            if (tokens[2] === 'inside' && tokens[3] === 'source') {
+                if (session.mode !== 'config') {
+                    return {
+                        success: false,
+                        output: '% "ip nat inside source static" must be executed in global configuration mode.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                const natType = (tokens[4] || '').toLowerCase().trim();
+                if (!natType) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: ip nat inside source static <local-ip> <global-ip>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (natType === 'static') {
+                    const localIp = (tokens[5] || '').trim();
+                    const globalIp = (tokens[6] || '').trim();
+                    if (!localIp || !globalIp) {
+                        return {
+                            success: false,
+                            output: '% Incomplete command: ip nat inside source static <local-ip> <global-ip>',
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    if (tokens.length > 7) {
+                        return {
+                            success: false,
+                            output: '% Too many parameters: ip nat inside source static <local-ip> <global-ip>',
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    if (!isValidIPv4(localIp) || !isValidIPv4(globalIp)) {
+                        return {
+                            success: false,
+                            output: '% Invalid IPv4 address in static NAT command.',
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    pushHistory();
+                    const res = addStaticNatRule(dev, localIp, globalIp);
+                    if (!res.success) {
+                        return {
+                            success: false,
+                            output: `% ${res.reason}`,
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    render();
+                    return {
+                        success: true,
+                        output: '',
+                        clear: false,
+                        status: 'success',
+                        command,
+                        device: dev
+                    };
+                } else if (natType === 'list' || natType === 'pool' || natType === 'dynamic') {
+                    return {
+                        success: false,
+                        output: '% Dynamic NAT is not supported in this version.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                } else {
+                    return {
+                        success: false,
+                        output: `% Invalid or unsupported command: "ip nat inside source ${tokens[4]}". Available: "ip nat inside source static <local-ip> <global-ip>".`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+            }
+
+            // Global Config mode when not "inside source"
+            if (session.mode === 'config') {
+                if (tokens[2] === 'inside' && !tokens[3]) {
+                    return {
+                        success: false,
+                        output: '% "ip nat" interface commands must be executed inside interface configuration mode.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (tokens[2] === 'outside' && !tokens[3]) {
+                    return {
+                        success: false,
+                        output: '% "ip nat" interface commands must be executed inside interface configuration mode.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (tokens[2] === 'outside') {
+                    return {
+                        success: false,
+                        output: '% Outside source NAT is not supported.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                return {
+                    success: false,
+                    output: '% Incomplete or unrecognized command: ip nat inside source static <local-ip> <global-ip>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+
+            // Interface NAT: ip nat [inside|outside] in config-if / config-subif
             if ((session.mode !== 'config-if' && session.mode !== 'config-subif') || !session.selectedInterface) {
                 return {
                     success: false,

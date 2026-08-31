@@ -23376,6 +23376,895 @@ runTest('889. Total test count verification check (Phase 1 baseline)', () => {
     assert.ok(testsPassed >= 888);
 });
 
+// ==========================================
+// V5.14 PHASE 2: STATIC NAT CONFIGURATION & TRANSLATION
+// ==========================================
+
+// 890. Static NAT rule can be added
+runTest('890. Static NAT rule can be added', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.rule.insideLocal, '192.168.1.10');
+    assert.strictEqual(res.rule.insideGlobal, '203.0.113.10');
+});
+
+// 891. Static NAT rule is stored in router runtime
+runTest('891. Static NAT rule is stored in router runtime', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addStaticNatRule(r0.id, '10.0.0.5', '198.51.100.5');
+    const rules = getStaticNatRules(r0);
+    assert.strictEqual(rules.length, 1);
+    assert.strictEqual(rules[0].insideLocal, '10.0.0.5');
+    assert.strictEqual(rules[0].insideGlobal, '198.51.100.5');
+});
+
+// 892. Static NAT rule lookup by inside-local works
+runTest('892. Static NAT rule lookup by inside-local works', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+    const rule = findStaticNatRuleByInsideLocal(r0, '192.168.1.10');
+    assert.ok(rule);
+    assert.strictEqual(rule.insideGlobal, '203.0.113.10');
+});
+
+// 893. Static NAT rule lookup by inside-global works
+runTest('893. Static NAT rule lookup by inside-global works', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+    const rule = findStaticNatRuleByInsideGlobal(r0, '203.0.113.10');
+    assert.ok(rule);
+    assert.strictEqual(rule.insideLocal, '192.168.1.10');
+});
+
+// 894. Static NAT translation inside->global works
+runTest('894. Static NAT translation inside->global works', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+    const globalIp = translateStaticNatInsideToGlobal(r0, '192.168.1.10');
+    assert.strictEqual(globalIp, '203.0.113.10');
+});
+
+// 895. Static NAT translation global->inside works
+runTest('895. Static NAT translation global->inside works', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+    const localIp = translateStaticNatGlobalToInside(r0, '203.0.113.10');
+    assert.strictEqual(localIp, '192.168.1.10');
+});
+
+// 896. Unknown inside-local address is not translated
+runTest('896. Unknown inside-local address is not translated', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+    const ip = translateStaticNatInsideToGlobal(r0, '192.168.1.99');
+    assert.strictEqual(ip, '192.168.1.99');
+});
+
+// 897. Unknown inside-global address is not translated
+runTest('897. Unknown inside-global address is not translated', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+    const ip = translateStaticNatGlobalToInside(r0, '203.0.113.99');
+    assert.strictEqual(ip, '203.0.113.99');
+});
+
+// 898. Duplicate identical static rule is rejected/idempotent
+runTest('898. Duplicate identical static rule is rejected/idempotent', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+    const res2 = addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+    assert.strictEqual(res2.success, true);
+    assert.strictEqual(getStaticNatRules(r0).length, 1);
+});
+
+// 899. Conflicting inside-local mapping is rejected
+runTest('899. Conflicting inside-local mapping is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+    const res = addStaticNatRule(r0, '192.168.1.10', '203.0.113.20');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('already mapped'));
+});
+
+// 900. Conflicting inside-global mapping is rejected
+runTest('900. Conflicting inside-global mapping is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+    const res = addStaticNatRule(r0, '192.168.1.20', '203.0.113.10');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('already mapped'));
+});
+
+// 901. Invalid inside-local IPv4 is rejected
+runTest('901. Invalid inside-local IPv4 is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = addStaticNatRule(r0, '999.1.1.1', '203.0.113.10');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('Invalid inside local'));
+});
+
+// 902. Invalid inside-global IPv4 is rejected
+runTest('902. Invalid inside-global IPv4 is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = addStaticNatRule(r0, '192.168.1.10', 'abc.def');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('Invalid inside global'));
+});
+
+// 903. Static NAT rule can be removed
+runTest('903. Static NAT rule can be removed', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+    assert.strictEqual(getStaticNatRules(r0).length, 1);
+    const res = removeStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getStaticNatRules(r0).length, 0);
+});
+
+// 904. Removing nonexistent rule is safe
+runTest('904. Removing nonexistent rule is safe', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = removeStaticNatRule(r0, '10.10.10.10', '20.20.20.20');
+    assert.strictEqual(res.success, true);
+});
+
+// 905. ip nat inside source static creates mapping
+runTest('905. ip nat inside source static creates mapping', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip nat inside source static 192.168.1.10 203.0.113.10');
+    assert.strictEqual(res.success, true);
+    const rules = getStaticNatRules(r0);
+    assert.strictEqual(rules.length, 1);
+    assert.strictEqual(rules[0].insideLocal, '192.168.1.10');
+    assert.strictEqual(rules[0].insideGlobal, '203.0.113.10');
+});
+
+// 906. no ip nat inside source static removes mapping
+runTest('906. no ip nat inside source static removes mapping', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip nat inside source static 192.168.1.10 203.0.113.10');
+    assert.strictEqual(getStaticNatRules(r0).length, 1);
+    const res = executeCliCommand(r0, 'no ip nat inside source static 192.168.1.10 203.0.113.10');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getStaticNatRules(r0).length, 0);
+});
+
+// 907. Incomplete static NAT command is rejected
+runTest('907. Incomplete static NAT command is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res1 = executeCliCommand(r0, 'ip nat inside source static 192.168.1.10');
+    assert.strictEqual(res1.success, false);
+    assert.ok(res1.output.includes('Incomplete command'));
+
+    const res2 = executeCliCommand(r0, 'ip nat inside source');
+    assert.strictEqual(res2.success, false);
+    assert.ok(res2.output.includes('Incomplete command'));
+});
+
+// 908. Invalid IPv4 in static NAT command is rejected
+runTest('908. Invalid IPv4 in static NAT command is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip nat inside source static 999.1.1.1 203.0.113.10');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Invalid IPv4'));
+});
+
+// 909. Unsupported dynamic NAT command is rejected
+runTest('909. Unsupported dynamic NAT command is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip nat inside source list 1 pool MYPOOL');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('not supported'));
+});
+
+// 910. Unsupported outside NAT command is rejected
+runTest('910. Unsupported outside NAT command is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip nat outside source static 203.0.113.10 192.168.1.10');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('not supported'));
+});
+
+// 911. Extra static NAT arguments are rejected
+runTest('911. Extra static NAT arguments are rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip nat inside source static 192.168.1.10 203.0.113.10 extra');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Too many parameters'));
+});
+
+// 912. Static NAT command in interface mode is rejected
+runTest('912. Static NAT command in interface mode is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/0');
+    const res = executeCliCommand(r0, 'ip nat inside source static 192.168.1.10 203.0.113.10');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('must be executed in global configuration mode'));
+});
+
+// 913. Existing ip nat inside interface command still works
+runTest('913. Existing ip nat inside interface command still works', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/0');
+    const res = executeCliCommand(r0, 'ip nat inside');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/0'), true);
+});
+
+// 914. Existing ip nat outside interface command still works
+runTest('914. Existing ip nat outside interface command still works', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/1');
+    const res = executeCliCommand(r0, 'ip nat outside');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/1'), true);
+});
+
+// 915. Inside->outside static NAT rewrites source IP
+runTest('915. Inside->outside static NAT rewrites source IP', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.sourceIp, '203.0.113.10');
+});
+
+// 916. Inside->outside static NAT preserves destination IP
+runTest('916. Inside->outside static NAT preserves destination IP', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.destinationIp, '203.0.113.100');
+});
+
+// 917. Outside->inside static NAT rewrites destination IP
+runTest('917. Outside->inside static NAT rewrites destination IP', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+
+    const targetMatch = findDeviceByIp('203.0.113.10');
+    assert.ok(targetMatch);
+    const sendRes = simulateSendFrame(pc1, targetMatch.device);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.destinationIp, '192.168.1.10');
+});
+
+// 918. Outside->inside static NAT preserves source IP
+runTest('918. Outside->inside static NAT preserves source IP', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+
+    const targetMatch = findDeviceByIp('203.0.113.10');
+    const sendRes = simulateSendFrame(pc1, targetMatch.device);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.sourceIp, '203.0.113.100');
+});
+
+// 919. Packet without matching static rule is unchanged
+runTest('919. Packet without matching static rule is unchanged', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.50';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10'); // Different host mapped
+
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.sourceIp, '192.168.1.50');
+});
+
+// 920. Packet on non-NAT interface is not translated
+runTest('920. Packet on non-NAT interface is not translated', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+    // Notice: no NAT inside/outside roles assigned to interfaces
+
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.sourceIp, '192.168.1.10');
+});
+
+// 921. Inside->inside traffic is not translated
+runTest('921. Inside->inside traffic is not translated', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'inside'); // Both inside
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.sourceIp, '192.168.1.10');
+});
+
+// 922. Outside->outside traffic is not translated
+runTest('922. Outside->outside traffic is not translated', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '203.0.113.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '198.51.100.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '198.51.100.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '198.51.100.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'outside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside'); // Both outside
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.sourceIp, '203.0.113.10');
+});
+
+// 923. NAT translation does not modify TTL semantics
+runTest('923. NAT translation does not modify TTL semantics', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.ttl, 63); // decremented by 1 router hop
+});
+
+// 924. NAT translation does not alter ICMP semantics
+runTest('924. NAT translation does not alter ICMP semantics', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+
+    const res = executeCliPing(pc0, '203.0.113.100');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Packets: Sent = 4, Received = 4, Lost = 0 (0% loss)'));
+});
+
+// 925. Existing routing behavior remains valid
+runTest('925. Existing routing behavior remains valid', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '20.0.0.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    addStaticNatRule(r0, '10.0.0.10', '20.0.0.10');
+
+    const routes = getRouterRoutingTable(r0.id);
+    assert.strictEqual(routes.length, 2);
+    assert.strictEqual(routes[0].type, 'connected');
+});
+
+// 926. Existing ARP behavior remains valid
+runTest('926. Existing ARP behavior remains valid', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    const [pc0, r0] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    const arpRes = simulateArpResolution(pc0, '192.168.1.1', [pc0.id, r0.id]);
+    assert.strictEqual(arpRes.success, true);
+    assert.strictEqual(arpRes.targetMac, r0.interfaces['Gig0/0'].mac);
+});
+
+// 927. Static NAT does not alter routing precedence
+runTest('927. Static NAT does not alter routing precedence', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip route 192.168.0.0 255.255.0.0 10.0.0.2');
+    executeCliCommand(r0, 'ip route 192.168.1.0 255.255.255.0 10.0.0.3');
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    addStaticNatRule(r0, '10.0.0.50', '200.0.0.50');
+
+    const lookupRes = lookupRoute(r0.id, '192.168.1.100');
+    assert.strictEqual(lookupRes.success, true);
+    assert.strictEqual(lookupRes.route.nextHop, '10.0.0.3'); // LPM /24 beats /16
+});
+
+// 928. Static NAT does not alter OSPF behavior
+runTest('928. Static NAT does not alter OSPF behavior', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    addConnection(r0.id, r1.id);
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/0'].ip = '10.0.0.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.255 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.0.0 0.0.0.255 area 0');
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+
+    simulateOspfHello(r0.id, r1.id);
+    assert.strictEqual(r0.ospf.enabled, true);
+    assert.ok(r0.ospf.lsdb.routerLsas['10.0.0.2']);
+});
+
+// 929. Static NAT does not alter DHCP behavior
+runTest('929. Static NAT does not alter DHCP behavior', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip dhcp pool TEST_POOL');
+    executeCliCommand(r0, 'network 192.168.1.0 255.255.255.0');
+    executeCliCommand(r0, 'default-router 192.168.1.1');
+
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+    assert.ok(r0.dhcpServer.pools['TEST_POOL']);
+    assert.strictEqual(r0.dhcpServer.pools['TEST_POOL'].network, '192.168.1.0');
+});
+
+// 930. Static NAT does not alter ACL evaluation
+runTest('930. Static NAT does not alter ACL evaluation', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255', sequence: 10 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '10');
+
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+    const aclRes = evaluateRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', { sourceIp: '192.168.1.10', destinationIp: '8.8.8.8' });
+    assert.strictEqual(aclRes.matched, true);
+    assert.strictEqual(aclRes.action, 'permit');
+});
+
+// 931. Multiple static mappings work independently on the same router
+runTest('931. Multiple static mappings work independently on the same router', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+    addStaticNatRule(r0, '192.168.1.20', '203.0.113.20');
+    addStaticNatRule(r0, '192.168.1.30', '203.0.113.30');
+
+    assert.strictEqual(getStaticNatRules(r0).length, 3);
+    assert.strictEqual(translateStaticNatInsideToGlobal(r0, '192.168.1.20'), '203.0.113.20');
+    assert.strictEqual(translateStaticNatGlobalToInside(r0, '203.0.113.30'), '192.168.1.30');
+});
+
+// 932. Bidirectional ping between inside host and outside host succeeds with Static NAT
+runTest('932. Bidirectional ping between inside host and outside host succeeds with Static NAT', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+
+    const pingRes = executeCliPing(pc0, '203.0.113.100');
+    assert.strictEqual(pingRes.success, true);
+    assert.ok(pingRes.output.includes('0% loss'));
+});
+
+// 933. Bidirectional ping initiated from outside host to insideGlobal succeeds with Static NAT
+runTest('933. Bidirectional ping initiated from outside host to insideGlobal succeeds with Static NAT', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+
+    const pingRes = executeCliPing(pc1, '203.0.113.10');
+    assert.strictEqual(pingRes.success, true);
+    assert.ok(pingRes.output.includes('0% loss'));
+});
+
+// 934. Removing Static NAT rule stops translation and restores untranslated forwarding
+runTest('934. Removing Static NAT rule stops translation and restores untranslated forwarding', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+
+    removeStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.sourceIp, '192.168.1.10'); // untranslated
+});
+
+// 935. Full regression suite check (Phase 2 baseline)
+runTest('935. Full regression suite check (Phase 2 baseline)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/0');
+    executeCliCommand(r0, 'ip nat inside');
+    executeCliCommand(r0, 'int Gig0/1');
+    executeCliCommand(r0, 'ip nat outside');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'ip nat inside source static 192.168.10.5 198.51.100.5');
+
+    const rules = getStaticNatRules(r0);
+    assert.strictEqual(rules.length, 1);
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/0'), true);
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/1'), true);
+});
+
+// 936. Total test count verification check (Phase 2 baseline)
+runTest('936. Total test count verification check (Phase 2 baseline)', () => {
+    assert.ok(testsPassed >= 935);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
