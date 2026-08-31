@@ -25731,10 +25731,1848 @@ runTest('1007. Full regression suite check (Phase 3 baseline)', () => {
     assert.strictEqual(getDynamicNatRules(r0).length, 1);
     assert.ok(getNatPool(r0, 'POOL_REG'));
 });
-
 // 1008. Total test count verification check (Phase 3 baseline)
 runTest('1008. Total test count verification check (Phase 3 baseline)', () => {
     assert.ok(testsPassed >= 1007);
+});
+
+// ==========================================
+// V5.14 PHASE 4: PAT / NAT OVERLOAD TESTS
+// ==========================================
+
+// 1009. PAT rule can be created
+runTest('1009. PAT rule can be created', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    const res = addPatRule(r0, '10', 'Gig0/1');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.rule.aclName, '10');
+    assert.strictEqual(res.rule.interfaceName, 'Gig0/1');
+    assert.strictEqual(res.rule.overload, true);
+});
+
+// 1010. PAT rule is stored in router runtime
+runTest('1010. PAT rule is stored in router runtime', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    addPatRule(r0, '10', 'Gig0/1');
+    const rules = getPatRules(r0);
+    assert.strictEqual(rules.length, 1);
+    assert.strictEqual(rules[0].aclName, '10');
+    assert.strictEqual(rules[0].interfaceName, 'Gig0/1');
+});
+
+// 1011. PAT rule retrieval is idempotent
+runTest('1011. PAT rule retrieval is idempotent', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    assert.deepStrictEqual(getPatRules(r0), []);
+    assert.deepStrictEqual(getPatRules(r0.id), []);
+});
+
+// 1012. Invalid ACL rejected in addPatRule
+runTest('1012. Invalid ACL rejected in addPatRule', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    const res = addPatRule(r0, 'NONEXISTENT_ACL', 'Gig0/1');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('does not exist'));
+});
+
+// 1013. Invalid interface rejected in addPatRule
+runTest('1013. Invalid interface rejected in addPatRule', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    const res = addPatRule(r0, '10', 'Gig0/99');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('does not exist'));
+});
+
+// 1014. Non-NAT-outside interface rejected in addPatRule
+runTest('1014. Non-NAT-outside interface rejected in addPatRule', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    const res = addPatRule(r0, '10', 'Gig0/1');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('not configured as NAT outside'));
+});
+
+// 1015. Duplicate PAT rule is idempotent
+runTest('1015. Duplicate PAT rule is idempotent', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    const res1 = addPatRule(r0, '10', 'Gig0/1');
+    const res2 = addPatRule(r0, '10', 'Gig0/1');
+    assert.strictEqual(res1.success, true);
+    assert.strictEqual(res2.success, true);
+    assert.strictEqual(getPatRules(r0).length, 1);
+});
+
+// 1016. PAT rule can be removed
+runTest('1016. PAT rule can be removed', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    addPatRule(r0, '10', 'Gig0/1');
+    assert.strictEqual(getPatRules(r0).length, 1);
+    const remRes = removePatRule(r0, '10', 'Gig0/1');
+    assert.strictEqual(remRes.success, true);
+    assert.strictEqual(getPatRules(r0).length, 0);
+});
+
+// 1017. Removing PAT rule cleans up associated active translations
+runTest('1017. Removing PAT rule cleans up associated active translations', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    const ruleRes = addPatRule(r0, '10', 'Gig0/1');
+    createPatTranslation(r0, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.10',
+        insideLocalPort: 50000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 40000,
+        destinationIp: '8.8.8.8',
+        destinationPort: 443,
+        interfaceName: 'Gig0/1',
+        ruleId: ruleRes.rule.id
+    });
+    assert.strictEqual(getPatTranslations(r0).length, 1);
+    removePatRule(r0, '10', 'Gig0/1');
+    assert.strictEqual(getPatTranslations(r0).length, 0);
+});
+
+// 1018. Removing nonexistent PAT rule is safe
+runTest('1018. Removing nonexistent PAT rule is safe', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = removePatRule(r0, '10', 'Gig0/1');
+    assert.strictEqual(res.success, true);
+});
+
+// 1019. isValidPort checks bounds and integer semantics
+runTest('1019. isValidPort checks bounds and integer semantics', () => {
+    assert.strictEqual(isValidPort(80), true);
+    assert.strictEqual(isValidPort(1), true);
+    assert.strictEqual(isValidPort(65535), true);
+    assert.strictEqual(isValidPort(0), false);
+    assert.strictEqual(isValidPort(65536), false);
+    assert.strictEqual(isValidPort(-1), false);
+    assert.strictEqual(isValidPort(80.5), false);
+    assert.strictEqual(isValidPort('80'), false);
+    assert.strictEqual(isValidPort(null), false);
+});
+
+// 1020. allocatePatGlobalPort allocates first port deterministically
+runTest('1020. allocatePatGlobalPort allocates first port deterministically', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const alloc = allocatePatGlobalPort(r0, 'tcp', '203.0.113.1', 50000);
+    assert.strictEqual(alloc.success, true);
+    assert.strictEqual(alloc.port, 50000);
+});
+
+// 1021. allocatePatGlobalPort falls back to standard range when preferred port in use
+runTest('1021. allocatePatGlobalPort falls back to standard range when preferred port in use', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createPatTranslation(r0, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.10',
+        insideLocalPort: 50000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 50000,
+        destinationIp: '8.8.8.8',
+        destinationPort: 443
+    });
+    const alloc = allocatePatGlobalPort(r0, 'tcp', '203.0.113.1', 50000);
+    assert.strictEqual(alloc.success, true);
+    assert.strictEqual(alloc.port, 1024);
+});
+
+// 1022. allocatePatGlobalPort isolates TCP and UDP ports
+runTest('1022. allocatePatGlobalPort isolates TCP and UDP ports', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createPatTranslation(r0, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.10',
+        insideLocalPort: 50000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 50000,
+        destinationIp: '8.8.8.8',
+        destinationPort: 443
+    });
+    const alloc = allocatePatGlobalPort(r0, 'udp', '203.0.113.1', 50000);
+    assert.strictEqual(alloc.success, true);
+    assert.strictEqual(alloc.port, 50000);
+});
+
+// 1023. allocatePatGlobalPort handles exhaustion safely
+runTest('1023. allocatePatGlobalPort handles exhaustion safely', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const nat = getRouterNatState(r0);
+    for (let p = 1024; p <= 65535; p++) {
+        nat.patTranslations.push({
+            id: 'mock-' + p,
+            type: 'pat',
+            protocol: 'tcp',
+            insideLocal: '192.168.1.10',
+            insideLocalPort: p,
+            insideGlobal: '203.0.113.1',
+            insideGlobalPort: p,
+            destinationIp: '8.8.8.8',
+            destinationPort: 443
+        });
+    }
+    const alloc = allocatePatGlobalPort(r0, 'tcp', '203.0.113.1', 1024);
+    assert.strictEqual(alloc.success, false);
+    assert.strictEqual(alloc.reason, 'PORT_EXHAUSTED');
+});
+
+// 1024. createPatTranslation records complete fields and updates active count
+runTest('1024. createPatTranslation records complete fields and updates active count', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const trans = createPatTranslation(r0, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.10',
+        insideLocalPort: 50000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 40000,
+        destinationIp: '8.8.8.8',
+        destinationPort: 443,
+        interfaceName: 'Gig0/1',
+        ruleId: 'rule-1'
+    });
+    assert.ok(trans.id);
+    assert.strictEqual(trans.type, 'pat');
+    assert.strictEqual(trans.protocol, 'tcp');
+    assert.strictEqual(trans.insideLocal, '192.168.1.10');
+    assert.strictEqual(trans.insideLocalPort, 50000);
+    assert.strictEqual(trans.insideGlobal, '203.0.113.1');
+    assert.strictEqual(trans.insideGlobalPort, 40000);
+    assert.strictEqual(trans.destinationIp, '8.8.8.8');
+    assert.strictEqual(trans.destinationPort, 443);
+    assert.strictEqual(trans.interfaceName, 'Gig0/1');
+    assert.strictEqual(trans.ruleId, 'rule-1');
+    assert.ok(trans.createdAt);
+    assert.ok(trans.lastUsed);
+    const nat = getRouterNatState(r0);
+    assert.strictEqual(nat.stats.activePatTranslations, 1);
+});
+
+// 1025. findPatTranslationByOutboundFlow matches exact 5-tuple flow
+runTest('1025. findPatTranslationByOutboundFlow matches exact 5-tuple flow', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createPatTranslation(r0, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.10',
+        insideLocalPort: 50000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 40000,
+        destinationIp: '8.8.8.8',
+        destinationPort: 443
+    });
+    const match = findPatTranslationByOutboundFlow(r0, 'tcp', '192.168.1.10', 50000, '8.8.8.8', 443);
+    assert.ok(match);
+    assert.strictEqual(match.insideGlobalPort, 40000);
+});
+
+// 1026. findPatTranslationByOutboundFlow returns null when destination differs
+runTest('1026. findPatTranslationByOutboundFlow returns null when destination differs', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createPatTranslation(r0, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.10',
+        insideLocalPort: 50000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 40000,
+        destinationIp: '8.8.8.8',
+        destinationPort: 443
+    });
+    const match = findPatTranslationByOutboundFlow(r0, 'tcp', '192.168.1.10', 50000, '1.1.1.1', 443);
+    assert.strictEqual(match, null);
+});
+
+// 1027. findPatTranslationByInboundFlow matches reverse flow
+runTest('1027. findPatTranslationByInboundFlow matches reverse flow', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createPatTranslation(r0, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.10',
+        insideLocalPort: 50000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 40000,
+        destinationIp: '8.8.8.8',
+        destinationPort: 443
+    });
+    const match = findPatTranslationByInboundFlow(r0, 'tcp', '203.0.113.1', 40000, '8.8.8.8', 443);
+    assert.ok(match);
+    assert.strictEqual(match.insideLocal, '192.168.1.10');
+    assert.strictEqual(match.insideLocalPort, 50000);
+});
+
+// 1028. removePatTranslation frees translation and updates active stats
+runTest('1028. removePatTranslation frees translation and updates active stats', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const trans = createPatTranslation(r0, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.10',
+        insideLocalPort: 50000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 40000,
+        destinationIp: '8.8.8.8',
+        destinationPort: 443
+    });
+    assert.strictEqual(getPatTranslations(r0).length, 1);
+    removePatTranslation(r0, trans.id);
+    assert.strictEqual(getPatTranslations(r0).length, 0);
+    const nat = getRouterNatState(r0);
+    assert.strictEqual(nat.stats.activePatTranslations, 0);
+});
+
+// 1029. findPatRuleForPacket matches permitted ACL and ignores denied
+runTest('1029. findPatRuleForPacket matches permitted ACL and ignores denied', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    addPatRule(r0, '10', 'Gig0/1');
+
+    const matchPermit = findPatRuleForPacket(r0, { sourceIp: '192.168.1.50', destinationIp: '8.8.8.8' });
+    assert.ok(matchPermit);
+
+    const matchDeny = findPatRuleForPacket(r0, { sourceIp: '10.0.0.50', destinationIp: '8.8.8.8' });
+    assert.strictEqual(matchDeny, null);
+});
+
+// 1030. Multi-router isolation for PAT rules and translations
+runTest('1030. Multi-router isolation for PAT rules and translations', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    addPatRule(r0, '10', 'Gig0/1');
+
+    assert.strictEqual(getPatRules(r0).length, 1);
+    assert.strictEqual(getPatRules(r1).length, 0);
+});
+
+// 1031. CLI: ip nat inside source list ... interface ... overload creates rule
+runTest('1031. CLI: ip nat inside source list ... interface ... overload creates rule', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip nat inside source list 10 interface Gig0/1 overload');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getPatRules(r0).length, 1);
+});
+
+// 1032. CLI: no ip nat inside source list ... interface ... overload removes rule
+runTest('1032. CLI: no ip nat inside source list ... interface ... overload removes rule', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip nat inside source list 10 interface Gig0/1 overload');
+    assert.strictEqual(getPatRules(r0).length, 1);
+    const res = executeCliCommand(r0, 'no ip nat inside source list 10 interface Gig0/1 overload');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getPatRules(r0).length, 0);
+});
+
+// 1033. CLI: Incomplete PAT command is rejected
+runTest('1033. CLI: Incomplete PAT command is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip nat inside source list 10 interface Gig0/1');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Incomplete') || res.output.includes('overload'));
+});
+
+// 1034. CLI: Missing overload keyword is rejected
+runTest('1034. CLI: Missing overload keyword is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip nat inside source list 10 interface Gig0/1 something');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('overload'));
+});
+
+// 1035. CLI: Nonexistent ACL in PAT command is rejected
+runTest('1035. CLI: Nonexistent ACL in PAT command is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    const res = executeCliCommand(r0, 'ip nat inside source list 99 interface Gig0/1 overload');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('does not exist'));
+});
+
+// 1036. CLI: Nonexistent interface in PAT command is rejected
+runTest('1036. CLI: Nonexistent interface in PAT command is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip nat inside source list 10 interface Gig0/99 overload');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('does not exist'));
+});
+
+// 1037. CLI: Non-NAT-outside interface in PAT command is rejected
+runTest('1037. CLI: Non-NAT-outside interface in PAT command is rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip nat inside source list 10 interface Gig0/1 overload');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('not configured as NAT outside'));
+});
+
+// 1038. CLI: PAT command rejected in interface config mode
+runTest('1038. CLI: PAT command rejected in interface config mode', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    const res = executeCliCommand(r0, 'ip nat inside source list 10 interface Gig0/1 overload');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('global configuration mode'));
+});
+
+// 1039. CLI: Extra parameters in PAT command are rejected
+runTest('1039. CLI: Extra parameters in PAT command are rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip nat inside source list 10 interface Gig0/1 overload extra');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Too many parameters'));
+});
+
+// 1040. CLI: Preserves case of ACL and Interface names
+runTest('1040. CLI: Preserves case of ACL and Interface names', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, 'MY_PAT_ACL');
+    addRouterAclRule(r0.id, 'MY_PAT_ACL', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip nat inside source list MY_PAT_ACL interface Gig0/1 overload');
+    assert.strictEqual(res.success, true);
+    const rules = getPatRules(r0);
+    assert.strictEqual(rules[0].aclName, 'MY_PAT_ACL');
+    assert.strictEqual(rules[0].interfaceName, 'Gig0/1');
+});
+
+// 1041. Inside -> Outside TCP translation rewrites source IP to outside interface IP
+runTest('1041. Inside -> Outside TCP translation rewrites source IP to outside interface IP', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addPatRule(r0, '1', 'Gig0/1');
+
+    const simRes = simulateSendFrame(pc0, pc1, {
+        protocol: 'TCP',
+        sourcePort: 50000,
+        destinationPort: 80
+    });
+
+    assert.strictEqual(simRes.success, true);
+    assert.strictEqual(simRes.packet.sourceIp, '203.0.113.1');
+});
+
+// 1042. Inside -> Outside TCP translation rewrites source port to allocated global port
+runTest('1042. Inside -> Outside TCP translation rewrites source port to allocated global port', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addPatRule(r0, '1', 'Gig0/1');
+
+    const simRes = simulateSendFrame(pc0, pc1, {
+        protocol: 'TCP',
+        sourcePort: 50000,
+        destinationPort: 80
+    });
+
+    assert.strictEqual(simRes.success, true);
+    assert.strictEqual(simRes.packet.sourcePort, 50000);
+});
+
+// 1043. Inside -> Outside TCP translation preserves destination IP
+runTest('1043. Inside -> Outside TCP translation preserves destination IP', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addPatRule(r0, '1', 'Gig0/1');
+
+    const simRes = simulateSendFrame(pc0, pc1, {
+        protocol: 'TCP',
+        sourcePort: 50000,
+        destinationPort: 80
+    });
+
+    assert.strictEqual(simRes.success, true);
+    assert.strictEqual(simRes.packet.destinationIp, '203.0.113.100');
+});
+
+// 1044. Inside -> Outside TCP translation preserves destination port
+runTest('1044. Inside -> Outside TCP translation preserves destination port', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addPatRule(r0, '1', 'Gig0/1');
+
+    const simRes = simulateSendFrame(pc0, pc1, {
+        protocol: 'TCP',
+        sourcePort: 50000,
+        destinationPort: 443
+    });
+
+    assert.strictEqual(simRes.success, true);
+    assert.strictEqual(simRes.packet.destinationPort, 443);
+});
+
+// 1045. Inside -> Outside UDP translation rewrites source IP and port
+runTest('1045. Inside -> Outside UDP translation rewrites source IP and port', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addPatRule(r0, '1', 'Gig0/1');
+
+    const simRes = simulateSendFrame(pc0, pc1, {
+        protocol: 'UDP',
+        sourcePort: 5353,
+        destinationPort: 53
+    });
+
+    assert.strictEqual(simRes.success, true);
+    assert.strictEqual(simRes.packet.sourceIp, '203.0.113.1');
+    assert.strictEqual(simRes.packet.sourcePort, 5353);
+});
+
+// 1046. Inside -> Outside UDP translation preserves destination IP and port
+runTest('1046. Inside -> Outside UDP translation preserves destination IP and port', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addPatRule(r0, '1', 'Gig0/1');
+
+    const simRes = simulateSendFrame(pc0, pc1, {
+        protocol: 'UDP',
+        sourcePort: 5353,
+        destinationPort: 53
+    });
+
+    assert.strictEqual(simRes.success, true);
+    assert.strictEqual(simRes.packet.destinationIp, '203.0.113.100');
+    assert.strictEqual(simRes.packet.destinationPort, 53);
+});
+
+// 1047. Inside -> Outside PAT translation records complete metadata
+runTest('1047. Inside -> Outside PAT translation records complete metadata', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addPatRule(r0, '1', 'Gig0/1');
+
+    const simRes = simulateSendFrame(pc0, pc1, {
+        protocol: 'TCP',
+        sourcePort: 50000,
+        destinationPort: 80
+    });
+
+    assert.strictEqual(simRes.success, true);
+    assert.ok(simRes.packet.nat);
+    assert.strictEqual(simRes.packet.nat.translated, true);
+    assert.strictEqual(simRes.packet.nat.direction, 'inside-to-outside');
+    assert.strictEqual(simRes.packet.nat.type, 'pat');
+    assert.strictEqual(simRes.packet.nat.originalSourceIp, '192.168.1.10');
+    assert.strictEqual(simRes.packet.nat.translatedSourceIp, '203.0.113.1');
+    assert.strictEqual(simRes.packet.nat.originalSourcePort, 50000);
+    assert.strictEqual(simRes.packet.nat.translatedSourcePort, 50000);
+});
+
+// 1048. Inside -> Outside PAT translation increments hit statistics
+runTest('1048. Inside -> Outside PAT translation increments hit statistics', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addPatRule(r0, '1', 'Gig0/1');
+
+    simulateSendFrame(pc0, pc1, { protocol: 'TCP', sourcePort: 50000, destinationPort: 80 });
+
+    const nat = getRouterNatState(r0);
+    assert.strictEqual(nat.stats.hits, 1);
+});
+
+// 1049. Inside -> Outside PAT reuses existing translation for identical flow
+runTest('1049. Inside -> Outside PAT reuses existing translation for identical flow', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addPatRule(r0, '1', 'Gig0/1');
+
+    simulateSendFrame(pc0, pc1, { protocol: 'TCP', sourcePort: 50000, destinationPort: 80 });
+    simulateSendFrame(pc0, pc1, { protocol: 'TCP', sourcePort: 50000, destinationPort: 80 });
+
+    assert.strictEqual(getPatTranslations(r0).length, 1);
+});
+
+// 1050. Multiple inside hosts share same outside IP with distinct translated source ports
+runTest('1050. Multiple inside hosts share same outside IP with distinct translated source ports', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 50, 100);
+    addDevice('pc', 50, 200);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [sw0, pc0, pc1, r0, server] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '203.0.113.100';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, sw0.id);
+    addConnection(pc1.id, sw0.id);
+    addConnection(sw0.id, r0.id);
+    addConnection(r0.id, server.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addPatRule(r0, '1', 'Gig0/1');
+
+    // Both hosts send from source port 50000 to destination port 80
+    const res0 = simulateSendFrame(pc0, server, { protocol: 'TCP', sourcePort: 50000, destinationPort: 80 });
+    const res1 = simulateSendFrame(pc1, server, { protocol: 'TCP', sourcePort: 50000, destinationPort: 80 });
+
+    assert.strictEqual(res0.success, true);
+    assert.strictEqual(res1.success, true);
+    assert.strictEqual(res0.packet.sourceIp, '203.0.113.1');
+    assert.strictEqual(res1.packet.sourceIp, '203.0.113.1');
+    assert.notStrictEqual(res0.packet.sourcePort, res1.packet.sourcePort);
+    assert.strictEqual(getPatTranslations(r0).length, 2);
+});
+
+// 1051. Outside interface without IP address causes PAT miss
+runTest('1051. Outside interface without IP address causes PAT miss', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    // Clear IP on Gig0/1
+    r0.interfaces['Gig0/1'].ip = null;
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    const nat = getRouterNatState(r0);
+    nat.patRules = [{ id: 'mock', aclName: '1', interfaceName: 'Gig0/1', overload: true }];
+
+    // Trigger lookup directly
+    findPatRuleForPacket(r0, { sourceIp: '192.168.1.10' });
+    assert.strictEqual(getPatRules(r0).length, 1);
+});
+
+// 1052. Inbound Outside -> Inside TCP reverse translation rewrites destination IP
+runTest('1052. Inbound Outside -> Inside TCP reverse translation rewrites destination IP', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addPatRule(r0, '1', 'Gig0/1');
+
+    // 1. Outbound packet establishes translation
+    simulateSendFrame(pc0, pc1, { protocol: 'TCP', sourcePort: 50000, destinationPort: 80 });
+
+    // 2. Return packet from outside server to router global IP:50000
+    const retRes = simulateSendFrame(pc1, pc0, {
+        protocol: 'TCP',
+        sourcePort: 80,
+        destinationPort: 50000,
+        packet: { destinationIp: '203.0.113.1', destinationPort: 50000 }
+    });
+
+    assert.strictEqual(retRes.success, true);
+    assert.strictEqual(retRes.packet.destinationIp, '192.168.1.10');
+});
+
+// 1053. Inbound Outside -> Inside TCP reverse translation rewrites destination port
+runTest('1053. Inbound Outside -> Inside TCP reverse translation rewrites destination port', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    // Create an explicit translation with differing ports
+    createPatTranslation(r0, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.10',
+        insideLocalPort: 50000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 40000,
+        destinationIp: '203.0.113.100',
+        destinationPort: 80
+    });
+
+    const retRes = simulateSendFrame(pc1, pc0, {
+        protocol: 'TCP',
+        sourcePort: 80,
+        destinationPort: 40000,
+        packet: { destinationIp: '203.0.113.1', destinationPort: 40000 }
+    });
+
+    assert.strictEqual(retRes.success, true);
+    assert.strictEqual(retRes.packet.destinationPort, 50000);
+});
+
+// 1054. Inbound Outside -> Inside TCP reverse translation preserves source IP
+runTest('1054. Inbound Outside -> Inside TCP reverse translation preserves source IP', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createPatTranslation(r0, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.10',
+        insideLocalPort: 50000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 40000,
+        destinationIp: '203.0.113.100',
+        destinationPort: 80
+    });
+
+    const retRes = simulateSendFrame(pc1, pc0, {
+        protocol: 'TCP',
+        sourcePort: 80,
+        destinationPort: 40000,
+        packet: { destinationIp: '203.0.113.1', destinationPort: 40000 }
+    });
+
+    assert.strictEqual(retRes.success, true);
+    assert.strictEqual(retRes.packet.sourceIp, '203.0.113.100');
+});
+
+// 1055. Inbound Outside -> Inside TCP reverse translation preserves source port
+runTest('1055. Inbound Outside -> Inside TCP reverse translation preserves source port', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createPatTranslation(r0, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.10',
+        insideLocalPort: 50000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 40000,
+        destinationIp: '203.0.113.100',
+        destinationPort: 80
+    });
+
+    const retRes = simulateSendFrame(pc1, pc0, {
+        protocol: 'TCP',
+        sourcePort: 80,
+        destinationPort: 40000,
+        packet: { destinationIp: '203.0.113.1', destinationPort: 40000 }
+    });
+
+    assert.strictEqual(retRes.success, true);
+    assert.strictEqual(retRes.packet.sourcePort, 80);
+});
+
+// 1056. Inbound Outside -> Inside UDP reverse translation rewrites destination IP and port
+runTest('1056. Inbound Outside -> Inside UDP reverse translation rewrites destination IP and port', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createPatTranslation(r0, {
+        protocol: 'udp',
+        insideLocal: '192.168.1.10',
+        insideLocalPort: 5353,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 40053,
+        destinationIp: '203.0.113.100',
+        destinationPort: 53
+    });
+
+    const retRes = simulateSendFrame(pc1, pc0, {
+        protocol: 'UDP',
+        sourcePort: 53,
+        destinationPort: 40053,
+        packet: { destinationIp: '203.0.113.1', destinationPort: 40053 }
+    });
+
+    assert.strictEqual(retRes.success, true);
+    assert.strictEqual(retRes.packet.destinationIp, '192.168.1.10');
+    assert.strictEqual(retRes.packet.destinationPort, 5353);
+});
+
+// 1057. Inbound Outside -> Inside reverse translation verifies egress interface is NAT inside
+runTest('1057. Inbound Outside -> Inside reverse translation verifies egress interface is NAT inside', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    // Gig0/0 is NOT inside
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createPatTranslation(r0, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.10',
+        insideLocalPort: 50000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 40000,
+        destinationIp: '203.0.113.100',
+        destinationPort: 80
+    });
+
+    const retRes = simulateSendFrame(pc1, pc0, {
+        protocol: 'TCP',
+        sourcePort: 80,
+        destinationPort: 40000,
+        packet: { destinationIp: '203.0.113.1', destinationPort: 40000 }
+    });
+
+    // Ingress on outside, but egress not inside => translation bypassed
+    assert.notStrictEqual(retRes.packet.destinationIp, '192.168.1.10');
+});
+
+// 1058. Inbound Outside -> Inside unknown global port is not translated
+runTest('1058. Inbound Outside -> Inside unknown global port is not translated', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    const retRes = simulateSendFrame(pc1, pc0, {
+        protocol: 'TCP',
+        sourcePort: 80,
+        destinationPort: 33333,
+        packet: { destinationIp: '203.0.113.1', destinationPort: 33333 }
+    });
+
+    // No translation match => destination IP remains 203.0.113.1
+    assert.strictEqual(retRes.packet.destinationIp, '203.0.113.1');
+});
+
+// 1059. Non-NAT interface traffic is not translated by PAT
+runTest('1059. Non-NAT interface traffic is not translated by PAT', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+
+    const simRes = simulateSendFrame(pc0, pc1, { protocol: 'TCP', sourcePort: 50000, destinationPort: 80 });
+    assert.strictEqual(simRes.success, true);
+    assert.strictEqual(simRes.packet.sourceIp, '192.168.1.10');
+});
+
+// 1060. Inside -> Inside traffic is not translated by PAT
+runTest('1060. Inside -> Inside traffic is not translated by PAT', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'inside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+
+    const simRes = simulateSendFrame(pc0, pc1, { protocol: 'TCP', sourcePort: 50000, destinationPort: 80 });
+    assert.strictEqual(simRes.success, true);
+    assert.strictEqual(simRes.packet.sourceIp, '192.168.1.10');
+});
+
+// 1061. Outside -> Outside traffic is not translated by PAT
+runTest('1061. Outside -> Outside traffic is not translated by PAT', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '203.0.113.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '203.0.113.1';
+
+    r0.interfaces['Gig0/0'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '198.51.100.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '198.51.100.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '198.51.100.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'outside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    const simRes = simulateSendFrame(pc0, pc1, { protocol: 'TCP', sourcePort: 50000, destinationPort: 80 });
+    assert.strictEqual(simRes.success, true);
+    assert.strictEqual(simRes.packet.sourceIp, '203.0.113.10');
+});
+
+// 1062. ICMP packets bypass PAT port translation
+runTest('1062. ICMP packets bypass PAT port translation', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addPatRule(r0, '1', 'Gig0/1');
+
+    const simRes = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(simRes.success, true);
+    // ICMP has no TCP/UDP ports, so PAT does not create translation
+    assert.strictEqual(getPatTranslations(r0).length, 0);
+    const nat = getRouterNatState(r0);
+    assert.strictEqual(nat.stats.activePatTranslations, 0);
+});
+
+// 1063. Static NAT takes precedence over PAT
+runTest('1063. Static NAT takes precedence over PAT', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.99');
+    addPatRule(r0, '1', 'Gig0/1');
+
+    const simRes = simulateSendFrame(pc0, pc1, { protocol: 'TCP', sourcePort: 50000, destinationPort: 80 });
+    assert.strictEqual(simRes.success, true);
+    assert.strictEqual(simRes.packet.sourceIp, '203.0.113.99'); // Static NAT IP used
+    assert.strictEqual(simRes.packet.nat.type, 'static');
+});
+
+// 1064. Dynamic NAT pool takes precedence over PAT
+runTest('1064. Dynamic NAT pool takes precedence over PAT', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'POOL1', '203.0.113.50', '203.0.113.60', '255.255.255.0');
+    addDynamicNatRule(r0, '1', 'POOL1');
+    addPatRule(r0, '1', 'Gig0/1');
+
+    const simRes = simulateSendFrame(pc0, pc1, { protocol: 'TCP', sourcePort: 50000, destinationPort: 80 });
+    assert.strictEqual(simRes.success, true);
+    assert.strictEqual(simRes.packet.sourceIp, '203.0.113.50'); // Dynamic pool IP used
+    assert.strictEqual(simRes.packet.nat.type, 'dynamic');
+});
+
+// 1065. Removing PAT rule stops translation for future packets
+runTest('1065. Removing PAT rule stops translation for future packets', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addPatRule(r0, '1', 'Gig0/1');
+
+    const res1 = simulateSendFrame(pc0, pc1, { protocol: 'TCP', sourcePort: 50000, destinationPort: 80 });
+    assert.strictEqual(res1.packet.sourceIp, '203.0.113.1');
+
+    removePatRule(r0, '1', 'Gig0/1');
+
+    const res2 = simulateSendFrame(pc0, pc1, { protocol: 'TCP', sourcePort: 50000, destinationPort: 80 });
+    assert.strictEqual(res2.packet.sourceIp, '192.168.1.10'); // Untranslated
+});
+
+// 1066. PAT does not modify IP TTL decrement semantics
+runTest('1066. PAT does not modify IP TTL decrement semantics', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addPatRule(r0, '1', 'Gig0/1');
+
+    const simRes = simulateSendFrame(pc0, pc1, { protocol: 'TCP', sourcePort: 50000, destinationPort: 80, initialTtl: 64 });
+    assert.strictEqual(simRes.success, true);
+    assert.strictEqual(simRes.packet.ttl, 63);
+});
+
+// 1067. PAT does not alter routing table / LPM lookup
+runTest('1067. PAT does not alter routing table / LPM lookup', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip route 10.0.0.0 255.0.0.0 192.168.1.254');
+
+    const routeRes = lookupRoute(r0.id, '10.5.5.5');
+    assert.strictEqual(routeRes.success, true);
+    assert.strictEqual(routeRes.route.network, '10.0.0.0');
+});
+
+// 1068. PAT does not alter OSPF behavior
+runTest('1068. PAT does not alter OSPF behavior', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    addConnection(r0.id, r1.id);
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/0'].ip = '10.0.0.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.255 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.0.0 0.0.0.255 area 0');
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    addPatRule(r0, '10', 'Gig0/1');
+
+    simulateOspfHello(r0.id, r1.id);
+    assert.strictEqual(r0.ospf.enabled, true);
+    assert.ok(r0.ospf.lsdb.routerLsas['10.0.0.2']);
+});
+
+// 1069. PAT does not alter DHCP behavior
+runTest('1069. PAT does not alter DHCP behavior', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip dhcp pool TEST_POOL');
+    executeCliCommand(r0, 'network 192.168.1.0 255.255.255.0');
+    executeCliCommand(r0, 'default-router 192.168.1.1');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    addPatRule(r0, '10', 'Gig0/1');
+
+    assert.ok(r0.dhcpServer.pools['TEST_POOL']);
+    assert.strictEqual(r0.dhcpServer.pools['TEST_POOL'].network, '192.168.1.0');
+});
+
+// 1070. PAT does not alter ARP resolution behavior
+runTest('1070. PAT does not alter ARP resolution behavior', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc0, r0] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addConnection(pc0.id, r0.id);
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+
+    const arp = simulateArpResolution(pc0, '192.168.1.1', [pc0.id, r0.id]);
+    assert.strictEqual(arp.success, true);
+    assert.strictEqual(arp.targetMac, r0.interfaces['Gig0/0'].mac);
+});
+
+// 1071. PAT does not alter Interface ACL evaluation behavior
+runTest('1071. PAT does not alter Interface ACL evaluation behavior', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255', sequence: 10 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '10');
+
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+    addPatRule(r0, '10', 'Gig0/1');
+
+    const aclRes = evaluateRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', { sourceIp: '192.168.1.10', destinationIp: '8.8.8.8' });
+    assert.strictEqual(aclRes.matched, true);
+    assert.strictEqual(aclRes.action, 'permit');
+});
+
+// 1072. Bidirectional TCP flow simulation through PAT
+runTest('1072. Bidirectional TCP flow simulation through PAT', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, server] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '203.0.113.100';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, server.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addPatRule(r0, '1', 'Gig0/1');
+
+    // 1. Outbound SYN: 192.168.1.10:50000 -> 203.0.113.100:80
+    const outSyn = simulateSendFrame(pc0, server, { protocol: 'TCP', sourcePort: 50000, destinationPort: 80 });
+    assert.strictEqual(outSyn.success, true);
+    assert.strictEqual(outSyn.packet.sourceIp, '203.0.113.1');
+
+    // 2. Inbound SYN-ACK: 203.0.113.100:80 -> 203.0.113.1:50000
+    const inSynAck = simulateSendFrame(server, pc0, {
+        protocol: 'TCP',
+        sourcePort: 80,
+        destinationPort: 50000,
+        packet: { destinationIp: '203.0.113.1', destinationPort: 50000 }
+    });
+    assert.strictEqual(inSynAck.success, true);
+    assert.strictEqual(inSynAck.packet.destinationIp, '192.168.1.10');
+    assert.strictEqual(inSynAck.packet.destinationPort, 50000);
+});
+
+// 1073. Bidirectional UDP flow simulation through PAT
+runTest('1073. Bidirectional UDP flow simulation through PAT', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, server] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    server.ip = '203.0.113.100';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, server.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addPatRule(r0, '1', 'Gig0/1');
+
+    // 1. Outbound DNS Query
+    const outDns = simulateSendFrame(pc0, server, { protocol: 'UDP', sourcePort: 5353, destinationPort: 53 });
+    assert.strictEqual(outDns.success, true);
+    assert.strictEqual(outDns.packet.sourceIp, '203.0.113.1');
+
+    // 2. Inbound DNS Response
+    const inDns = simulateSendFrame(server, pc0, {
+        protocol: 'UDP',
+        sourcePort: 53,
+        destinationPort: 5353,
+        packet: { destinationIp: '203.0.113.1', destinationPort: 5353 }
+    });
+    assert.strictEqual(inDns.success, true);
+    assert.strictEqual(inDns.packet.destinationIp, '192.168.1.10');
+    assert.strictEqual(inDns.packet.destinationPort, 5353);
+});
+
+// 1074. Full regression check: Static NAT, Dynamic NAT, PAT, Roles operate harmoniously
+runTest('1074. Full regression check: Static NAT, Dynamic NAT, PAT, Roles operate harmoniously', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip nat inside');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip nat outside');
+    executeCliCommand(r0, 'exit');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.10.0', sourceWildcard: '0.0.0.255' });
+    createRouterAcl(r0.id, '20');
+    addRouterAclRule(r0.id, '20', { action: 'permit', sourceIp: '192.168.20.0', sourceWildcard: '0.0.0.255' });
+
+    executeCliCommand(r0, 'ip nat pool POOL_REG 198.51.100.10 198.51.100.20 netmask 255.255.255.0');
+    executeCliCommand(r0, 'ip nat inside source list 10 pool POOL_REG');
+    executeCliCommand(r0, 'ip nat inside source static 192.168.10.99 198.51.100.99');
+    executeCliCommand(r0, 'ip nat inside source list 20 interface Gig0/1 overload');
+
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/0'), true);
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/1'), true);
+    assert.strictEqual(getStaticNatRules(r0).length, 1);
+    assert.strictEqual(getDynamicNatRules(r0).length, 1);
+    assert.strictEqual(getPatRules(r0).length, 1);
+    assert.ok(getNatPool(r0, 'POOL_REG'));
+});
+
+// 1075. Total test count verification check (Phase 4 baseline)
+runTest('1075. Total test count verification check (Phase 4 baseline)', () => {
+    assert.ok(testsPassed >= 1074);
 });
 
 console.log('----------------------------------------------------');

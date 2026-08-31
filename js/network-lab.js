@@ -6691,10 +6691,13 @@ function getRouterRuntime(routerId) {
             pools: {},
             dynamicRules: [],
             translations: [],
+            patRules: [],
+            patTranslations: [],
             stats: {
                 hits: 0,
                 misses: 0,
-                activeTranslations: 0
+                activeTranslations: 0,
+                activePatTranslations: 0
             }
         };
     } else {
@@ -6705,8 +6708,14 @@ function getRouterRuntime(routerId) {
         if (!nat.pools || typeof nat.pools !== 'object') nat.pools = {};
         if (!Array.isArray(nat.dynamicRules)) nat.dynamicRules = [];
         if (!Array.isArray(nat.translations)) nat.translations = [];
+        if (!Array.isArray(nat.patRules)) nat.patRules = [];
+        if (!Array.isArray(nat.patTranslations)) nat.patTranslations = [];
         if (!nat.stats || typeof nat.stats !== 'object') {
-            nat.stats = { hits: 0, misses: 0, activeTranslations: 0 };
+            nat.stats = { hits: 0, misses: 0, activeTranslations: 0, activePatTranslations: 0 };
+        } else {
+            if (typeof nat.stats.activePatTranslations !== 'number') {
+                nat.stats.activePatTranslations = 0;
+            }
         }
     }
     return networkState.routerRuntime[routerId];
@@ -7245,6 +7254,243 @@ function removeDynamicNatTranslation(deviceOrId, insideLocalOrGlobal) {
         }
     }
 
+    return { success: true };
+}
+
+// ==========================================
+// V5.14 PHASE 4: PAT / NAT OVERLOAD HELPERS
+// ==========================================
+
+function isValidPort(port) {
+    return typeof port === 'number' && Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
+function getPatRules(deviceOrId) {
+    const nat = getRouterNatState(deviceOrId);
+    if (!nat || !Array.isArray(nat.patRules)) {
+        return [];
+    }
+    return nat.patRules;
+}
+
+function addPatRule(deviceOrId, aclName, interfaceName) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+    const nat = getRouterNatState(dev.id);
+    if (!nat) {
+        return { success: false, reason: 'Router NAT state not found.' };
+    }
+    const normAcl = String(aclName || '').trim();
+    const normIface = String(interfaceName || '').trim();
+    if (!normAcl || !normIface) {
+        return { success: false, reason: 'ACL name and interface name are required.' };
+    }
+
+    const acl = getRouterAcl(dev.id, normAcl);
+    if (!acl) {
+        return { success: false, reason: `ACL "${normAcl}" does not exist on router ${dev.name}.` };
+    }
+
+    if (!dev.interfaces || !dev.interfaces[normIface]) {
+        return { success: false, reason: `Interface "${normIface}" does not exist on router ${dev.name}.` };
+    }
+
+    if (!isNatOutsideInterface(dev.id, normIface)) {
+        return { success: false, reason: `Interface "${normIface}" is not configured as NAT outside.` };
+    }
+
+    if (!Array.isArray(nat.patRules)) {
+        nat.patRules = [];
+    }
+
+    const existing = nat.patRules.find(r => r.aclName === normAcl && r.interfaceName === normIface);
+    if (existing) {
+        return { success: true, rule: existing, idempotent: true };
+    }
+
+    const rule = {
+        id: 'pat-rule-' + Date.now() + '-' + Math.random().toString(36).substr(2, 5),
+        aclName: normAcl,
+        interfaceName: normIface,
+        overload: true,
+        createdAt: Date.now()
+    };
+    nat.patRules.push(rule);
+    return { success: true, rule };
+}
+
+function removePatRule(deviceOrId, aclName, interfaceName) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+    const nat = getRouterNatState(dev.id);
+    if (!nat || !Array.isArray(nat.patRules)) {
+        return { success: true };
+    }
+    const normAcl = String(aclName || '').trim();
+    const normIface = String(interfaceName || '').trim();
+    if (!normAcl && !normIface) {
+        return { success: false, reason: 'ACL name or interface name required.' };
+    }
+
+    const matchedRules = nat.patRules.filter(r => (!normAcl || r.aclName === normAcl) && (!normIface || r.interfaceName === normIface));
+    const matchedRuleIds = new Set(matchedRules.map(r => r.id));
+
+    nat.patRules = nat.patRules.filter(r => !matchedRuleIds.has(r.id));
+
+    if (Array.isArray(nat.patTranslations)) {
+        nat.patTranslations = nat.patTranslations.filter(t => !matchedRuleIds.has(t.ruleId));
+        if (nat.stats) {
+            nat.stats.activePatTranslations = nat.patTranslations.length;
+        }
+    }
+
+    return { success: true };
+}
+
+function findPatRuleForPacket(deviceOrId, packet) {
+    if (!packet || typeof packet !== 'object') return null;
+    const rules = getPatRules(deviceOrId);
+    if (!rules.length) return null;
+
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return null;
+
+    for (const rule of rules) {
+        const acl = getRouterAcl(dev.id, rule.aclName);
+        if (!acl) continue;
+        const aclRes = evaluatePacketAcl(acl, packet);
+        if (aclRes.action === 'permit') {
+            return rule;
+        }
+    }
+    return null;
+}
+
+function getPatTranslations(deviceOrId) {
+    const nat = getRouterNatState(deviceOrId);
+    if (!nat || !Array.isArray(nat.patTranslations)) {
+        return [];
+    }
+    return nat.patTranslations;
+}
+
+function findPatTranslationByOutboundFlow(deviceOrId, protocol, insideLocal, insideLocalPort, destinationIp, destinationPort) {
+    const translations = getPatTranslations(deviceOrId);
+    const proto = String(protocol || '').toLowerCase();
+    const localPort = Number(insideLocalPort);
+    const destPort = Number(destinationPort);
+    return translations.find(t =>
+        t.protocol === proto &&
+        t.insideLocal === insideLocal &&
+        t.insideLocalPort === localPort &&
+        t.destinationIp === destinationIp &&
+        t.destinationPort === destPort
+    ) || null;
+}
+
+function findPatTranslationByInboundFlow(deviceOrId, protocol, insideGlobal, insideGlobalPort, sourceIp, sourcePort) {
+    const translations = getPatTranslations(deviceOrId);
+    const proto = String(protocol || '').toLowerCase();
+    const globalPort = Number(insideGlobalPort);
+    const srcPort = Number(sourcePort);
+    return translations.find(t =>
+        t.protocol === proto &&
+        t.insideGlobal === insideGlobal &&
+        t.insideGlobalPort === globalPort &&
+        (!sourceIp || t.destinationIp === sourceIp) &&
+        (!sourcePort || t.destinationPort === srcPort)
+    ) || null;
+}
+
+function allocatePatGlobalPort(deviceOrId, protocol, insideGlobal, preferredPort) {
+    const translations = getPatTranslations(deviceOrId);
+    const proto = String(protocol || '').toLowerCase();
+    const usedPorts = new Set(
+        translations
+            .filter(t => t.protocol === proto && t.insideGlobal === insideGlobal)
+            .map(t => t.insideGlobalPort)
+    );
+
+    // If preferredPort is in valid range (>= 1024) and available, allocate it
+    const pref = Number(preferredPort);
+    if (isValidPort(pref) && pref >= 1024 && !usedPorts.has(pref)) {
+        return { success: true, port: pref };
+    }
+
+    // Allocate first available port in standard ephemeral range 1024 - 65535
+    for (let port = 1024; port <= 65535; port++) {
+        if (!usedPorts.has(port)) {
+            return { success: true, port };
+        }
+    }
+
+    return { success: false, reason: 'PORT_EXHAUSTED' };
+}
+
+function createPatTranslation(deviceOrId, transData) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return null;
+    }
+    const nat = getRouterNatState(dev.id);
+    if (!nat) {
+        return null;
+    }
+    if (!Array.isArray(nat.patTranslations)) {
+        nat.patTranslations = [];
+    }
+
+    const proto = String(transData.protocol || 'tcp').toLowerCase();
+    const translation = {
+        id: 'pat-trans-' + Date.now() + '-' + Math.random().toString(36).substr(2, 5),
+        type: 'pat',
+        protocol: proto,
+        insideLocal: transData.insideLocal,
+        insideLocalPort: Number(transData.insideLocalPort),
+        insideGlobal: transData.insideGlobal,
+        insideGlobalPort: Number(transData.insideGlobalPort),
+        destinationIp: transData.destinationIp,
+        destinationPort: Number(transData.destinationPort),
+        interfaceName: transData.interfaceName || null,
+        ruleId: transData.ruleId || null,
+        createdAt: Date.now(),
+        lastUsed: Date.now()
+    };
+
+    nat.patTranslations.push(translation);
+    if (nat.stats) {
+        nat.stats.activePatTranslations = nat.patTranslations.length;
+    }
+    return translation;
+}
+
+function removePatTranslation(deviceOrId, idOrFlow) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+    const nat = getRouterNatState(dev.id);
+    if (!nat || !Array.isArray(nat.patTranslations)) {
+        return { success: true };
+    }
+
+    if (typeof idOrFlow === 'string') {
+        nat.patTranslations = nat.patTranslations.filter(t => t.id !== idOrFlow && t.insideLocal !== idOrFlow);
+    } else if (typeof idOrFlow === 'object' && idOrFlow) {
+        nat.patTranslations = nat.patTranslations.filter(t =>
+            !(t.protocol === idOrFlow.protocol &&
+              t.insideLocal === idOrFlow.insideLocal &&
+              t.insideLocalPort === idOrFlow.insideLocalPort)
+        );
+    }
+
+    if (nat.stats) {
+        nat.stats.activePatTranslations = nat.patTranslations.length;
+    }
     return { success: true };
 }
 
@@ -9352,7 +9598,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                 }
             }
 
-            // Inbound NAT (Outside -> Inside): Static NAT first, then Dynamic NAT reverse lookup
+            // Inbound NAT (Outside -> Inside): Static NAT first, then Dynamic NAT, then PAT reverse lookup
             let originalDestinationIp = frame.packet.destinationIp;
             if (activeIngressIfaceName && isNatOutsideInterface(toDevice.id, activeIngressIfaceName)) {
                 const staticRule = findStaticNatRuleByInsideGlobal(toDevice.id, frame.packet.destinationIp);
@@ -9396,6 +9642,42 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                                 const natState = getRouterNatState(toDevice.id);
                                 if (natState?.stats) {
                                     natState.stats.hits = (natState.stats.hits || 0) + 1;
+                                }
+                            }
+                        }
+                    } else {
+                        // PAT Reverse Lookup
+                        const proto = String(frame.packet?.protocol || '').toLowerCase();
+                        const dstPort = frame.packet?.destinationPort ?? frame.packet?.dstPort;
+                        const srcPort = frame.packet?.sourcePort ?? frame.packet?.srcPort;
+                        if ((proto === 'tcp' || proto === 'udp') && isValidPort(dstPort)) {
+                            const patTrans = findPatTranslationByInboundFlow(toDevice.id, proto, frame.packet.destinationIp, dstPort, frame.packet.sourceIp, srcPort);
+                            if (patTrans) {
+                                const specRouteResult = lookupRoute(toDevice.id, patTrans.insideLocal);
+                                if (specRouteResult.success && specRouteResult.route) {
+                                    const specNextHop = resolveRouteNextHop(toDevice.id, specRouteResult.route, patTrans.insideLocal);
+                                    if (specNextHop.success && specNextHop.egressInterface && isNatInsideInterface(toDevice.id, specNextHop.egressInterface)) {
+                                        const originalDestinationPort = dstPort;
+                                        frame.packet.destinationIp = patTrans.insideLocal;
+                                        frame.packet.destinationPort = patTrans.insideLocalPort;
+                                        if ('dstPort' in frame.packet) frame.packet.dstPort = patTrans.insideLocalPort;
+                                        patTrans.lastUsed = Date.now();
+                                        frame.packet.nat = {
+                                            translated: true,
+                                            direction: 'outside-to-inside',
+                                            type: 'pat',
+                                            protocol: proto,
+                                            originalDestinationIp,
+                                            translatedDestinationIp: patTrans.insideLocal,
+                                            originalDestinationPort,
+                                            translatedDestinationPort: patTrans.insideLocalPort
+                                        };
+                                        frame.events.push(`Router ${toDevice.name} applied PAT (outside -> inside): destination ${originalDestinationIp}:${originalDestinationPort} -> ${patTrans.insideLocal}:${patTrans.insideLocalPort}`);
+                                        const natState = getRouterNatState(toDevice.id);
+                                        if (natState?.stats) {
+                                            natState.stats.hits = (natState.stats.hits || 0) + 1;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -9574,7 +9856,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                 }
             }
 
-            // Outbound NAT (Inside -> Outside): Static NAT first, then Dynamic NAT
+            // Outbound NAT (Inside -> Outside): Static NAT first, then Dynamic NAT, then PAT Overload
             if (activeIngressIfaceName && egressPort && isNatInsideInterface(toDevice.id, activeIngressIfaceName) && isNatOutsideInterface(toDevice.id, egressPort)) {
                 const staticRule = findStaticNatRuleByInsideLocal(toDevice.id, frame.packet.sourceIp);
                 if (staticRule) {
@@ -9623,6 +9905,73 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                             const natState = getRouterNatState(toDevice.id);
                             if (natState?.stats) {
                                 natState.stats.hits = (natState.stats.hits || 0) + 1;
+                            }
+                        }
+                    } else {
+                        // PAT Overload
+                        const proto = String(frame.packet?.protocol || '').toLowerCase();
+                        const srcPort = frame.packet?.sourcePort ?? frame.packet?.srcPort;
+                        const dstPort = frame.packet?.destinationPort ?? frame.packet?.dstPort;
+                        if ((proto === 'tcp' || proto === 'udp') && isValidPort(srcPort) && isValidPort(dstPort)) {
+                            const patRule = findPatRuleForPacket(toDevice.id, frame.packet);
+                            if (patRule) {
+                                const originalSourceIp = frame.packet.sourceIp;
+                                const originalSourcePort = srcPort;
+                                const patGlobalIp = toDevice.interfaces?.[patRule.interfaceName]?.ip || egressIface?.ip;
+                                if (patGlobalIp && isValidIPv4(patGlobalIp)) {
+                                    let patTrans = findPatTranslationByOutboundFlow(toDevice.id, proto, originalSourceIp, originalSourcePort, frame.packet.destinationIp, dstPort);
+                                    if (!patTrans) {
+                                        const allocRes = allocatePatGlobalPort(toDevice.id, proto, patGlobalIp, originalSourcePort);
+                                        if (allocRes.success) {
+                                            patTrans = createPatTranslation(toDevice.id, {
+                                                protocol: proto,
+                                                insideLocal: originalSourceIp,
+                                                insideLocalPort: originalSourcePort,
+                                                insideGlobal: patGlobalIp,
+                                                insideGlobalPort: allocRes.port,
+                                                destinationIp: frame.packet.destinationIp,
+                                                destinationPort: dstPort,
+                                                interfaceName: patRule.interfaceName,
+                                                ruleId: patRule.id
+                                            });
+                                        } else {
+                                            const natState = getRouterNatState(toDevice.id);
+                                            if (natState?.stats) {
+                                                natState.stats.misses = (natState.stats.misses || 0) + 1;
+                                            }
+                                            frame.events.push(`Router ${toDevice.name} PAT ports exhausted on ${patGlobalIp} for source ${originalSourceIp}:${originalSourcePort}`);
+                                        }
+                                    }
+                                    if (patTrans) {
+                                        frame.packet.sourceIp = patTrans.insideGlobal;
+                                        frame.packet.sourcePort = patTrans.insideGlobalPort;
+                                        if ('srcPort' in frame.packet) frame.packet.srcPort = patTrans.insideGlobalPort;
+                                        patTrans.lastUsed = Date.now();
+                                        frame.packet.nat = {
+                                            translated: true,
+                                            direction: 'inside-to-outside',
+                                            type: 'pat',
+                                            protocol: proto,
+                                            originalSourceIp,
+                                            translatedSourceIp: patTrans.insideGlobal,
+                                            originalSourcePort,
+                                            translatedSourcePort: patTrans.insideGlobalPort,
+                                            destinationIp: frame.packet.destinationIp,
+                                            destinationPort: dstPort
+                                        };
+                                        frame.events.push(`Router ${toDevice.name} applied PAT (inside -> outside): ${originalSourceIp}:${originalSourcePort} -> ${patTrans.insideGlobal}:${patTrans.insideGlobalPort}`);
+                                        const natState = getRouterNatState(toDevice.id);
+                                        if (natState?.stats) {
+                                            natState.stats.hits = (natState.stats.hits || 0) + 1;
+                                        }
+                                    }
+                                } else {
+                                    const natState = getRouterNatState(toDevice.id);
+                                    if (natState?.stats) {
+                                        natState.stats.misses = (natState.stats.misses || 0) + 1;
+                                    }
+                                    frame.events.push(`Router ${toDevice.name} PAT interface ${patRule.interfaceName} has no valid IPv4 address`);
+                                }
                             }
                         }
                     }
@@ -10663,6 +11012,18 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
         ttl: initialTtl
     };
 
+    if (typeof options?.sourcePort === 'number' || typeof options?.srcPort === 'number') {
+        packetPayload.sourcePort = options.sourcePort ?? options.srcPort;
+        packetPayload.srcPort = packetPayload.sourcePort;
+    }
+    if (typeof options?.destinationPort === 'number' || typeof options?.dstPort === 'number') {
+        packetPayload.destinationPort = options.destinationPort ?? options.dstPort;
+        packetPayload.dstPort = packetPayload.destinationPort;
+    }
+    if (options?.protocol) {
+        packetPayload.protocol = String(options.protocol).toUpperCase();
+    }
+
     if (isIcmp) {
         packetPayload.protocol = 'ICMP';
         packetPayload.icmp = {
@@ -10671,6 +11032,10 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             identifier: typeof icmpConfig.identifier === 'number' ? icmpConfig.identifier : 1,
             sequence: typeof icmpConfig.sequence === 'number' ? icmpConfig.sequence : 1
         };
+    }
+
+    if (options?.packet && typeof options.packet === 'object') {
+        Object.assign(packetPayload, options.packet);
     }
 
     const frame = {
@@ -13125,6 +13490,8 @@ function executeCliCommand(deviceId, rawInput) {
   no ip nat pool <name>                           - Remove Dynamic NAT address pool
   ip nat inside source list <acl> pool <pool>     - Configure Dynamic NAT rule
   no ip nat inside source list <acl> pool <pool>  - Remove Dynamic NAT rule
+  ip nat inside source list <acl> interface <iface> overload - Configure PAT (NAT Overload) rule
+  no ip nat inside source list <acl> interface <iface> overload - Remove PAT (NAT Overload) rule
   exit                          - Return to Privileged EXEC mode
   end                           - Return to Privileged EXEC mode
   do <command>                  - Execute an operational command
@@ -15127,39 +15494,94 @@ function executeCliCommand(deviceId, rawInput) {
                     };
                 } else if (natType === 'list') {
                     const aclName = (rawTokens[6] || tokens[6] || '').trim();
-                    const poolKw = (tokens[7] || '').toLowerCase().trim();
-                    const poolName = (rawTokens[8] || tokens[8] || '').trim();
-                    if (!aclName || poolKw !== 'pool' || !poolName) {
+                    const nextKw = (tokens[7] || '').toLowerCase().trim();
+                    if (nextKw === 'pool') {
+                        const poolName = (rawTokens[8] || tokens[8] || '').trim();
+                        if (!aclName || !poolName) {
+                            return {
+                                success: false,
+                                output: '% Incomplete or invalid command: no ip nat inside source list <acl-name> pool <pool-name>',
+                                clear: false,
+                                status: 'error',
+                                command,
+                                device: dev
+                            };
+                        }
+                        if (tokens.length > 9) {
+                            return {
+                                success: false,
+                                output: '% Too many parameters: no ip nat inside source list <acl-name> pool <pool-name>',
+                                clear: false,
+                                status: 'error',
+                                command,
+                                device: dev
+                            };
+                        }
+                        pushHistory();
+                        removeDynamicNatRule(dev, aclName, poolName);
+                        render();
+                        return {
+                            success: true,
+                            output: '',
+                            clear: false,
+                            status: 'success',
+                            command,
+                            device: dev
+                        };
+                    } else if (nextKw === 'interface' || nextKw === 'int') {
+                        const ifaceName = (rawTokens[8] || tokens[8] || '').trim();
+                        const overloadKw = (tokens[9] || '').toLowerCase().trim();
+                        if (!aclName || !ifaceName || !overloadKw) {
+                            return {
+                                success: false,
+                                output: '% Incomplete or invalid command: no ip nat inside source list <acl-name> interface <outside-interface> overload',
+                                clear: false,
+                                status: 'error',
+                                command,
+                                device: dev
+                            };
+                        }
+                        if (overloadKw !== 'overload') {
+                            return {
+                                success: false,
+                                output: '% Expected "overload" keyword in PAT command: no ip nat inside source list <acl-name> interface <outside-interface> overload',
+                                clear: false,
+                                status: 'error',
+                                command,
+                                device: dev
+                            };
+                        }
+                        if (tokens.length > 10) {
+                            return {
+                                success: false,
+                                output: '% Too many parameters: no ip nat inside source list <acl-name> interface <outside-interface> overload',
+                                clear: false,
+                                status: 'error',
+                                command,
+                                device: dev
+                            };
+                        }
+                        pushHistory();
+                        removePatRule(dev, aclName, ifaceName);
+                        render();
+                        return {
+                            success: true,
+                            output: '',
+                            clear: false,
+                            status: 'success',
+                            command,
+                            device: dev
+                        };
+                    } else {
                         return {
                             success: false,
-                            output: '% Incomplete or invalid command: no ip nat inside source list <acl-name> pool <pool-name>',
+                            output: '% Incomplete command: no ip nat inside source list <acl-name> [pool <pool-name> | interface <outside-interface> overload]',
                             clear: false,
                             status: 'error',
                             command,
                             device: dev
                         };
                     }
-                    if (tokens.length > 9) {
-                        return {
-                            success: false,
-                            output: '% Too many parameters: no ip nat inside source list <acl-name> pool <pool-name>',
-                            clear: false,
-                            status: 'error',
-                            command,
-                            device: dev
-                        };
-                    }
-                    pushHistory();
-                    removeDynamicNatRule(dev, aclName, poolName);
-                    render();
-                    return {
-                        success: true,
-                        output: '',
-                        clear: false,
-                        status: 'success',
-                        command,
-                        device: dev
-                    };
                 } else {
                     return {
                         success: false,
@@ -15892,59 +16314,114 @@ function executeCliCommand(deviceId, rawInput) {
                     };
                 } else if (natType === 'list') {
                     const aclName = (rawTokens[5] || tokens[5] || '').trim();
-                    const poolKw = (tokens[6] || '').toLowerCase().trim();
-                    const poolName = (rawTokens[7] || tokens[7] || '').trim();
-                    if (!aclName || !poolKw || !poolName) {
+                    const nextKw = (tokens[6] || '').toLowerCase().trim();
+                    if (nextKw === 'pool') {
+                        const poolName = (rawTokens[7] || tokens[7] || '').trim();
+                        if (!aclName || !poolName) {
+                            return {
+                                success: false,
+                                output: '% Incomplete command: ip nat inside source list <acl-name> pool <pool-name>',
+                                clear: false,
+                                status: 'error',
+                                command,
+                                device: dev
+                            };
+                        }
+                        if (tokens.length > 8) {
+                            return {
+                                success: false,
+                                output: '% Too many parameters: ip nat inside source list <acl-name> pool <pool-name>',
+                                clear: false,
+                                status: 'error',
+                                command,
+                                device: dev
+                            };
+                        }
+                        pushHistory();
+                        const res = addDynamicNatRule(dev, aclName, poolName);
+                        if (!res.success) {
+                            return {
+                                success: false,
+                                output: `% ${res.reason}`,
+                                clear: false,
+                                status: 'error',
+                                command,
+                                device: dev
+                            };
+                        }
+                        render();
+                        return {
+                            success: true,
+                            output: '',
+                            clear: false,
+                            status: 'success',
+                            command,
+                            device: dev
+                        };
+                    } else if (nextKw === 'interface' || nextKw === 'int') {
+                        const ifaceName = (rawTokens[7] || tokens[7] || '').trim();
+                        const overloadKw = (tokens[8] || '').toLowerCase().trim();
+                        if (!aclName || !ifaceName || !overloadKw) {
+                            return {
+                                success: false,
+                                output: '% Incomplete command: ip nat inside source list <acl-name> interface <outside-interface> overload',
+                                clear: false,
+                                status: 'error',
+                                command,
+                                device: dev
+                            };
+                        }
+                        if (overloadKw !== 'overload') {
+                            return {
+                                success: false,
+                                output: '% Expected "overload" keyword in PAT command: ip nat inside source list <acl-name> interface <outside-interface> overload',
+                                clear: false,
+                                status: 'error',
+                                command,
+                                device: dev
+                            };
+                        }
+                        if (tokens.length > 9) {
+                            return {
+                                success: false,
+                                output: '% Too many parameters: ip nat inside source list <acl-name> interface <outside-interface> overload',
+                                clear: false,
+                                status: 'error',
+                                command,
+                                device: dev
+                            };
+                        }
+                        pushHistory();
+                        const res = addPatRule(dev, aclName, ifaceName);
+                        if (!res.success) {
+                            return {
+                                success: false,
+                                output: `% ${res.reason}`,
+                                clear: false,
+                                status: 'error',
+                                command,
+                                device: dev
+                            };
+                        }
+                        render();
+                        return {
+                            success: true,
+                            output: '',
+                            clear: false,
+                            status: 'success',
+                            command,
+                            device: dev
+                        };
+                    } else {
                         return {
                             success: false,
-                            output: '% Incomplete command: ip nat inside source list <acl-name> pool <pool-name>',
+                            output: '% Incomplete command: ip nat inside source list <acl-name> [pool <pool-name> | interface <outside-interface> overload]',
                             clear: false,
                             status: 'error',
                             command,
                             device: dev
                         };
                     }
-                    if (poolKw !== 'pool') {
-                        return {
-                            success: false,
-                            output: '% Expected "pool" keyword in dynamic NAT command: ip nat inside source list <acl-name> pool <pool-name>',
-                            clear: false,
-                            status: 'error',
-                            command,
-                            device: dev
-                        };
-                    }
-                    if (tokens.length > 8) {
-                        return {
-                            success: false,
-                            output: '% Too many parameters: ip nat inside source list <acl-name> pool <pool-name>',
-                            clear: false,
-                            status: 'error',
-                            command,
-                            device: dev
-                        };
-                    }
-                    pushHistory();
-                    const res = addDynamicNatRule(dev, aclName, poolName);
-                    if (!res.success) {
-                        return {
-                            success: false,
-                            output: `% ${res.reason}`,
-                            clear: false,
-                            status: 'error',
-                            command,
-                            device: dev
-                        };
-                    }
-                    render();
-                    return {
-                        success: true,
-                        output: '',
-                        clear: false,
-                        status: 'success',
-                        command,
-                        device: dev
-                    };
                 } else {
                     return {
                         success: false,
