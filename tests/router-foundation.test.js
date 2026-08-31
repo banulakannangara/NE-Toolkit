@@ -23596,8 +23596,8 @@ runTest('908. Invalid IPv4 in static NAT command is rejected', () => {
     assert.ok(res.output.includes('Invalid IPv4'));
 });
 
-// 909. Unsupported dynamic NAT command is rejected
-runTest('909. Unsupported dynamic NAT command is rejected', () => {
+// 909. Non-existent ACL/pool dynamic NAT command is rejected
+runTest('909. Non-existent ACL/pool dynamic NAT command is rejected', () => {
     resetLab();
     addDevice('router', 100, 100);
     const [r0] = networkState.devices;
@@ -23605,7 +23605,7 @@ runTest('909. Unsupported dynamic NAT command is rejected', () => {
     executeCliCommand(r0, 'conf t');
     const res = executeCliCommand(r0, 'ip nat inside source list 1 pool MYPOOL');
     assert.strictEqual(res.success, false);
-    assert.ok(res.output.includes('not supported'));
+    assert.ok(res.output.includes('does not exist') || res.output.includes('not supported'));
 });
 
 // 910. Unsupported outside NAT command is rejected
@@ -24263,6 +24263,1478 @@ runTest('935. Full regression suite check (Phase 2 baseline)', () => {
 // 936. Total test count verification check (Phase 2 baseline)
 runTest('936. Total test count verification check (Phase 2 baseline)', () => {
     assert.ok(testsPassed >= 935);
+});
+
+// ==========================================
+// V5.14 PHASE 3: DYNAMIC NAT POOLS & ACL-BASED TRANSLATION
+// ==========================================
+
+// 937. NAT pool can be created
+runTest('937. NAT pool can be created', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = addNatPool(r0, 'PUBLIC_POOL', '203.0.113.100', '203.0.113.110', '255.255.255.0');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.pool.name, 'PUBLIC_POOL');
+    assert.strictEqual(res.pool.startIp, '203.0.113.100');
+    assert.strictEqual(res.pool.endIp, '203.0.113.110');
+    assert.strictEqual(res.pool.addresses.length, 11);
+});
+
+// 938. NAT pool is stored in router runtime
+runTest('938. NAT pool is stored in router runtime', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0.id, 'POOL_A', '198.51.100.10', '198.51.100.20', '255.255.255.0');
+    const pool = getNatPool(r0, 'POOL_A');
+    assert.ok(pool);
+    assert.strictEqual(pool.name, 'POOL_A');
+    assert.strictEqual(pool.startIp, '198.51.100.10');
+});
+
+// 939. NAT pool retrieval is idempotent
+runTest('939. NAT pool retrieval is idempotent', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0, 'POOL_TEST', '203.0.113.50', '203.0.113.60', '255.255.255.0');
+    const p1 = getNatPool(r0.id, 'POOL_TEST');
+    const p2 = getNatPool(r0, 'POOL_TEST');
+    assert.strictEqual(p1, p2);
+});
+
+// 940. Invalid pool start IP rejected
+runTest('940. Invalid pool start IP rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = addNatPool(r0, 'BAD_START', '999.999.1.1', '203.0.113.10', '255.255.255.0');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('Invalid pool start IPv4'));
+});
+
+// 941. Invalid pool end IP rejected
+runTest('941. Invalid pool end IP rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = addNatPool(r0, 'BAD_END', '203.0.113.1', 'abc.def', '255.255.255.0');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('Invalid pool end IPv4'));
+});
+
+// 942. Invalid netmask rejected
+runTest('942. Invalid netmask rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = addNatPool(r0, 'BAD_MASK', '203.0.113.1', '203.0.113.10', '255.0.255.0');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('Invalid netmask'));
+});
+
+// 943. Pool start greater than end rejected
+runTest('943. Pool start greater than end rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = addNatPool(r0, 'INVERTED', '203.0.113.50', '203.0.113.10', '255.255.255.0');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('cannot be greater than end IP'));
+});
+
+// 944. Duplicate pool rejected
+runTest('944. Duplicate pool rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0, 'MY_POOL', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+    const res2 = addNatPool(r0, 'MY_POOL', '203.0.113.30', '203.0.113.40', '255.255.255.0');
+    assert.strictEqual(res2.success, false);
+    assert.ok(res2.reason.includes('already exists'));
+});
+
+// 945. Pool can be removed
+runTest('945. Pool can be removed', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0, 'TEMP_POOL', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+    assert.ok(getNatPool(r0, 'TEMP_POOL'));
+    const res = removeNatPool(r0, 'TEMP_POOL');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getNatPool(r0, 'TEMP_POOL'), null);
+});
+
+// 946. Removing nonexistent pool is safe
+runTest('946. Removing nonexistent pool is safe', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = removeNatPool(r0, 'NONEXISTENT');
+    assert.strictEqual(res.success, true);
+});
+
+// 947. Dynamic NAT rule can be created
+runTest('947. Dynamic NAT rule can be created', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, 'NAT_ACL');
+    addNatPool(r0, 'POOL1', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+    const res = addDynamicNatRule(r0, 'NAT_ACL', 'POOL1');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.rule.aclName, 'NAT_ACL');
+    assert.strictEqual(res.rule.poolName, 'POOL1');
+});
+
+// 948. Dynamic NAT rule is stored
+runTest('948. Dynamic NAT rule is stored', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, 'ACL10');
+    addNatPool(r0, 'MY_POOL', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+    addDynamicNatRule(r0.id, 'ACL10', 'MY_POOL');
+    const rules = getDynamicNatRules(r0);
+    assert.strictEqual(rules.length, 1);
+    assert.strictEqual(rules[0].aclName, 'ACL10');
+});
+
+// 949. Dynamic rule lookup works
+runTest('949. Dynamic rule lookup works', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'POOL_A', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL_A');
+
+    const matchedRule = findDynamicNatRuleForPacket(r0, { sourceIp: '192.168.1.50', destinationIp: '8.8.8.8' });
+    assert.ok(matchedRule);
+    assert.strictEqual(matchedRule.poolName, 'POOL_A');
+
+    const unmatchedRule = findDynamicNatRuleForPacket(r0, { sourceIp: '10.0.0.1', destinationIp: '8.8.8.8' });
+    assert.strictEqual(unmatchedRule, null);
+});
+
+// 950. Nonexistent ACL rejected
+runTest('950. Nonexistent ACL rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0, 'POOL1', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+    const res = addDynamicNatRule(r0, 'MISSING_ACL', 'POOL1');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('does not exist'));
+});
+
+// 951. Nonexistent pool rejected
+runTest('951. Nonexistent pool rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    const res = addDynamicNatRule(r0, '10', 'MISSING_POOL');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('does not exist'));
+});
+
+// 952. Duplicate dynamic rule rejected/idempotent
+runTest('952. Duplicate dynamic rule rejected/idempotent', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addNatPool(r0, 'POOL1', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL1');
+    const res2 = addDynamicNatRule(r0, '10', 'POOL1');
+    assert.strictEqual(res2.success, true);
+    assert.strictEqual(getDynamicNatRules(r0).length, 1);
+});
+
+// 953. Dynamic rule can be removed
+runTest('953. Dynamic rule can be removed', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addNatPool(r0, 'POOL1', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL1');
+    assert.strictEqual(getDynamicNatRules(r0).length, 1);
+
+    const res = removeDynamicNatRule(r0, '10', 'POOL1');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getDynamicNatRules(r0).length, 0);
+});
+
+// 954. Removing nonexistent dynamic rule is safe
+runTest('954. Removing nonexistent dynamic rule is safe', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = removeDynamicNatRule(r0, 'NONE', 'NONE');
+    assert.strictEqual(res.success, true);
+});
+
+// 955. First pool address allocated deterministically
+runTest('955. First pool address allocated deterministically', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0, 'POOL_A', '203.0.113.100', '203.0.113.105', '255.255.255.0');
+    const res = allocateNatPoolAddress(r0, 'POOL_A', '192.168.1.10');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.insideGlobal, '203.0.113.100');
+});
+
+// 956. Second inside host receives second pool address
+runTest('956. Second inside host receives second pool address', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0, 'POOL_A', '203.0.113.100', '203.0.113.105', '255.255.255.0');
+    allocateNatPoolAddress(r0, 'POOL_A', '192.168.1.10');
+    const res2 = allocateNatPoolAddress(r0, 'POOL_A', '192.168.1.11');
+    assert.strictEqual(res2.success, true);
+    assert.strictEqual(res2.insideGlobal, '203.0.113.101');
+});
+
+// 957. Existing translation is reused
+runTest('957. Existing translation is reused', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0, 'POOL_A', '203.0.113.100', '203.0.113.105', '255.255.255.0');
+    const res1 = allocateNatPoolAddress(r0, 'POOL_A', '192.168.1.10');
+    const res2 = allocateNatPoolAddress(r0, 'POOL_A', '192.168.1.10');
+    assert.strictEqual(res1.insideGlobal, res2.insideGlobal);
+    assert.strictEqual(res2.reused, true);
+});
+
+// 958. Duplicate global address allocation prevented
+runTest('958. Duplicate global address allocation prevented', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0, 'POOL_A', '203.0.113.100', '203.0.113.101', '255.255.255.0');
+    const a1 = allocateNatPoolAddress(r0, 'POOL_A', '10.0.0.1');
+    const a2 = allocateNatPoolAddress(r0, 'POOL_A', '10.0.0.2');
+    assert.notStrictEqual(a1.insideGlobal, a2.insideGlobal);
+});
+
+// 959. Pool exhaustion handled safely
+runTest('959. Pool exhaustion handled safely', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0, 'TINY_POOL', '203.0.113.100', '203.0.113.101', '255.255.255.0');
+    allocateNatPoolAddress(r0, 'TINY_POOL', '10.0.0.1');
+    allocateNatPoolAddress(r0, 'TINY_POOL', '10.0.0.2');
+    const a3 = allocateNatPoolAddress(r0, 'TINY_POOL', '10.0.0.3');
+    assert.strictEqual(a3.success, false);
+    assert.strictEqual(a3.reason, 'POOL_EXHAUSTED');
+});
+
+// 960. Released address becomes available again
+runTest('960. Released address becomes available again', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0, 'POOL1', '203.0.113.100', '203.0.113.100', '255.255.255.0'); // 1 address pool
+    allocateNatPoolAddress(r0, 'POOL1', '10.0.0.1');
+    assert.strictEqual(allocateNatPoolAddress(r0, 'POOL1', '10.0.0.2').success, false);
+
+    releaseNatPoolAddress(r0, 'POOL1', '10.0.0.1');
+    const retry = allocateNatPoolAddress(r0, 'POOL1', '10.0.0.2');
+    assert.strictEqual(retry.success, true);
+    assert.strictEqual(retry.insideGlobal, '203.0.113.100');
+});
+
+// 961. Multiple pools remain isolated
+runTest('961. Multiple pools remain isolated', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0, 'POOL_A', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+    addNatPool(r0, 'POOL_B', '198.51.100.10', '198.51.100.20', '255.255.255.0');
+
+    const resA = allocateNatPoolAddress(r0, 'POOL_A', '10.0.0.1');
+    const resB = allocateNatPoolAddress(r0, 'POOL_B', '10.0.0.1');
+    assert.strictEqual(resA.insideGlobal, '203.0.113.10');
+    assert.strictEqual(resB.insideGlobal, '198.51.100.10');
+});
+
+// 962. Multiple routers remain isolated
+runTest('962. Multiple routers remain isolated', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    addNatPool(r0, 'SHARED_NAME', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+    addNatPool(r1, 'SHARED_NAME', '198.51.100.10', '198.51.100.20', '255.255.255.0');
+
+    const p0 = getNatPool(r0, 'SHARED_NAME');
+    const p1 = getNatPool(r1, 'SHARED_NAME');
+    assert.strictEqual(p0.startIp, '203.0.113.10');
+    assert.strictEqual(p1.startIp, '198.51.100.10');
+});
+
+// 963. ACL-permitted source receives dynamic translation
+runTest('963. ACL-permitted source receives dynamic translation', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'MY_POOL', '203.0.113.50', '203.0.113.60', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'MY_POOL');
+
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.sourceIp, '203.0.113.50');
+});
+
+// 964. ACL-denied source receives no dynamic translation
+runTest('964. ACL-denied source receives no dynamic translation', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '10.0.0.10'; // Not matching 192.168.1.0/24
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '10.0.0.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'MY_POOL', '203.0.113.50', '203.0.113.60', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'MY_POOL');
+
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.sourceIp, '10.0.0.10'); // Untranslated
+});
+
+// 965. Existing ACL semantics remain unchanged
+runTest('965. Existing ACL semantics remain unchanged', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.100' });
+    addRouterAclRule(r0.id, '10', { action: 'deny', sourceIp: 'any' });
+
+    const rPermit = evaluatePacketAcl(getRouterAcl(r0.id, '10'), { sourceIp: '192.168.1.100' });
+    const rDeny = evaluatePacketAcl(getRouterAcl(r0.id, '10'), { sourceIp: '192.168.1.5' });
+    assert.strictEqual(rPermit.action, 'permit');
+    assert.strictEqual(rDeny.action, 'deny');
+});
+
+// 966. Dynamic NAT does not replace ACL evaluation
+runTest('966. Dynamic NAT does not replace ACL evaluation', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '10');
+
+    addNatPool(r0, 'POOL_A', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL_A');
+
+    const ifaceAclRes = evaluateRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', { sourceIp: '192.168.1.10', destinationIp: '8.8.8.8' });
+    assert.strictEqual(ifaceAclRes.action, 'permit');
+});
+
+// 967. Dynamic NAT rule references the correct ACL
+runTest('967. Dynamic NAT rule references the correct ACL', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, 'ACL_ONE');
+    createRouterAcl(r0.id, 'ACL_TWO');
+    addNatPool(r0, 'POOL_A', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+
+    addDynamicNatRule(r0, 'ACL_TWO', 'POOL_A');
+    const rules = getDynamicNatRules(r0);
+    assert.strictEqual(rules[0].aclName, 'ACL_TWO');
+});
+
+// 968. ip nat pool creates pool via CLI
+runTest('968. ip nat pool creates pool via CLI', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip nat pool PUBLIC_POOL 203.0.113.100 203.0.113.110 netmask 255.255.255.0');
+    assert.strictEqual(res.success, true);
+    const pool = getNatPool(r0, 'PUBLIC_POOL');
+    assert.ok(pool);
+    assert.strictEqual(pool.startIp, '203.0.113.100');
+});
+
+// 969. no ip nat pool removes pool via CLI
+runTest('969. no ip nat pool removes pool via CLI', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip nat pool PUBLIC_POOL 203.0.113.100 203.0.113.110 netmask 255.255.255.0');
+    assert.ok(getNatPool(r0, 'PUBLIC_POOL'));
+
+    const res = executeCliCommand(r0, 'no ip nat pool PUBLIC_POOL');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getNatPool(r0, 'PUBLIC_POOL'), null);
+});
+
+// 970. ip nat inside source list ... pool ... creates dynamic rule via CLI
+runTest('970. ip nat inside source list ... pool ... creates dynamic rule via CLI', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip nat pool POOL1 203.0.113.10 203.0.113.20 netmask 255.255.255.0');
+
+    const res = executeCliCommand(r0, 'ip nat inside source list 10 pool POOL1');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getDynamicNatRules(r0).length, 1);
+});
+
+// 971. no ip nat inside source list ... pool ... removes dynamic rule via CLI
+runTest('971. no ip nat inside source list ... pool ... removes dynamic rule via CLI', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip nat pool POOL1 203.0.113.10 203.0.113.20 netmask 255.255.255.0');
+    executeCliCommand(r0, 'ip nat inside source list 10 pool POOL1');
+    assert.strictEqual(getDynamicNatRules(r0).length, 1);
+
+    const res = executeCliCommand(r0, 'no ip nat inside source list 10 pool POOL1');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getDynamicNatRules(r0).length, 0);
+});
+
+// 972. Incomplete pool command rejected
+runTest('972. Incomplete pool command rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip nat pool P1 203.0.113.10 203.0.113.20');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Incomplete command'));
+});
+
+// 973. Invalid pool IP rejected
+runTest('973. Invalid pool IP rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip nat pool P1 999.1.1.1 203.0.113.20 netmask 255.255.255.0');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Invalid IPv4'));
+});
+
+// 974. Invalid netmask rejected
+runTest('974. Invalid netmask rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip nat pool P1 203.0.113.10 203.0.113.20 netmask 255.0.255.0');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Invalid netmask'));
+});
+
+// 975. Invalid dynamic rule rejected
+runTest('975. Invalid dynamic rule rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip nat inside source list');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Incomplete command'));
+});
+
+// 976. Unknown ACL rejected
+runTest('976. Unknown ACL rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip nat pool POOL1 203.0.113.10 203.0.113.20 netmask 255.255.255.0');
+    const res = executeCliCommand(r0, 'ip nat inside source list 99 pool POOL1');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('does not exist'));
+});
+
+// 977. Unknown pool rejected
+runTest('977. Unknown pool rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip nat inside source list 10 pool NONEXISTENT_POOL');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('does not exist'));
+});
+
+// 978. Extra arguments rejected
+runTest('978. Extra arguments rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip nat pool POOL1 203.0.113.10 203.0.113.20 netmask 255.255.255.0');
+    const res = executeCliCommand(r0, 'ip nat inside source list 10 pool POOL1 extra');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Too many parameters'));
+});
+
+// 979. Dynamic NAT command in interface mode rejected
+runTest('979. Dynamic NAT command in interface mode rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/0');
+    const res = executeCliCommand(r0, 'ip nat inside source list 10 pool POOL1');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('must be executed in global configuration mode'));
+});
+
+// 980. Phase 1 ip nat inside remains functional
+runTest('980. Phase 1 ip nat inside remains functional', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/0');
+    executeCliCommand(r0, 'ip nat inside');
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/0'), true);
+});
+
+// 981. Phase 1 ip nat outside remains functional
+runTest('981. Phase 1 ip nat outside remains functional', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/1');
+    executeCliCommand(r0, 'ip nat outside');
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/1'), true);
+});
+
+// 982. Phase 2 Static NAT remains functional
+runTest('982. Phase 2 Static NAT remains functional', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip nat inside source static 192.168.1.10 203.0.113.10');
+    assert.strictEqual(getStaticNatRules(r0).length, 1);
+});
+
+// 983. Inside->outside dynamic NAT rewrites source
+runTest('983. Inside->outside dynamic NAT rewrites source', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'POOL_A', '203.0.113.50', '203.0.113.60', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL_A');
+
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.sourceIp, '203.0.113.50');
+});
+
+// 984. Inside->outside dynamic NAT preserves destination
+runTest('984. Inside->outside dynamic NAT preserves destination', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'POOL_A', '203.0.113.50', '203.0.113.60', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL_A');
+
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.destinationIp, '203.0.113.100');
+});
+
+// 985. Outside->inside dynamic NAT rewrites destination
+runTest('985. Outside->inside dynamic NAT rewrites destination', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'POOL_A', '203.0.113.50', '203.0.113.60', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL_A');
+
+    // Trigger outbound translation first to create active translation
+    simulateSendFrame(pc0, pc1);
+
+    const targetMatch = findDeviceByIp('203.0.113.50');
+    assert.ok(targetMatch);
+    const returnRes = simulateSendFrame(pc1, targetMatch.device);
+    assert.strictEqual(returnRes.success, true);
+    assert.strictEqual(returnRes.packet.destinationIp, '192.168.1.10');
+});
+
+// 986. Outside->inside dynamic NAT preserves source
+runTest('986. Outside->inside dynamic NAT preserves source', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'POOL_A', '203.0.113.50', '203.0.113.60', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL_A');
+
+    simulateSendFrame(pc0, pc1);
+
+    const targetMatch = findDeviceByIp('203.0.113.50');
+    const returnRes = simulateSendFrame(pc1, targetMatch.device);
+    assert.strictEqual(returnRes.success, true);
+    assert.strictEqual(returnRes.packet.sourceIp, '203.0.113.100');
+});
+
+// 987. Return traffic uses existing dynamic translation
+runTest('987. Return traffic uses existing dynamic translation', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'POOL_A', '203.0.113.50', '203.0.113.60', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL_A');
+
+    simulateSendFrame(pc0, pc1);
+
+    const trans = findDynamicNatTranslationByInsideGlobal(r0, '203.0.113.50');
+    assert.ok(trans);
+    assert.strictEqual(trans.insideLocal, '192.168.1.10');
+});
+
+// 988. Unknown outside destination is not translated
+runTest('988. Unknown outside destination is not translated', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    const trans = findDynamicNatTranslationByInsideGlobal(r0, '203.0.113.99');
+    assert.strictEqual(trans, null);
+});
+
+// 989. Non-NAT interface traffic is not translated
+runTest('989. Non-NAT interface traffic is not translated', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    // No NAT roles configured on interfaces
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'POOL_A', '203.0.113.50', '203.0.113.60', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL_A');
+
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.sourceIp, '192.168.1.10');
+});
+
+// 990. Inside->inside traffic is not translated
+runTest('990. Inside->inside traffic is not translated', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'inside'); // Both inside
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'POOL_A', '203.0.113.50', '203.0.113.60', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL_A');
+
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.sourceIp, '192.168.1.10');
+});
+
+// 991. Outside->outside traffic is not translated
+runTest('991. Outside->outside traffic is not translated', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '203.0.113.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '203.0.113.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '198.51.100.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '198.51.100.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '198.51.100.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'outside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside'); // Both outside
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '203.0.113.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'POOL_A', '100.64.0.1', '100.64.0.10', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL_A');
+
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.sourceIp, '203.0.113.10');
+});
+
+// 992. Static NAT takes precedence over dynamic NAT
+runTest('992. Static NAT takes precedence over dynamic NAT', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    // Both Static NAT and Dynamic NAT configured for 192.168.1.10
+    addStaticNatRule(r0, '192.168.1.10', '203.0.113.10');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'DYNAMIC_POOL', '203.0.113.50', '203.0.113.60', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'DYNAMIC_POOL');
+
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.sourceIp, '203.0.113.10'); // Uses Static NAT
+    assert.strictEqual(sendRes.packet.nat.type, 'static');
+});
+
+// 993. Dynamic translation metadata is correct
+runTest('993. Dynamic translation metadata is correct', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'POOL_A', '203.0.113.50', '203.0.113.60', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL_A');
+
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.nat.translated, true);
+    assert.strictEqual(sendRes.packet.nat.direction, 'inside-to-outside');
+    assert.strictEqual(sendRes.packet.nat.type, 'dynamic');
+    assert.strictEqual(sendRes.packet.nat.originalSourceIp, '192.168.1.10');
+    assert.strictEqual(sendRes.packet.nat.translatedSourceIp, '203.0.113.50');
+    assert.strictEqual(sendRes.packet.nat.poolName, 'POOL_A');
+});
+
+// 994. Dynamic translation increments NAT hit stats
+runTest('994. Dynamic translation increments NAT hit stats', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'POOL_A', '203.0.113.50', '203.0.113.60', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL_A');
+
+    const nat = getRouterNatState(r0);
+    const initialHits = nat.stats.hits || 0;
+    simulateSendFrame(pc0, pc1);
+    assert.strictEqual(nat.stats.hits, initialHits + 1);
+});
+
+// 995. Failed allocation increments NAT miss stats
+runTest('995. Failed allocation increments NAT miss stats', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'EMPTY_POOL', '203.0.113.50', '203.0.113.50', '255.255.255.0'); // only 1 IP
+    addDynamicNatRule(r0, '10', 'EMPTY_POOL');
+
+    // Pre-allocate the single available IP to a dummy host
+    allocateNatPoolAddress(r0, 'EMPTY_POOL', '192.168.1.99');
+
+    const nat = getRouterNatState(r0);
+    const initialMisses = nat.stats.misses || 0;
+    simulateSendFrame(pc0, pc1);
+    assert.strictEqual(nat.stats.misses, initialMisses + 1);
+});
+
+// 996. Active translation count is correct
+runTest('996. Active translation count is correct', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0, 'POOL_A', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+    createDynamicNatTranslation(r0, 'POOL_A', 'rule1', '192.168.1.10', '203.0.113.10');
+    createDynamicNatTranslation(r0, 'POOL_A', 'rule1', '192.168.1.11', '203.0.113.11');
+
+    const nat = getRouterNatState(r0);
+    assert.strictEqual(nat.stats.activeTranslations, 2);
+});
+
+// 997. Removing translation releases pool address
+runTest('997. Removing translation releases pool address', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0, 'POOL_A', '203.0.113.10', '203.0.113.10', '255.255.255.0');
+    allocateNatPoolAddress(r0, 'POOL_A', '192.168.1.10');
+    createDynamicNatTranslation(r0, 'POOL_A', 'rule1', '192.168.1.10', '203.0.113.10');
+
+    removeDynamicNatTranslation(r0, '192.168.1.10');
+    const nat = getRouterNatState(r0);
+    assert.strictEqual(nat.stats.activeTranslations, 0);
+
+    // Address is now free for another host
+    const res = allocateNatPoolAddress(r0, 'POOL_A', '192.168.1.20');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.insideGlobal, '203.0.113.10');
+});
+
+// 998. Dynamic NAT does not alter TTL
+runTest('998. Dynamic NAT does not alter TTL', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'POOL_A', '203.0.113.50', '203.0.113.60', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL_A');
+
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.packet.ttl, 63);
+});
+
+// 999. Dynamic NAT does not alter ICMP semantics
+runTest('999. Dynamic NAT does not alter ICMP semantics', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'POOL_A', '203.0.113.50', '203.0.113.60', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL_A');
+
+    const res = executeCliPing(pc0, '203.0.113.100');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('0% loss'));
+});
+
+// 1000. Dynamic NAT does not alter routing precedence
+runTest('1000. Dynamic NAT does not alter routing precedence', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip route 192.168.0.0 255.255.0.0 10.0.0.2');
+    executeCliCommand(r0, 'ip route 192.168.1.0 255.255.255.0 10.0.0.3');
+
+    addNatPool(r0, 'TEST_POOL', '200.0.0.10', '200.0.0.20', '255.255.255.0');
+
+    const lookupRes = lookupRoute(r0.id, '192.168.1.100');
+    assert.strictEqual(lookupRes.success, true);
+    assert.strictEqual(lookupRes.route.nextHop, '10.0.0.3');
+});
+
+// 1001. Dynamic NAT does not alter OSPF
+runTest('1001. Dynamic NAT does not alter OSPF', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const [r0, r1] = networkState.devices;
+
+    addConnection(r0.id, r1.id);
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/0'].ip = '10.0.0.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.0.0.255 area 0');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'router ospf 1');
+    executeCliCommand(r1, 'network 10.0.0.0 0.0.0.255 area 0');
+
+    addNatPool(r0, 'TEST_POOL', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+
+    simulateOspfHello(r0.id, r1.id);
+    assert.strictEqual(r0.ospf.enabled, true);
+    assert.ok(r0.ospf.lsdb.routerLsas['10.0.0.2']);
+});
+
+// 1002. Dynamic NAT does not alter DHCP
+runTest('1002. Dynamic NAT does not alter DHCP', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip dhcp pool DHCP_POOL');
+    executeCliCommand(r0, 'network 192.168.1.0 255.255.255.0');
+    executeCliCommand(r0, 'default-router 192.168.1.1');
+
+    addNatPool(r0, 'NAT_POOL', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+    assert.ok(r0.dhcpServer.pools['DHCP_POOL']);
+});
+
+// 1003. Dynamic NAT does not alter ARP
+runTest('1003. Dynamic NAT does not alter ARP', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    const [pc0, r0] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addNatPool(r0, 'POOL_A', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+
+    const arpRes = simulateArpResolution(pc0, '192.168.1.1', [pc0.id, r0.id]);
+    assert.strictEqual(arpRes.success, true);
+    assert.strictEqual(arpRes.targetMac, r0.interfaces['Gig0/0'].mac);
+});
+
+// 1004. Dynamic NAT does not alter ACL evaluation behavior
+runTest('1004. Dynamic NAT does not alter ACL evaluation behavior', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255', sequence: 10 });
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '10');
+
+    addNatPool(r0, 'POOL_A', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL_A');
+
+    const aclRes = evaluateRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', { sourceIp: '192.168.1.10', destinationIp: '8.8.8.8' });
+    assert.strictEqual(aclRes.matched, true);
+    assert.strictEqual(aclRes.action, 'permit');
+});
+
+// 1005. Multiple simultaneous dynamic translations work independently
+runTest('1005. Multiple simultaneous dynamic translations work independently', () => {
+    resetLab();
+    addDevice('pc', 50, 50);
+    addDevice('pc', 50, 150);
+    addDevice('switch', 120, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, pc1, sw0, r0, pc2] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    pc1.ip = '192.168.1.11';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, sw0.id);
+    addConnection(pc1.id, sw0.id);
+    addConnection(sw0.id, r0.id);
+    addConnection(r0.id, pc2.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc2.ip = '203.0.113.100';
+    pc2.subnetMask = '255.255.255.0';
+    pc2.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'POOL_A', '203.0.113.50', '203.0.113.60', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL_A');
+
+    const res0 = simulateSendFrame(pc0, pc2);
+    const res1 = simulateSendFrame(pc1, pc2);
+
+    assert.strictEqual(res0.success, true);
+    assert.strictEqual(res0.packet.sourceIp, '203.0.113.50');
+    assert.strictEqual(res1.success, true);
+    assert.strictEqual(res1.packet.sourceIp, '203.0.113.51');
+
+    const nat = getRouterNatState(r0);
+    assert.strictEqual(nat.translations.length, 2);
+});
+
+// 1006. Bidirectional ICMP ping flow works with Dynamic NAT
+runTest('1006. Bidirectional ICMP ping flow works with Dynamic NAT', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'DYNAMIC_POOL', '203.0.113.50', '203.0.113.60', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'DYNAMIC_POOL');
+
+    // Inside host pings outside host
+    const pingRes = executeCliPing(pc0, '203.0.113.100');
+    assert.strictEqual(pingRes.success, true);
+    assert.ok(pingRes.output.includes('0% loss'));
+
+    // Now outside host pings the dynamically allocated inside-global IP
+    const returnPingRes = executeCliPing(pc1, '203.0.113.50');
+    assert.strictEqual(returnPingRes.success, true);
+    assert.ok(returnPingRes.output.includes('0% loss'));
+});
+
+// 1007. Full regression suite check (Phase 3 baseline)
+runTest('1007. Full regression suite check (Phase 3 baseline)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.10.0', sourceWildcard: '0.0.0.255' });
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'int Gig0/0');
+    executeCliCommand(r0, 'ip nat inside');
+    executeCliCommand(r0, 'int Gig0/1');
+    executeCliCommand(r0, 'ip nat outside');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'ip nat pool POOL_REG 198.51.100.10 198.51.100.20 netmask 255.255.255.0');
+    executeCliCommand(r0, 'ip nat inside source list 10 pool POOL_REG');
+    executeCliCommand(r0, 'ip nat inside source static 192.168.10.99 198.51.100.99');
+
+    assert.strictEqual(isNatInsideInterface(r0, 'Gig0/0'), true);
+    assert.strictEqual(isNatOutsideInterface(r0, 'Gig0/1'), true);
+    assert.strictEqual(getStaticNatRules(r0).length, 1);
+    assert.strictEqual(getDynamicNatRules(r0).length, 1);
+    assert.ok(getNatPool(r0, 'POOL_REG'));
+});
+
+// 1008. Total test count verification check (Phase 3 baseline)
+runTest('1008. Total test count verification check (Phase 3 baseline)', () => {
+    assert.ok(testsPassed >= 1007);
 });
 
 console.log('----------------------------------------------------');

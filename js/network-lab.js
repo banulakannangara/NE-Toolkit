@@ -6904,6 +6904,350 @@ function translateStaticNatGlobalToInside(deviceOrId, ip) {
     return rule ? rule.insideLocal : ip;
 }
 
+function getNatPools(deviceOrId) {
+    const nat = getRouterNatState(deviceOrId);
+    if (!nat || !nat.pools || typeof nat.pools !== 'object') {
+        return {};
+    }
+    return nat.pools;
+}
+
+function getNatPool(deviceOrId, poolName) {
+    const pools = getNatPools(deviceOrId);
+    if (!poolName || typeof poolName !== 'string') return null;
+    const normName = poolName.trim();
+    return pools[normName] || Object.values(pools).find(p => p && p.name && p.name.toLowerCase() === normName.toLowerCase()) || null;
+}
+
+function addNatPool(deviceOrId, poolName, startIp, endIp, netmask) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+
+    const normName = String(poolName || '').trim();
+    const normStart = String(startIp || '').trim();
+    const normEnd = String(endIp || '').trim();
+    const normMask = String(netmask || '').trim();
+
+    if (!normName) {
+        return { success: false, reason: 'NAT pool name is required.' };
+    }
+    if (!isValidIPv4(normStart)) {
+        return { success: false, reason: `Invalid pool start IPv4 address: "${startIp}"` };
+    }
+    if (!isValidIPv4(normEnd)) {
+        return { success: false, reason: `Invalid pool end IPv4 address: "${endIp}"` };
+    }
+    if (!isValidSubnetMask(normMask)) {
+        return { success: false, reason: `Invalid netmask: "${netmask}"` };
+    }
+
+    const startInt = ipv4ToInteger(normStart);
+    const endInt = ipv4ToInteger(normEnd);
+
+    if (startInt > endInt) {
+        return { success: false, reason: `Pool start IP (${normStart}) cannot be greater than end IP (${normEnd}).` };
+    }
+
+    const nat = getRouterNatState(dev.id);
+    if (!nat) {
+        return { success: false, reason: 'NAT state unavailable.' };
+    }
+    if (!nat.pools || typeof nat.pools !== 'object') {
+        nat.pools = {};
+    }
+
+    if (nat.pools[normName]) {
+        return { success: false, reason: `NAT pool "${normName}" already exists on router ${dev.name}.` };
+    }
+
+    const addresses = [];
+    for (let cur = startInt; cur <= endInt; cur++) {
+        addresses.push(integerToIPv4(cur));
+    }
+
+    const pool = {
+        id: `pool-${normName}`,
+        name: normName,
+        startIp: normStart,
+        endIp: normEnd,
+        netmask: normalizeSubnetMask(normMask),
+        addresses,
+        allocated: {} // insideLocal -> insideGlobal
+    };
+
+    nat.pools[normName] = pool;
+    return { success: true, pool };
+}
+
+function removeNatPool(deviceOrId, poolName) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+
+    const normName = String(poolName || '').trim();
+    const nat = getRouterNatState(dev.id);
+    if (!nat || !nat.pools || typeof nat.pools !== 'object') {
+        return { success: true };
+    }
+
+    if (nat.pools[normName]) {
+        delete nat.pools[normName];
+        if (Array.isArray(nat.dynamicRules)) {
+            nat.dynamicRules = nat.dynamicRules.filter(r => r.poolName !== normName);
+        }
+        if (Array.isArray(nat.translations)) {
+            nat.translations = nat.translations.filter(t => t.poolName !== normName);
+            if (nat.stats) {
+                nat.stats.activeTranslations = nat.translations.filter(t => t.state === 'active').length;
+            }
+        }
+    }
+
+    return { success: true };
+}
+
+function allocateNatPoolAddress(deviceOrId, poolName, insideLocal) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+
+    const pool = getNatPool(dev.id, poolName);
+    if (!pool) {
+        return { success: false, reason: `NAT pool "${poolName}" not found.` };
+    }
+
+    const normLocal = String(insideLocal || '').trim();
+    if (pool.allocated[normLocal]) {
+        return { success: true, insideGlobal: pool.allocated[normLocal], reused: true };
+    }
+
+    const nat = getRouterNatState(dev.id);
+    const staticGlobals = Array.isArray(nat?.staticRules) ? nat.staticRules.map(r => r.insideGlobal) : [];
+    const allocatedGlobals = Object.values(pool.allocated);
+
+    const available = pool.addresses.find(addr => !allocatedGlobals.includes(addr) && !staticGlobals.includes(addr));
+    if (!available) {
+        return { success: false, reason: 'POOL_EXHAUSTED' };
+    }
+
+    pool.allocated[normLocal] = available;
+    return { success: true, insideGlobal: available, reused: false };
+}
+
+function releaseNatPoolAddress(deviceOrId, poolName, insideGlobalOrLocal) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+
+    const pool = getNatPool(dev.id, poolName);
+    if (!pool || !pool.allocated) {
+        return { success: true };
+    }
+
+    const target = String(insideGlobalOrLocal || '').trim();
+    if (pool.allocated[target]) {
+        delete pool.allocated[target];
+        return { success: true };
+    }
+
+    for (const [loc, glob] of Object.entries(pool.allocated)) {
+        if (glob === target) {
+            delete pool.allocated[loc];
+            return { success: true };
+        }
+    }
+
+    return { success: true };
+}
+
+function getDynamicNatRules(deviceOrId) {
+    const nat = getRouterNatState(deviceOrId);
+    if (!nat || !Array.isArray(nat.dynamicRules)) {
+        return [];
+    }
+    return nat.dynamicRules;
+}
+
+function addDynamicNatRule(deviceOrId, aclName, poolName) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+
+    const normAcl = String(aclName || '').trim();
+    const normPool = String(poolName || '').trim();
+
+    if (!normAcl) {
+        return { success: false, reason: 'ACL name is required.' };
+    }
+    if (!normPool) {
+        return { success: false, reason: 'Pool name is required.' };
+    }
+
+    const acl = getRouterAcl(dev.id, normAcl);
+    if (!acl) {
+        return { success: false, reason: `ACL "${normAcl}" does not exist on router ${dev.name}.` };
+    }
+
+    const pool = getNatPool(dev.id, normPool);
+    if (!pool) {
+        return { success: false, reason: `NAT pool "${normPool}" does not exist on router ${dev.name}.` };
+    }
+
+    const nat = getRouterNatState(dev.id);
+    if (!nat) {
+        return { success: false, reason: 'NAT state unavailable.' };
+    }
+    if (!Array.isArray(nat.dynamicRules)) {
+        nat.dynamicRules = [];
+    }
+
+    const existingExact = nat.dynamicRules.find(r => r.aclName === normAcl && r.poolName === normPool);
+    if (existingExact) {
+        return { success: true, rule: existingExact, duplicate: true };
+    }
+
+    const rule = {
+        id: `dynamic-${normAcl}-${normPool}`,
+        aclName: normAcl,
+        poolName: normPool,
+        enabled: true
+    };
+
+    nat.dynamicRules.push(rule);
+    return { success: true, rule };
+}
+
+function removeDynamicNatRule(deviceOrId, aclName, poolName) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+
+    const normAcl = String(aclName || '').trim();
+    const normPool = String(poolName || '').trim();
+
+    const nat = getRouterNatState(dev.id);
+    if (!nat || !Array.isArray(nat.dynamicRules)) {
+        return { success: true };
+    }
+
+    nat.dynamicRules = nat.dynamicRules.filter(r => !(r.aclName === normAcl && r.poolName === normPool));
+    return { success: true };
+}
+
+function findDynamicNatRuleForPacket(deviceOrId, packet) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return null;
+    }
+
+    const rules = getDynamicNatRules(dev.id);
+    if (!rules.length || !packet) return null;
+
+    for (const rule of rules) {
+        if (rule.enabled === false) continue;
+        const acl = getRouterAcl(dev.id, rule.aclName);
+        if (!acl) continue;
+
+        const evalRes = evaluatePacketAcl(acl, packet);
+        if (evalRes && evalRes.action === 'permit') {
+            return rule;
+        }
+    }
+
+    return null;
+}
+
+function getDynamicNatTranslations(deviceOrId) {
+    const nat = getRouterNatState(deviceOrId);
+    if (!nat || !Array.isArray(nat.translations)) {
+        return [];
+    }
+    return nat.translations;
+}
+
+function findDynamicNatTranslationByInsideLocal(deviceOrId, ip) {
+    const translations = getDynamicNatTranslations(deviceOrId);
+    if (!ip || !translations.length) return null;
+    const normIp = String(ip).trim();
+    return translations.find(t => t && t.insideLocal === normIp && t.state === 'active') || null;
+}
+
+function findDynamicNatTranslationByInsideGlobal(deviceOrId, ip) {
+    const translations = getDynamicNatTranslations(deviceOrId);
+    if (!ip || !translations.length) return null;
+    const normIp = String(ip).trim();
+    return translations.find(t => t && t.insideGlobal === normIp && t.state === 'active') || null;
+}
+
+function createDynamicNatTranslation(deviceOrId, poolName, dynamicRuleId, insideLocal, insideGlobal) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return null;
+    }
+
+    const nat = getRouterNatState(dev.id);
+    if (!nat) return null;
+    if (!Array.isArray(nat.translations)) nat.translations = [];
+
+    const normLocal = String(insideLocal || '').trim();
+    const normGlobal = String(insideGlobal || '').trim();
+
+    const existing = nat.translations.find(t => t.insideLocal === normLocal && t.state === 'active');
+    if (existing) {
+        return existing;
+    }
+
+    const trans = {
+        id: `trans-${normLocal}-${normGlobal}`,
+        insideLocal: normLocal,
+        insideGlobal: normGlobal,
+        poolName: String(poolName).trim(),
+        dynamicRuleId: String(dynamicRuleId || '').trim(),
+        state: 'active'
+    };
+
+    nat.translations.push(trans);
+    if (nat.stats) {
+        nat.stats.activeTranslations = nat.translations.filter(t => t.state === 'active').length;
+    }
+
+    return trans;
+}
+
+function removeDynamicNatTranslation(deviceOrId, insideLocalOrGlobal) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+
+    const nat = getRouterNatState(dev.id);
+    if (!nat || !Array.isArray(nat.translations)) {
+        return { success: true };
+    }
+
+    const target = String(insideLocalOrGlobal || '').trim();
+    const trans = nat.translations.find(t => (t.insideLocal === target || t.insideGlobal === target) && t.state === 'active');
+    if (trans) {
+        trans.state = 'released';
+        if (trans.poolName) {
+            releaseNatPoolAddress(dev.id, trans.poolName, trans.insideGlobal);
+        }
+        nat.translations = nat.translations.filter(t => t.id !== trans.id);
+        if (nat.stats) {
+            nat.stats.activeTranslations = nat.translations.filter(t => t.state === 'active').length;
+        }
+    }
+
+    return { success: true };
+}
+
 function parseAclAddressSpec(rawIp, rawMaskOrWildcard) {
     const ipStr = String(rawIp || '').trim();
     if (!ipStr || ipStr.toLowerCase() === 'any') {
@@ -9008,7 +9352,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                 }
             }
 
-            // Inbound Static NAT (Outside -> Inside)
+            // Inbound NAT (Outside -> Inside): Static NAT first, then Dynamic NAT reverse lookup
             let originalDestinationIp = frame.packet.destinationIp;
             if (activeIngressIfaceName && isNatOutsideInterface(toDevice.id, activeIngressIfaceName)) {
                 const staticRule = findStaticNatRuleByInsideGlobal(toDevice.id, frame.packet.destinationIp);
@@ -9029,6 +9373,30 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                             const natState = getRouterNatState(toDevice.id);
                             if (natState?.stats) {
                                 natState.stats.hits = (natState.stats.hits || 0) + 1;
+                            }
+                        }
+                    }
+                } else {
+                    const dynTrans = findDynamicNatTranslationByInsideGlobal(toDevice.id, frame.packet.destinationIp);
+                    if (dynTrans) {
+                        const specRouteResult = lookupRoute(toDevice.id, dynTrans.insideLocal);
+                        if (specRouteResult.success && specRouteResult.route) {
+                            const specNextHop = resolveRouteNextHop(toDevice.id, specRouteResult.route, dynTrans.insideLocal);
+                            if (specNextHop.success && specNextHop.egressInterface && isNatInsideInterface(toDevice.id, specNextHop.egressInterface)) {
+                                frame.packet.destinationIp = dynTrans.insideLocal;
+                                frame.packet.nat = {
+                                    translated: true,
+                                    direction: 'outside-to-inside',
+                                    type: 'dynamic',
+                                    originalDestinationIp,
+                                    translatedDestinationIp: dynTrans.insideLocal,
+                                    poolName: dynTrans.poolName
+                                };
+                                frame.events.push(`Router ${toDevice.name} applied Dynamic NAT (outside -> inside): destination IP ${originalDestinationIp} -> ${dynTrans.insideLocal} (pool ${dynTrans.poolName})`);
+                                const natState = getRouterNatState(toDevice.id);
+                                if (natState?.stats) {
+                                    natState.stats.hits = (natState.stats.hits || 0) + 1;
+                                }
                             }
                         }
                     }
@@ -9206,7 +9574,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                 }
             }
 
-            // Outbound Static NAT (Inside -> Outside)
+            // Outbound NAT (Inside -> Outside): Static NAT first, then Dynamic NAT
             if (activeIngressIfaceName && egressPort && isNatInsideInterface(toDevice.id, activeIngressIfaceName) && isNatOutsideInterface(toDevice.id, egressPort)) {
                 const staticRule = findStaticNatRuleByInsideLocal(toDevice.id, frame.packet.sourceIp);
                 if (staticRule) {
@@ -9223,6 +9591,40 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     const natState = getRouterNatState(toDevice.id);
                     if (natState?.stats) {
                         natState.stats.hits = (natState.stats.hits || 0) + 1;
+                    }
+                } else {
+                    const dynRule = findDynamicNatRuleForPacket(toDevice.id, frame.packet);
+                    if (dynRule) {
+                        const originalSourceIp = frame.packet.sourceIp;
+                        let trans = findDynamicNatTranslationByInsideLocal(toDevice.id, originalSourceIp);
+                        if (!trans) {
+                            const allocRes = allocateNatPoolAddress(toDevice.id, dynRule.poolName, originalSourceIp);
+                            if (allocRes.success) {
+                                trans = createDynamicNatTranslation(toDevice.id, dynRule.poolName, dynRule.id, originalSourceIp, allocRes.insideGlobal);
+                            } else {
+                                const natState = getRouterNatState(toDevice.id);
+                                if (natState?.stats) {
+                                    natState.stats.misses = (natState.stats.misses || 0) + 1;
+                                }
+                                frame.events.push(`Router ${toDevice.name} dynamic NAT pool "${dynRule.poolName}" exhausted for source ${originalSourceIp}`);
+                            }
+                        }
+                        if (trans) {
+                            frame.packet.sourceIp = trans.insideGlobal;
+                            frame.packet.nat = {
+                                translated: true,
+                                direction: 'inside-to-outside',
+                                type: 'dynamic',
+                                originalSourceIp,
+                                translatedSourceIp: trans.insideGlobal,
+                                poolName: trans.poolName
+                            };
+                            frame.events.push(`Router ${toDevice.name} applied Dynamic NAT (inside -> outside): source IP ${originalSourceIp} -> ${trans.insideGlobal} (pool ${trans.poolName})`);
+                            const natState = getRouterNatState(toDevice.id);
+                            if (natState?.stats) {
+                                natState.stats.hits = (natState.stats.hits || 0) + 1;
+                            }
+                        }
                     }
                 }
             }
@@ -12100,6 +12502,29 @@ function findDeviceByIp(ip) {
         }
     }
 
+    // Check if IP is an insideGlobal address of an active Dynamic NAT translation on any router
+    for (const dev of (networkState.devices || [])) {
+        if (dev.type === 'router') {
+            const trans = findDynamicNatTranslationByInsideGlobal(dev.id, targetIp);
+            if (trans && trans.insideLocal) {
+                const targetHostMatch = findDeviceByIp(trans.insideLocal);
+                if (targetHostMatch) {
+                    return {
+                        device: targetHostMatch.device,
+                        interfaceName: targetHostMatch.interfaceName,
+                        ip: targetIp,
+                        subnetMask: targetHostMatch.subnetMask,
+                        mac: targetHostMatch.mac,
+                        status: targetHostMatch.status,
+                        isDynamicNatTarget: true,
+                        natRouter: dev,
+                        insideLocalIp: trans.insideLocal
+                    };
+                }
+            }
+        }
+    }
+
     return null;
 }
 
@@ -12696,6 +13121,10 @@ function executeCliCommand(deviceId, rawInput) {
   ip dhcp excluded-address <low> [high] - Configure excluded IP addresses
   ip nat inside source static <local> <global> - Configure 1:1 Static NAT rule
   no ip nat inside source static <local> <global> - Remove 1:1 Static NAT rule
+  ip nat pool <name> <start> <end> netmask <mask> - Configure Dynamic NAT address pool
+  no ip nat pool <name>                           - Remove Dynamic NAT address pool
+  ip nat inside source list <acl> pool <pool>     - Configure Dynamic NAT rule
+  no ip nat inside source list <acl> pool <pool>  - Remove Dynamic NAT rule
   exit                          - Return to Privileged EXEC mode
   end                           - Return to Privileged EXEC mode
   do <command>                  - Execute an operational command
@@ -14583,12 +15012,58 @@ function executeCliCommand(deviceId, rawInput) {
                 };
             }
 
-            // Global Config Mode: no ip nat inside source static <local-ip> <global-ip>
+            // Global Config Mode: no ip nat pool <name>
+            if (tokens[3] === 'pool') {
+                if (session.mode !== 'config') {
+                    return {
+                        success: false,
+                        output: '% "no ip nat pool" must be executed in global configuration mode.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                const poolName = (rawTokens[4] || tokens[4] || '').trim();
+                if (!poolName) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: no ip nat pool <name>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (tokens.length > 5) {
+                    return {
+                        success: false,
+                        output: '% Too many parameters: no ip nat pool <name>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                removeNatPool(dev, poolName);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+
+            // Global Config Mode: no ip nat inside source static <local-ip> <global-ip> OR no ip nat inside source list <acl-name> pool <pool-name>
             if (tokens[3] === 'inside' && tokens[4] === 'source') {
                 if (session.mode !== 'config') {
                     return {
                         success: false,
-                        output: '% "no ip nat inside source static" must be executed in global configuration mode.',
+                        output: '% "no ip nat inside source" must be executed in global configuration mode.',
                         clear: false,
                         status: 'error',
                         command,
@@ -14599,7 +15074,7 @@ function executeCliCommand(deviceId, rawInput) {
                 if (!natType) {
                     return {
                         success: false,
-                        output: '% Incomplete command: no ip nat inside source static <local-ip> <global-ip>',
+                        output: '% Incomplete command: no ip nat inside source [static|list] ...',
                         clear: false,
                         status: 'error',
                         command,
@@ -14650,10 +15125,45 @@ function executeCliCommand(deviceId, rawInput) {
                         command,
                         device: dev
                     };
+                } else if (natType === 'list') {
+                    const aclName = (rawTokens[6] || tokens[6] || '').trim();
+                    const poolKw = (tokens[7] || '').toLowerCase().trim();
+                    const poolName = (rawTokens[8] || tokens[8] || '').trim();
+                    if (!aclName || poolKw !== 'pool' || !poolName) {
+                        return {
+                            success: false,
+                            output: '% Incomplete or invalid command: no ip nat inside source list <acl-name> pool <pool-name>',
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    if (tokens.length > 9) {
+                        return {
+                            success: false,
+                            output: '% Too many parameters: no ip nat inside source list <acl-name> pool <pool-name>',
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    pushHistory();
+                    removeDynamicNatRule(dev, aclName, poolName);
+                    render();
+                    return {
+                        success: true,
+                        output: '',
+                        clear: false,
+                        status: 'success',
+                        command,
+                        device: dev
+                    };
                 } else {
                     return {
                         success: false,
-                        output: `% Invalid or unsupported command: "no ip nat inside source ${tokens[5]}". Available: "no ip nat inside source static <local-ip> <global-ip>".`,
+                        output: `% Invalid or unsupported command: "no ip nat inside source ${tokens[5]}".`,
                         clear: false,
                         status: 'error',
                         command,
@@ -14662,7 +15172,7 @@ function executeCliCommand(deviceId, rawInput) {
                 }
             }
 
-            // Global Config mode when not "inside source"
+            // Global Config mode when not "inside source" or "pool"
             if (session.mode === 'config') {
                 if ((tokens[3] === 'inside' || tokens[3] === 'outside') && !tokens[4]) {
                     return {
@@ -14676,7 +15186,7 @@ function executeCliCommand(deviceId, rawInput) {
                 }
                 return {
                     success: false,
-                    output: '% Incomplete or unrecognized command: no ip nat inside source static <local-ip> <global-ip>',
+                    output: '% Incomplete or unrecognized command: no ip nat [inside source ... | pool <name>]',
                     clear: false,
                     status: 'error',
                     command,
@@ -15212,12 +15722,103 @@ function executeCliCommand(deviceId, rawInput) {
                 };
             }
 
-            // Global Config Mode: ip nat inside source static <local-ip> <global-ip>
+            // Global Config Mode: ip nat pool <name> <start-ip> <end-ip> netmask <netmask>
+            if (tokens[2] === 'pool') {
+                if (session.mode !== 'config') {
+                    return {
+                        success: false,
+                        output: '% "ip nat pool" must be executed in global configuration mode.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                const poolName = (rawTokens[3] || tokens[3] || '').trim();
+                const startIp = (tokens[4] || '').trim();
+                const endIp = (tokens[5] || '').trim();
+                const netmaskKw = (tokens[6] || '').toLowerCase().trim();
+                const netmask = (tokens[7] || '').trim();
+
+                if (!poolName || !startIp || !endIp || !netmaskKw || !netmask) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: ip nat pool <name> <start-ip> <end-ip> netmask <netmask>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (netmaskKw !== 'netmask') {
+                    return {
+                        success: false,
+                        output: '% Expected "netmask" keyword in ip nat pool command: ip nat pool <name> <start-ip> <end-ip> netmask <netmask>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (tokens.length > 8) {
+                    return {
+                        success: false,
+                        output: '% Too many parameters: ip nat pool <name> <start-ip> <end-ip> netmask <netmask>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (!isValidIPv4(startIp) || !isValidIPv4(endIp)) {
+                    return {
+                        success: false,
+                        output: '% Invalid IPv4 address in pool command.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (!isValidSubnetMask(netmask)) {
+                    return {
+                        success: false,
+                        output: '% Invalid netmask in pool command.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                const res = addNatPool(dev, poolName, startIp, endIp, netmask);
+                if (!res.success) {
+                    return {
+                        success: false,
+                        output: `% ${res.reason}`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+
+            // Global Config Mode: ip nat inside source static <local-ip> <global-ip> OR ip nat inside source list <acl-name> pool <pool-name>
             if (tokens[2] === 'inside' && tokens[3] === 'source') {
                 if (session.mode !== 'config') {
                     return {
                         success: false,
-                        output: '% "ip nat inside source static" must be executed in global configuration mode.',
+                        output: '% "ip nat inside source" must be executed in global configuration mode.',
                         clear: false,
                         status: 'error',
                         command,
@@ -15228,7 +15829,7 @@ function executeCliCommand(deviceId, rawInput) {
                 if (!natType) {
                     return {
                         success: false,
-                        output: '% Incomplete command: ip nat inside source static <local-ip> <global-ip>',
+                        output: '% Incomplete command: ip nat inside source [static|list] ...',
                         clear: false,
                         status: 'error',
                         command,
@@ -15289,19 +15890,65 @@ function executeCliCommand(deviceId, rawInput) {
                         command,
                         device: dev
                     };
-                } else if (natType === 'list' || natType === 'pool' || natType === 'dynamic') {
+                } else if (natType === 'list') {
+                    const aclName = (rawTokens[5] || tokens[5] || '').trim();
+                    const poolKw = (tokens[6] || '').toLowerCase().trim();
+                    const poolName = (rawTokens[7] || tokens[7] || '').trim();
+                    if (!aclName || !poolKw || !poolName) {
+                        return {
+                            success: false,
+                            output: '% Incomplete command: ip nat inside source list <acl-name> pool <pool-name>',
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    if (poolKw !== 'pool') {
+                        return {
+                            success: false,
+                            output: '% Expected "pool" keyword in dynamic NAT command: ip nat inside source list <acl-name> pool <pool-name>',
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    if (tokens.length > 8) {
+                        return {
+                            success: false,
+                            output: '% Too many parameters: ip nat inside source list <acl-name> pool <pool-name>',
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    pushHistory();
+                    const res = addDynamicNatRule(dev, aclName, poolName);
+                    if (!res.success) {
+                        return {
+                            success: false,
+                            output: `% ${res.reason}`,
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    render();
                     return {
-                        success: false,
-                        output: '% Dynamic NAT is not supported in this version.',
+                        success: true,
+                        output: '',
                         clear: false,
-                        status: 'error',
+                        status: 'success',
                         command,
                         device: dev
                     };
                 } else {
                     return {
                         success: false,
-                        output: `% Invalid or unsupported command: "ip nat inside source ${tokens[4]}". Available: "ip nat inside source static <local-ip> <global-ip>".`,
+                        output: `% Invalid or unsupported command: "ip nat inside source ${tokens[4]}". Available: "ip nat inside source static <local-ip> <global-ip>" or "ip nat inside source list <acl-name> pool <pool-name>".`,
                         clear: false,
                         status: 'error',
                         command,
@@ -15310,7 +15957,7 @@ function executeCliCommand(deviceId, rawInput) {
                 }
             }
 
-            // Global Config mode when not "inside source"
+            // Global Config mode when not "inside source" or "pool"
             if (session.mode === 'config') {
                 if (tokens[2] === 'inside' && !tokens[3]) {
                     return {
@@ -15344,7 +15991,7 @@ function executeCliCommand(deviceId, rawInput) {
                 }
                 return {
                     success: false,
-                    output: '% Incomplete or unrecognized command: ip nat inside source static <local-ip> <global-ip>',
+                    output: '% Incomplete or unrecognized command: ip nat [inside source ... | pool ...]',
                     clear: false,
                     status: 'error',
                     command,
