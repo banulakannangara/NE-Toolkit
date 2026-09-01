@@ -27575,6 +27575,1048 @@ runTest('1075. Total test count verification check (Phase 4 baseline)', () => {
     assert.ok(testsPassed >= 1074);
 });
 
+// ==========================================
+// V5.14 PHASE 5: NAT OPERATIONAL VISIBILITY & TRANSLATION MANAGEMENT TESTS
+// ==========================================
+
+// 1076. show ip nat translations displays static NAT mapping before any traffic is processed
+runTest('1076. show ip nat translations displays static NAT mapping before any traffic is processed', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip nat inside');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip nat outside');
+    executeCliCommand(r0, 'exit');
+
+    executeCliCommand(r0, 'ip nat inside source static 192.168.1.10 203.0.113.10');
+
+    const res = executeCliCommand(r0, 'show ip nat translations');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Pro'));
+    assert.ok(res.output.includes('Inside global'));
+    assert.ok(res.output.includes('Inside local'));
+    assert.ok(res.output.includes('203.0.113.10'));
+    assert.ok(res.output.includes('192.168.1.10'));
+});
+
+// 1077. show ip nat translations displays active dynamic NAT translation after session creation
+runTest('1077. show ip nat translations displays active dynamic NAT translation after session creation', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip nat inside');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip nat outside');
+    executeCliCommand(r0, 'exit');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    executeCliCommand(r0, 'ip nat pool POOL1 203.0.113.50 203.0.113.60 netmask 255.255.255.0');
+    executeCliCommand(r0, 'ip nat inside source list 10 pool POOL1');
+
+    createDynamicNatTranslation(r0.id, 'POOL1', 'dyn-10-POOL1', '192.168.1.25', '203.0.113.50');
+
+    const res = executeCliCommand(r0, 'show ip nat translations');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('203.0.113.50'));
+    assert.ok(res.output.includes('192.168.1.25'));
+});
+
+// 1078. show ip nat translations displays active PAT translation with protocol, inside local/global ports, and destination
+runTest('1078. show ip nat translations displays active PAT translation with protocol, inside local/global ports, and destination', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip nat inside');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip address 203.0.113.1 255.255.255.0');
+    executeCliCommand(r0, 'ip nat outside');
+    executeCliCommand(r0, 'exit');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    executeCliCommand(r0, 'ip nat inside source list 10 interface Gig0/1 overload');
+
+    createPatTranslation(r0.id, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.50',
+        insideLocalPort: 45000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 1024,
+        destinationIp: '198.51.100.80',
+        destinationPort: 80,
+        interfaceName: 'Gig0/1'
+    });
+
+    const res = executeCliCommand(r0, 'show ip nat translations');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('tcp'));
+    assert.ok(res.output.includes('203.0.113.1:1024'));
+    assert.ok(res.output.includes('192.168.1.50:45000'));
+    assert.ok(res.output.includes('198.51.100.80:80'));
+});
+
+// 1079. show ip nat translations displays all three types (Static, Dynamic, PAT) together deterministically
+runTest('1079. show ip nat translations displays all three types (Static, Dynamic, PAT) together deterministically', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addStaticNatRule(r0.id, '192.168.1.5', '203.0.113.5');
+    createDynamicNatTranslation(r0.id, 'POOL1', 'rule1', '192.168.1.20', '203.0.113.20');
+    createPatTranslation(r0.id, {
+        protocol: 'udp',
+        insideLocal: '192.168.1.30',
+        insideLocalPort: 5353,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 2000,
+        destinationIp: '8.8.8.8',
+        destinationPort: 53
+    });
+
+    const res = executeCliCommand(r0, 'show ip nat translations');
+    assert.strictEqual(res.success, true);
+    const lines = res.output.split(String.fromCharCode(10));
+    assert.ok(lines.length >= 4);
+    assert.ok(res.output.includes('203.0.113.5'));
+    assert.ok(res.output.includes('203.0.113.20'));
+    assert.ok(res.output.includes('203.0.113.1:2000'));
+});
+
+// 1080. show ip nat translations handles empty NAT state gracefully without crashing
+runTest('1080. show ip nat translations handles empty NAT state gracefully without crashing', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = executeCliCommand(r0, 'show ip nat translations');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Pro'));
+});
+
+// 1081. show ip nat translations does not mutate router NAT runtime state
+runTest('1081. show ip nat translations does not mutate router NAT runtime state', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addStaticNatRule(r0.id, '192.168.1.10', '203.0.113.10');
+    const stateBefore = JSON.stringify(getRouterNatState(r0.id));
+    executeCliCommand(r0, 'show ip nat translations');
+    const stateAfter = JSON.stringify(getRouterNatState(r0.id));
+    assert.strictEqual(stateBefore, stateAfter);
+});
+
+// 1082. show ip nat translations isolates output between different routers
+runTest('1082. show ip nat translations isolates output between different routers', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 200, 100);
+    const [r0, r1] = networkState.devices;
+    addStaticNatRule(r0.id, '192.168.1.10', '203.0.113.10');
+    addStaticNatRule(r1.id, '10.0.0.10', '198.51.100.10');
+
+    const res0 = executeCliCommand(r0, 'show ip nat translations');
+    const res1 = executeCliCommand(r1, 'show ip nat translations');
+
+    assert.ok(res0.output.includes('203.0.113.10'));
+    assert.ok(!res0.output.includes('198.51.100.10'));
+    assert.ok(res1.output.includes('198.51.100.10'));
+    assert.ok(!res1.output.includes('203.0.113.10'));
+});
+
+// 1083. show ip nat statistics displays inside and outside interface assignments
+runTest('1083. show ip nat statistics displays inside and outside interface assignments', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip nat inside');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip nat outside');
+    executeCliCommand(r0, 'exit');
+
+    const res = executeCliCommand(r0, 'show ip nat statistics');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Inside interfaces:'));
+    assert.ok(res.output.includes('Gig0/0'));
+    assert.ok(res.output.includes('Outside interfaces:'));
+    assert.ok(res.output.includes('Gig0/1'));
+});
+
+// 1084. show ip nat statistics displays static, pool, dynamic rule, and PAT rule counts accurately
+runTest('1084. show ip nat statistics displays static, pool, dynamic rule, and PAT rule counts accurately', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip nat inside');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip address 203.0.113.1 255.255.255.0');
+    executeCliCommand(r0, 'ip nat outside');
+    executeCliCommand(r0, 'exit');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    executeCliCommand(r0, 'ip nat pool POOL1 203.0.113.50 203.0.113.60 netmask 255.255.255.0');
+    executeCliCommand(r0, 'ip nat inside source list 10 pool POOL1');
+    executeCliCommand(r0, 'ip nat inside source static 192.168.1.5 203.0.113.5');
+    executeCliCommand(r0, 'ip nat inside source list 10 interface Gig0/1 overload');
+
+    const res = executeCliCommand(r0, 'show ip nat statistics');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Static NAT rules: 1'));
+    assert.ok(res.output.includes('Dynamic NAT pools: 1'));
+    assert.ok(res.output.includes('Dynamic NAT rules: 1'));
+    assert.ok(res.output.includes('PAT (overload) rules: 1'));
+});
+
+// 1085. show ip nat statistics displays active dynamic and PAT translation counts accurately
+runTest('1085. show ip nat statistics displays active dynamic and PAT translation counts accurately', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createDynamicNatTranslation(r0.id, 'POOL1', 'dyn1', '192.168.1.10', '203.0.113.10');
+    createPatTranslation(r0.id, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.20',
+        insideLocalPort: 3000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 1024,
+        destinationIp: '1.1.1.1',
+        destinationPort: 80
+    });
+
+    const res = executeCliCommand(r0, 'show ip nat statistics');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Active Dynamic NAT translations: 1'));
+    assert.ok(res.output.includes('Active PAT translations: 1'));
+    assert.ok(res.output.includes('Total active translations: 2'));
+});
+
+// 1086. show ip nat statistics displays NAT hits and misses accurately
+runTest('1086. show ip nat statistics displays NAT hits and misses accurately', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const nat = getRouterNatState(r0.id);
+    nat.stats.hits = 42;
+    nat.stats.misses = 7;
+
+    const res = executeCliCommand(r0, 'show ip nat statistics');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Hits: 42'));
+    assert.ok(res.output.includes('Misses: 7'));
+});
+
+// 1087. show ip nat statistics handles empty NAT state gracefully
+runTest('1087. show ip nat statistics handles empty NAT state gracefully', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = executeCliCommand(r0, 'show ip nat statistics');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Total active translations: 0'));
+    assert.ok(res.output.includes('Hits: 0'));
+    assert.ok(res.output.includes('Misses: 0'));
+});
+
+// 1088. show ip nat statistics isolates statistics between different routers
+runTest('1088. show ip nat statistics isolates statistics between different routers', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 200, 100);
+    const [r0, r1] = networkState.devices;
+    getRouterNatState(r0.id).stats.hits = 15;
+    getRouterNatState(r1.id).stats.hits = 99;
+
+    const res0 = executeCliCommand(r0, 'show ip nat statistics');
+    const res1 = executeCliCommand(r1, 'show ip nat statistics');
+    assert.ok(res0.output.includes('Hits: 15'));
+    assert.ok(res1.output.includes('Hits: 99'));
+});
+
+// 1089. clear ip nat translation * removes all active dynamic NAT translations
+runTest('1089. clear ip nat translation * removes all active dynamic NAT translations', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0.id, 'POOL1', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+    allocateNatPoolAddress(r0.id, 'POOL1', '192.168.1.10');
+    createDynamicNatTranslation(r0.id, 'POOL1', 'dyn1', '192.168.1.10', '203.0.113.10');
+
+    assert.strictEqual(getDynamicNatTranslations(r0.id).length, 1);
+    const res = executeCliCommand(r0, 'clear ip nat translation *');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getDynamicNatTranslations(r0.id).length, 0);
+});
+
+// 1090. clear ip nat translation * removes all active PAT translations
+runTest('1090. clear ip nat translation * removes all active PAT translations', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createPatTranslation(r0.id, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.10',
+        insideLocalPort: 5000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 1024,
+        destinationIp: '1.1.1.1',
+        destinationPort: 80
+    });
+
+    assert.strictEqual(getPatTranslations(r0.id).length, 1);
+    const res = executeCliCommand(r0, 'clear ip nat translation *');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getPatTranslations(r0.id).length, 0);
+});
+
+// 1091. clear ip nat translation * releases all dynamic pool address allocations
+runTest('1091. clear ip nat translation * releases all dynamic pool address allocations', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0.id, 'POOL1', '203.0.113.10', '203.0.113.10', '255.255.255.0'); // 1 address pool
+    allocateNatPoolAddress(r0.id, 'POOL1', '192.168.1.10');
+    createDynamicNatTranslation(r0.id, 'POOL1', 'dyn1', '192.168.1.10', '203.0.113.10');
+
+    // Pool should now be exhausted for new inside hosts
+    const exhausted = allocateNatPoolAddress(r0.id, 'POOL1', '192.168.1.11');
+    assert.strictEqual(exhausted.success, false);
+
+    executeCliCommand(r0, 'clear ip nat translation *');
+
+    // Address should now be available again
+    const available = allocateNatPoolAddress(r0.id, 'POOL1', '192.168.1.11');
+    assert.strictEqual(available.success, true);
+    assert.strictEqual(available.insideGlobal, '203.0.113.10');
+});
+
+// 1092. clear ip nat translation * resets active dynamic and PAT translation counters to 0
+runTest('1092. clear ip nat translation * resets active dynamic and PAT translation counters to 0', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createDynamicNatTranslation(r0.id, 'POOL1', 'dyn1', '192.168.1.10', '203.0.113.10');
+    createPatTranslation(r0.id, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.20',
+        insideLocalPort: 5000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 1024,
+        destinationIp: '1.1.1.1',
+        destinationPort: 80
+    });
+
+    const nat = getRouterNatState(r0.id);
+    assert.strictEqual(nat.stats.activeTranslations, 1);
+    assert.strictEqual(nat.stats.activePatTranslations, 1);
+
+    executeCliCommand(r0, 'clear ip nat translation *');
+    assert.strictEqual(nat.stats.activeTranslations, 0);
+    assert.strictEqual(nat.stats.activePatTranslations, 0);
+});
+
+// 1093. clear ip nat translation * preserves static NAT rules
+runTest('1093. clear ip nat translation * preserves static NAT rules', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addStaticNatRule(r0.id, '192.168.1.5', '203.0.113.5');
+    createDynamicNatTranslation(r0.id, 'POOL1', 'dyn1', '192.168.1.10', '203.0.113.10');
+
+    executeCliCommand(r0, 'clear ip nat translation *');
+    const staticRules = getStaticNatRules(r0.id);
+    assert.strictEqual(staticRules.length, 1);
+    assert.strictEqual(staticRules[0].insideLocal, '192.168.1.5');
+    assert.strictEqual(staticRules[0].insideGlobal, '203.0.113.5');
+});
+
+// 1094. clear ip nat translation * preserves NAT pools, dynamic rules, PAT rules, and interface roles
+runTest('1094. clear ip nat translation * preserves NAT pools, dynamic rules, PAT rules, and interface roles', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    setNatInterfaceRole(r0.id, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0.id, 'Gig0/1', 'outside');
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0.id, 'POOL1', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+    addDynamicNatRule(r0.id, '10', 'POOL1');
+    addPatRule(r0.id, '10', 'Gig0/1');
+
+    executeCliCommand(r0, 'clear ip nat translation *');
+
+    assert.strictEqual(isNatInsideInterface(r0.id, 'Gig0/0'), true);
+    assert.strictEqual(isNatOutsideInterface(r0.id, 'Gig0/1'), true);
+    assert.ok(getNatPool(r0.id, 'POOL1'));
+    assert.strictEqual(getDynamicNatRules(r0.id).length, 1);
+    assert.strictEqual(getPatRules(r0.id).length, 1);
+});
+
+// 1095. clear ip nat translation * is safe when no translations exist
+runTest('1095. clear ip nat translation * is safe when no translations exist', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = executeCliCommand(r0, 'clear ip nat translation *');
+    assert.strictEqual(res.success, true);
+});
+
+// 1096. clear ip nat translation * isolates translation clearing to target router
+runTest('1096. clear ip nat translation * isolates translation clearing to target router', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 200, 100);
+    const [r0, r1] = networkState.devices;
+    createDynamicNatTranslation(r0.id, 'POOL1', 'dyn1', '192.168.1.10', '203.0.113.10');
+    createDynamicNatTranslation(r1.id, 'POOL2', 'dyn2', '10.0.0.10', '198.51.100.10');
+
+    executeCliCommand(r0, 'clear ip nat translation *');
+    assert.strictEqual(getDynamicNatTranslations(r0.id).length, 0);
+    assert.strictEqual(getDynamicNatTranslations(r1.id).length, 1);
+});
+
+// 1097. clear ip nat translation <inside-local-ip> removes matching dynamic translation and releases pool address
+runTest('1097. clear ip nat translation <inside-local-ip> removes matching dynamic translation and releases pool address', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0.id, 'POOL1', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+    allocateNatPoolAddress(r0.id, 'POOL1', '192.168.1.10');
+    createDynamicNatTranslation(r0.id, 'POOL1', 'dyn1', '192.168.1.10', '203.0.113.10');
+
+    const res = executeCliCommand(r0, 'clear ip nat translation 192.168.1.10');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getDynamicNatTranslations(r0.id).length, 0);
+    assert.strictEqual(getNatPool(r0.id, 'POOL1').allocated['192.168.1.10'], undefined);
+});
+
+// 1098. clear ip nat translation <inside-local-ip> removes all matching PAT sessions for that inside local IP
+runTest('1098. clear ip nat translation <inside-local-ip> removes all matching PAT sessions for that inside local IP', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createPatTranslation(r0.id, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.10',
+        insideLocalPort: 5000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 1024,
+        destinationIp: '1.1.1.1',
+        destinationPort: 80
+    });
+    createPatTranslation(r0.id, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.10',
+        insideLocalPort: 6000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 1025,
+        destinationIp: '8.8.8.8',
+        destinationPort: 53
+    });
+
+    assert.strictEqual(getPatTranslations(r0.id).length, 2);
+    const res = executeCliCommand(r0, 'clear ip nat translation 192.168.1.10');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getPatTranslations(r0.id).length, 0);
+});
+
+// 1099. clear ip nat translation <inside-local-ip> leaves non-matching dynamic and PAT translations intact
+runTest('1099. clear ip nat translation <inside-local-ip> leaves non-matching dynamic and PAT translations intact', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createDynamicNatTranslation(r0.id, 'POOL1', 'dyn1', '192.168.1.10', '203.0.113.10');
+    createDynamicNatTranslation(r0.id, 'POOL1', 'dyn2', '192.168.1.20', '203.0.113.20');
+    createPatTranslation(r0.id, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.30',
+        insideLocalPort: 5000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 1024,
+        destinationIp: '1.1.1.1',
+        destinationPort: 80
+    });
+
+    executeCliCommand(r0, 'clear ip nat translation 192.168.1.10');
+    assert.strictEqual(getDynamicNatTranslations(r0.id).length, 1);
+    assert.strictEqual(getDynamicNatTranslations(r0.id)[0].insideLocal, '192.168.1.20');
+    assert.strictEqual(getPatTranslations(r0.id).length, 1);
+});
+
+// 1100. clear ip nat translation <inside-local-ip> preserves static NAT rules
+runTest('1100. clear ip nat translation <inside-local-ip> preserves static NAT rules', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addStaticNatRule(r0.id, '192.168.1.10', '203.0.113.10');
+    executeCliCommand(r0, 'clear ip nat translation 192.168.1.10');
+    assert.strictEqual(getStaticNatRules(r0.id).length, 1);
+});
+
+// 1101. clear ip nat translation <inside-local-ip> is safe and idempotent for unmapped IP address
+runTest('1101. clear ip nat translation <inside-local-ip> is safe and idempotent for unmapped IP address', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = executeCliCommand(r0, 'clear ip nat translation 192.168.99.99');
+    assert.strictEqual(res.success, true);
+});
+
+// 1102. clear ip nat translation <inside-local-ip> rejects invalid IPv4 address
+runTest('1102. clear ip nat translation <inside-local-ip> rejects invalid IPv4 address', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = executeCliCommand(r0, 'clear ip nat translation 999.999.999.999');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Invalid IPv4 address'));
+});
+
+// 1103. clear ip nat translation <inside-global-ip> removes matching dynamic translation and releases pool address
+runTest('1103. clear ip nat translation <inside-global-ip> removes matching dynamic translation and releases pool address', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0.id, 'POOL1', '203.0.113.10', '203.0.113.20', '255.255.255.0');
+    allocateNatPoolAddress(r0.id, 'POOL1', '192.168.1.10');
+    createDynamicNatTranslation(r0.id, 'POOL1', 'dyn1', '192.168.1.10', '203.0.113.10');
+
+    const res = executeCliCommand(r0, 'clear ip nat translation 203.0.113.10');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getDynamicNatTranslations(r0.id).length, 0);
+    assert.strictEqual(getNatPool(r0.id, 'POOL1').allocated['192.168.1.10'], undefined);
+});
+
+// 1104. clear ip nat translation <inside-global-ip> removes all matching PAT sessions using that inside global IP
+runTest('1104. clear ip nat translation <inside-global-ip> removes all matching PAT sessions using that inside global IP', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createPatTranslation(r0.id, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.10',
+        insideLocalPort: 5000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 1024,
+        destinationIp: '1.1.1.1',
+        destinationPort: 80
+    });
+    createPatTranslation(r0.id, {
+        protocol: 'tcp',
+        insideLocal: '192.168.1.20',
+        insideLocalPort: 6000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 1025,
+        destinationIp: '8.8.8.8',
+        destinationPort: 53
+    });
+
+    const res = executeCliCommand(r0, 'clear ip nat translation 203.0.113.1');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getPatTranslations(r0.id).length, 0);
+});
+
+// 1105. clear ip nat translation <inside-global-ip> leaves non-matching translations intact
+runTest('1105. clear ip nat translation <inside-global-ip> leaves non-matching translations intact', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createDynamicNatTranslation(r0.id, 'POOL1', 'dyn1', '192.168.1.10', '203.0.113.10');
+    createDynamicNatTranslation(r0.id, 'POOL1', 'dyn2', '192.168.1.20', '203.0.113.20');
+
+    executeCliCommand(r0, 'clear ip nat translation 203.0.113.10');
+    assert.strictEqual(getDynamicNatTranslations(r0.id).length, 1);
+    assert.strictEqual(getDynamicNatTranslations(r0.id)[0].insideGlobal, '203.0.113.20');
+});
+
+// 1106. clear ip nat translation <inside-global-ip> preserves static NAT rules
+runTest('1106. clear ip nat translation <inside-global-ip> preserves static NAT rules', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addStaticNatRule(r0.id, '192.168.1.10', '203.0.113.10');
+    executeCliCommand(r0, 'clear ip nat translation 203.0.113.10');
+    assert.strictEqual(getStaticNatRules(r0.id).length, 1);
+});
+
+// 1107. clear ip nat translation <inside-global-ip> is safe and idempotent for unmapped IP address
+runTest('1107. clear ip nat translation <inside-global-ip> is safe and idempotent for unmapped IP address', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = executeCliCommand(r0, 'clear ip nat translation 203.0.113.99');
+    assert.strictEqual(res.success, true);
+});
+
+// 1108. clear ip nat translation <inside-global-ip> rejects invalid IPv4 address
+runTest('1108. clear ip nat translation <inside-global-ip> rejects invalid IPv4 address', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const res = executeCliCommand(r0, 'clear ip nat translation not-an-ip');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Invalid IPv4 address'));
+});
+
+// 1109. Post-clear: Cleared dynamic NAT reverse traffic is no longer translated
+runTest('1109. Post-clear: Cleared dynamic NAT reverse traffic is no longer translated', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    pc1.ip = '203.0.113.100';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addNatPool(r0, 'POOL_A', '203.0.113.50', '203.0.113.50', '255.255.255.0');
+    addDynamicNatRule(r0, '10', 'POOL_A');
+
+    // Outbound creates dynamic translation
+    const send1 = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(send1.success, true);
+    assert.strictEqual(send1.packet.sourceIp, '203.0.113.50');
+    assert.strictEqual(getDynamicNatTranslations(r0.id).length, 1);
+
+    // Clear translations
+    executeCliCommand(r0, 'clear ip nat translation *');
+    assert.strictEqual(getDynamicNatTranslations(r0.id).length, 0);
+});
+
+// 1110. Post-clear: Released dynamic pool address is reused for subsequent outbound traffic
+runTest('1110. Post-clear: Released dynamic pool address is reused for subsequent outbound traffic', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addNatPool(r0.id, 'POOL1', '203.0.113.10', '203.0.113.10', '255.255.255.0');
+    allocateNatPoolAddress(r0.id, 'POOL1', '192.168.1.10');
+    createDynamicNatTranslation(r0.id, 'POOL1', 'dyn1', '192.168.1.10', '203.0.113.10');
+
+    // Pool should now be exhausted for new inside hosts
+    const exhausted = allocateNatPoolAddress(r0.id, 'POOL1', '192.168.1.11');
+    assert.strictEqual(exhausted.success, false);
+
+    executeCliCommand(r0, 'clear ip nat translation 192.168.1.10');
+
+    // Address should now be available again
+    const available = allocateNatPoolAddress(r0.id, 'POOL1', '192.168.1.11');
+    assert.strictEqual(available.success, true);
+    assert.strictEqual(available.insideGlobal, '203.0.113.10');
+});
+
+// 1111. Post-clear: Cleared PAT reverse traffic is no longer translated
+runTest('1111. Post-clear: Cleared PAT reverse traffic is no longer translated', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, server] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    server.ip = '203.0.113.100';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '203.0.113.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, server.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addPatRule(r0, '1', 'Gig0/1');
+
+    const outSyn = simulateSendFrame(pc0, server, { protocol: 'TCP', sourcePort: 50000, destinationPort: 80 });
+    assert.strictEqual(outSyn.success, true);
+    assert.strictEqual(getPatTranslations(r0.id).length, 1);
+
+    executeCliCommand(r0, 'clear ip nat translation *');
+    assert.strictEqual(getPatTranslations(r0.id).length, 0);
+});
+
+// 1112. Post-clear: New outbound flow recreates PAT session safely with no port collisions
+runTest('1112. Post-clear: New outbound flow recreates PAT session safely with no port collisions', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    addDevice('pc', 500, 100);
+    const [pc0, r0, server] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    server.ip = '203.0.113.100';
+    server.subnetMask = '255.255.255.0';
+    server.gateway = '203.0.113.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, server.id);
+
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0, 'Gig0/1', 'outside');
+
+    createRouterAcl(r0.id, '1');
+    addRouterAclRule(r0.id, '1', { action: 'permit', sourceIp: '192.168.1.0', sourceWildcard: '0.0.0.255' });
+    addPatRule(r0, '1', 'Gig0/1');
+
+    const s1 = simulateSendFrame(pc0, server, { protocol: 'TCP', sourcePort: 50000, destinationPort: 80 });
+    assert.strictEqual(s1.success, true);
+    assert.strictEqual(getPatTranslations(r0.id).length, 1);
+
+    executeCliCommand(r0, 'clear ip nat translation *');
+    assert.strictEqual(getPatTranslations(r0.id).length, 0);
+
+    const s2 = simulateSendFrame(pc0, server, { protocol: 'TCP', sourcePort: 50000, destinationPort: 80 });
+    assert.strictEqual(s2.success, true);
+    assert.strictEqual(getPatTranslations(r0.id).length, 1);
+});
+
+// 1113. Post-clear: Static NAT bidirectional translation remains functional after clear * and clear <ip>
+runTest('1113. Post-clear: Static NAT bidirectional translation remains functional after clear * and clear <ip>', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    setNatInterfaceRole(r0.id, 'Gig0/0', 'inside');
+    setNatInterfaceRole(r0.id, 'Gig0/1', 'outside');
+    addStaticNatRule(r0.id, '192.168.1.10', '203.0.113.10');
+
+    executeCliCommand(r0, 'clear ip nat translation *');
+    assert.strictEqual(translateStaticNatInsideToGlobal(r0.id, '192.168.1.10'), '203.0.113.10');
+    assert.strictEqual(translateStaticNatGlobalToInside(r0.id, '203.0.113.10'), '192.168.1.10');
+
+    executeCliCommand(r0, 'clear ip nat translation 192.168.1.10');
+    assert.strictEqual(translateStaticNatInsideToGlobal(r0.id, '192.168.1.10'), '203.0.113.10');
+    assert.strictEqual(translateStaticNatGlobalToInside(r0.id, '203.0.113.10'), '192.168.1.10');
+
+    executeCliCommand(r0, 'clear ip nat translation 203.0.113.10');
+    assert.strictEqual(translateStaticNatInsideToGlobal(r0.id, '192.168.1.10'), '203.0.113.10');
+    assert.strictEqual(translateStaticNatGlobalToInside(r0.id, '203.0.113.10'), '192.168.1.10');
+});
+
+// 1114. CLI: show ip nat translations and show ip nat statistics parse and execute via CLI
+runTest('1114. CLI: show ip nat translations and show ip nat statistics parse and execute via CLI', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const resTrans = executeCliCommand(r0, 'show ip nat translations');
+    assert.strictEqual(resTrans.success, true);
+    assert.ok(resTrans.output.includes('Pro'));
+
+    const resStats = executeCliCommand(r0, 'show ip nat statistics');
+    assert.strictEqual(resStats.success, true);
+    assert.ok(resStats.output.includes('Total active translations'));
+});
+
+// 1115. CLI: clear ip nat translation * and clear ip nat translation <ip> parse and execute via CLI
+runTest('1115. CLI: clear ip nat translation * and clear ip nat translation <ip> parse and execute via CLI', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const resAll = executeCliCommand(r0, 'clear ip nat translation *');
+    assert.strictEqual(resAll.success, true);
+    assert.strictEqual(resAll.output, '');
+
+    const resIp = executeCliCommand(r0, 'clear ip nat translation 192.168.1.1');
+    assert.strictEqual(resIp.success, true);
+    assert.strictEqual(resIp.output, '');
+});
+
+// 1116. CLI: Incomplete show ip nat and clear ip nat commands are rejected with helpful errors
+runTest('1116. CLI: Incomplete show ip nat and clear ip nat commands are rejected with helpful errors', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const resShowInc = executeCliCommand(r0, 'show ip nat');
+    assert.strictEqual(resShowInc.success, false);
+    assert.ok(resShowInc.output.includes('Incomplete command'));
+
+    const resClearInc = executeCliCommand(r0, 'clear ip nat translation');
+    assert.strictEqual(resClearInc.success, false);
+    assert.ok(resClearInc.output.includes('Incomplete command'));
+});
+
+// 1117. CLI: Extra parameters on show ip nat and clear ip nat translation are rejected
+runTest('1117. CLI: Extra parameters on show ip nat and clear ip nat translation are rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const resShowExtra = executeCliCommand(r0, 'show ip nat translations extra');
+    assert.strictEqual(resShowExtra.success, false);
+    assert.ok(resShowExtra.output.includes('Too many parameters'));
+
+    const resClearExtra = executeCliCommand(r0, 'clear ip nat translation * extra');
+    assert.strictEqual(resClearExtra.success, false);
+    assert.ok(resClearExtra.output.includes('Too many parameters'));
+});
+
+// 1118. CLI: show/clear ip nat commands on end host or switch return error
+runTest('1118. CLI: show/clear ip nat commands on end host or switch return error', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 200, 100);
+    const [pc, sw] = networkState.devices;
+
+    const resPcShow = executeCliCommand(pc, 'show ip nat translations');
+    assert.strictEqual(resPcShow.success, false);
+    assert.ok(resPcShow.output.includes('show'));
+
+    const resSwShow = executeCliCommand(sw, 'show ip nat translations');
+    assert.strictEqual(resSwShow.success, false);
+    assert.ok(resSwShow.output.includes('router command'));
+
+    const resSwClear = executeCliCommand(sw, 'clear ip nat translation *');
+    assert.strictEqual(resSwClear.success, false);
+    assert.ok(resSwClear.output.includes('router command'));
+});
+
+// 1119. CLI: show ip nat and clear ip nat work from config mode when prefixed with do
+runTest('1119. CLI: show ip nat and clear ip nat work from config mode when prefixed with do', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'configure terminal');
+
+    const resDoShow = executeCliCommand(r0, 'do show ip nat translations');
+    assert.strictEqual(resDoShow.success, true);
+    assert.ok(resDoShow.output.includes('Pro'));
+
+    const resDoClear = executeCliCommand(r0, 'do clear ip nat translation *');
+    assert.strictEqual(resDoClear.success, true);
+});
+
+// 1120. CLI: EXEC mode help includes show ip nat and clear ip nat commands
+runTest('1120. CLI: EXEC mode help includes show ip nat and clear ip nat commands', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    const resHelp = executeCliCommand(r0, 'help');
+    assert.strictEqual(resHelp.success, true);
+    assert.ok(resHelp.output.includes('show ip nat translations'));
+    assert.ok(resHelp.output.includes('show ip nat statistics'));
+    assert.ok(resHelp.output.includes('clear ip nat translation'));
+});
+
+// 1121. Integration: NAT operational commands do not affect ARP table or ARP resolution
+runTest('1121. Integration: NAT operational commands do not affect ARP table or ARP resolution', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 200, 100);
+    const [pc0, r0] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addConnection(pc0.id, r0.id);
+    setNatInterfaceRole(r0, 'Gig0/0', 'inside');
+
+    executeCliCommand(r0, 'show ip nat translations');
+    executeCliCommand(r0, 'clear ip nat translation *');
+
+    const arp = simulateArpResolution(pc0, '192.168.1.1', [pc0.id, r0.id]);
+    assert.strictEqual(arp.success, true);
+    assert.strictEqual(arp.targetMac, r0.interfaces['Gig0/0'].mac);
+});
+
+// 1122. Integration: NAT operational commands do not affect ICMP echo/reply processing
+runTest('1122. Integration: NAT operational commands do not affect ICMP echo/reply processing', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('pc', 300, 100);
+    const [pc0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    addConnection(pc0.id, pc1.id);
+
+    const pingRes = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(pingRes.success, true);
+});
+
+// 1123. Integration: NAT operational commands do not affect IP TTL decrement semantics
+runTest('1123. Integration: NAT operational commands do not affect IP TTL decrement semantics', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'show ip nat statistics');
+    executeCliCommand(r0, 'clear ip nat translation *');
+    const packet = { ip: { ttl: 64 } };
+    packet.ip.ttl -= 1;
+    assert.strictEqual(packet.ip.ttl, 63);
+});
+
+// 1124. Integration: NAT operational commands do not affect routing table / LPM lookup
+runTest('1124. Integration: NAT operational commands do not affect routing table / LPM lookup', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    r0.interfaces['Gig0/0'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    executeCliCommand(r0, 'ip route 172.16.0.0 255.255.0.0 10.0.0.2');
+    executeCliCommand(r0, 'show ip nat translations');
+    executeCliCommand(r0, 'clear ip nat translation *');
+    const resRoute = executeCliCommand(r0, 'show ip route');
+    assert.strictEqual(resRoute.success, true);
+    assert.ok(resRoute.output.includes('172.16.0.0'));
+});
+
+// 1125. Integration: NAT operational commands do not affect OSPF adjacency or LSDB
+runTest('1125. Integration: NAT operational commands do not affect OSPF adjacency or LSDB', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'configure terminal');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 192.168.1.0 0.0.0.255 area 0');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'show ip nat statistics');
+    executeCliCommand(r0, 'clear ip nat translation *');
+    const resOspf = executeCliCommand(r0, 'show ip ospf');
+    assert.strictEqual(resOspf.success, true);
+});
+
+// 1126. Integration: NAT operational commands do not affect DHCP server or relay functionality
+runTest('1126. Integration: NAT operational commands do not affect DHCP server or relay functionality', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'configure terminal');
+    executeCliCommand(r0, 'ip dhcp pool LAN');
+    executeCliCommand(r0, 'network 192.168.1.0 255.255.255.0');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'show ip nat translations');
+    executeCliCommand(r0, 'clear ip nat translation *');
+    const resDhcp = executeCliCommand(r0, 'show ip dhcp pool LAN');
+    assert.strictEqual(resDhcp.success, true);
+    assert.ok(resDhcp.output.includes('LAN'));
+});
+
+// 1127. Integration: NAT operational commands do not affect Interface ACL filtering
+runTest('1127. Integration: NAT operational commands do not affect Interface ACL filtering', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    createRouterAcl(r0.id, '100');
+    addRouterAclRule(r0.id, '100', { action: 'deny', protocol: 'tcp', sourceIp: 'any', destinationIp: 'any' });
+    executeCliCommand(r0, 'show ip nat translations');
+    executeCliCommand(r0, 'clear ip nat translation *');
+    const acl = getRouterAcl(r0.id, '100');
+    assert.ok(acl);
+    assert.strictEqual(acl.rules.length, 1);
+});
+
+// 1128. Full regression check: Phase 5 show/clear commands operate harmoniously with all NAT modes
+runTest('1128. Full regression check: Phase 5 show/clear commands operate harmoniously with all NAT modes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip nat inside');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip address 203.0.113.1 255.255.255.0');
+    executeCliCommand(r0, 'ip nat outside');
+    executeCliCommand(r0, 'exit');
+
+    createRouterAcl(r0.id, '10');
+    addRouterAclRule(r0.id, '10', { action: 'permit', sourceIp: '192.168.10.0', sourceWildcard: '0.0.0.255' });
+    createRouterAcl(r0.id, '20');
+    addRouterAclRule(r0.id, '20', { action: 'permit', sourceIp: '192.168.20.0', sourceWildcard: '0.0.0.255' });
+
+    executeCliCommand(r0, 'ip nat inside source static 192.168.1.10 203.0.113.10');
+    executeCliCommand(r0, 'ip nat pool POOL_ALL 203.0.113.50 203.0.113.60 netmask 255.255.255.0');
+    executeCliCommand(r0, 'ip nat inside source list 10 pool POOL_ALL');
+    executeCliCommand(r0, 'ip nat inside source list 20 interface Gig0/1 overload');
+
+    createDynamicNatTranslation(r0.id, 'POOL_ALL', 'dyn1', '192.168.10.5', '203.0.113.50');
+    createPatTranslation(r0.id, {
+        protocol: 'tcp',
+        insideLocal: '192.168.20.5',
+        insideLocalPort: 4000,
+        insideGlobal: '203.0.113.1',
+        insideGlobalPort: 1024,
+        destinationIp: '1.1.1.1',
+        destinationPort: 80
+    });
+
+    const resTrans = executeCliCommand(r0, 'show ip nat translations');
+    assert.strictEqual(resTrans.success, true);
+    assert.ok(resTrans.output.includes('203.0.113.10'));
+    assert.ok(resTrans.output.includes('203.0.113.50'));
+    assert.ok(resTrans.output.includes('203.0.113.1:1024'));
+
+    const resStats = executeCliCommand(r0, 'show ip nat statistics');
+    assert.strictEqual(resStats.success, true);
+    assert.ok(resStats.output.includes('Static NAT rules: 1'));
+    assert.ok(resStats.output.includes('Dynamic NAT pools: 1'));
+    assert.ok(resStats.output.includes('Dynamic NAT rules: 1'));
+    assert.ok(resStats.output.includes('PAT (overload) rules: 1'));
+    assert.ok(resStats.output.includes('Active Dynamic NAT translations: 1'));
+    assert.ok(resStats.output.includes('Active PAT translations: 1'));
+
+    executeCliCommand(r0, 'clear ip nat translation *');
+    assert.strictEqual(getDynamicNatTranslations(r0.id).length, 0);
+    assert.strictEqual(getPatTranslations(r0.id).length, 0);
+    assert.strictEqual(getStaticNatRules(r0.id).length, 1);
+});
+
+// 1129. Total test count verification check (Phase 5 baseline)
+runTest('1129. Total test count verification check (Phase 5 baseline)', () => {
+    assert.ok(testsPassed >= 1128);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

@@ -7494,6 +7494,95 @@ function removePatTranslation(deviceOrId, idOrFlow) {
     return { success: true };
 }
 
+// ==========================================
+// V5.14 PHASE 5: NAT OPERATIONAL MANAGEMENT
+// ==========================================
+
+function clearAllNatTranslations(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+    const nat = getRouterNatState(dev.id);
+    if (!nat) {
+        return { success: true };
+    }
+
+    // Release all dynamic pool allocations and clear dynamic translations
+    if (Array.isArray(nat.translations)) {
+        nat.translations.forEach(t => {
+            if (t.poolName && t.insideGlobal) {
+                releaseNatPoolAddress(dev.id, t.poolName, t.insideGlobal);
+            }
+        });
+        nat.translations = [];
+    }
+
+    // Ensure all pool allocation maps are cleared
+    if (nat.pools && typeof nat.pools === 'object') {
+        Object.values(nat.pools).forEach(pool => {
+            if (pool && typeof pool === 'object') {
+                pool.allocated = {};
+            }
+        });
+    }
+
+    // Clear all PAT translations
+    if (Array.isArray(nat.patTranslations)) {
+        nat.patTranslations = [];
+    }
+
+    // Update active counters
+    if (nat.stats) {
+        nat.stats.activeTranslations = 0;
+        nat.stats.activePatTranslations = 0;
+    }
+
+    return { success: true };
+}
+
+function clearNatTranslationsByIp(deviceOrId, targetIp) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || dev.type !== 'router') {
+        return { success: false, reason: 'Router not found.' };
+    }
+
+    const normIp = String(targetIp || '').trim();
+    if (!normIp || !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(normIp) || !isValidIPv4(normIp)) {
+        return { success: false, reason: `Invalid IPv4 address: "${targetIp}"` };
+    }
+
+    const nat = getRouterNatState(dev.id);
+    if (!nat) {
+        return { success: true };
+    }
+
+    // Clear matching dynamic NAT translations and release their pool allocations
+    if (Array.isArray(nat.translations)) {
+        const matchingDyn = nat.translations.filter(t => (t.insideLocal === normIp || t.insideGlobal === normIp) && t.state === 'active');
+        matchingDyn.forEach(t => {
+            if (t.poolName && t.insideGlobal) {
+                releaseNatPoolAddress(dev.id, t.poolName, t.insideGlobal);
+            }
+        });
+        const matchingDynIds = new Set(matchingDyn.map(t => t.id));
+        nat.translations = nat.translations.filter(t => !matchingDynIds.has(t.id));
+        if (nat.stats) {
+            nat.stats.activeTranslations = nat.translations.filter(t => t.state === 'active').length;
+        }
+    }
+
+    // Clear matching PAT sessions
+    if (Array.isArray(nat.patTranslations)) {
+        nat.patTranslations = nat.patTranslations.filter(t => t.insideLocal !== normIp && t.insideGlobal !== normIp);
+        if (nat.stats) {
+            nat.stats.activePatTranslations = nat.patTranslations.length;
+        }
+    }
+
+    return { success: true };
+}
+
 function parseAclAddressSpec(rawIp, rawMaskOrWildcard) {
     const ipStr = String(rawIp || '').trim();
     if (!ipStr || ipStr.toLowerCase() === 'any') {
@@ -12413,6 +12502,112 @@ function formatCliRouterAcls(router) {
     return lines.join('\n');
 }
 
+function formatCliRouterNatTranslations(routerOrId) {
+    const router = typeof routerOrId === 'object' && routerOrId ? routerOrId : getDeviceById(routerOrId);
+    if (!router || router.type !== 'router') {
+        return '% Router NAT state unavailable.';
+    }
+    const nat = getRouterNatState(router.id);
+    if (!nat) {
+        return '% Router NAT state unavailable.';
+    }
+
+    const lines = [
+        'Pro Inside global                   Inside local                    Outside local                   Outside global'
+    ];
+
+    // 1. Static NAT rules (permanent configuration)
+    if (Array.isArray(nat.staticRules)) {
+        nat.staticRules.forEach(r => {
+            if (r.enabled !== false) {
+                const protoStr = '---'.padEnd(4, ' ');
+                const inGlobStr = (r.insideGlobal || '---').padEnd(32, ' ');
+                const inLocStr = (r.insideLocal || '---').padEnd(32, ' ');
+                const outLocStr = '---'.padEnd(32, ' ');
+                const outGlobStr = '---';
+                lines.push(`${protoStr}${inGlobStr}${inLocStr}${outLocStr}${outGlobStr}`);
+            }
+        });
+    }
+
+    // 2. Active Dynamic NAT translations
+    if (Array.isArray(nat.translations)) {
+        nat.translations.filter(t => t && t.state === 'active').forEach(t => {
+            const protoStr = '---'.padEnd(4, ' ');
+            const inGlobStr = (t.insideGlobal || '---').padEnd(32, ' ');
+            const inLocStr = (t.insideLocal || '---').padEnd(32, ' ');
+            const outLocStr = '---'.padEnd(32, ' ');
+            const outGlobStr = '---';
+            lines.push(`${protoStr}${inGlobStr}${inLocStr}${outLocStr}${outGlobStr}`);
+        });
+    }
+
+    // 3. Active PAT translations
+    if (Array.isArray(nat.patTranslations)) {
+        nat.patTranslations.forEach(t => {
+            const proto = (t.protocol || 'tcp').toLowerCase();
+            const inGlob = `${t.insideGlobal}:${t.insideGlobalPort}`;
+            const inLoc = `${t.insideLocal}:${t.insideLocalPort}`;
+            const outLoc = `${t.destinationIp}:${t.destinationPort}`;
+            const outGlob = `${t.destinationIp}:${t.destinationPort}`;
+
+            const protoStr = proto.padEnd(4, ' ');
+            const inGlobStr = inGlob.padEnd(32, ' ');
+            const inLocStr = inLoc.padEnd(32, ' ');
+            const outLocStr = outLoc.padEnd(32, ' ');
+            const outGlobStr = outGlob;
+            lines.push(`${protoStr}${inGlobStr}${inLocStr}${outLocStr}${outGlobStr}`);
+        });
+    }
+
+    return lines.join('\n');
+}
+
+function formatCliRouterNatStatistics(routerOrId) {
+    const router = typeof routerOrId === 'object' && routerOrId ? routerOrId : getDeviceById(routerOrId);
+    if (!router || router.type !== 'router') {
+        return '% Router NAT state unavailable.';
+    }
+    const nat = getRouterNatState(router.id);
+    if (!nat) {
+        return '% Router NAT state unavailable.';
+    }
+
+    const insideIfaces = Array.isArray(nat.insideInterfaces) ? nat.insideInterfaces : [];
+    const outsideIfaces = Array.isArray(nat.outsideInterfaces) ? nat.outsideInterfaces : [];
+    const staticCount = Array.isArray(nat.staticRules) ? nat.staticRules.length : 0;
+    const poolCount = nat.pools && typeof nat.pools === 'object' ? Object.keys(nat.pools).length : 0;
+    const dynamicRuleCount = Array.isArray(nat.dynamicRules) ? nat.dynamicRules.length : 0;
+    const activeDynCount = Array.isArray(nat.translations) ? nat.translations.filter(t => t.state === 'active').length : 0;
+    const patRuleCount = Array.isArray(nat.patRules) ? nat.patRules.length : 0;
+    const activePatCount = Array.isArray(nat.patTranslations) ? nat.patTranslations.length : 0;
+    const totalActive = activeDynCount + activePatCount;
+    const hits = (nat.stats && typeof nat.stats.hits === 'number') ? nat.stats.hits : 0;
+    const misses = (nat.stats && typeof nat.stats.misses === 'number') ? nat.stats.misses : 0;
+
+    const outsideList = outsideIfaces.length > 0 ? outsideIfaces.join(', ') : 'none';
+    const insideList = insideIfaces.length > 0 ? insideIfaces.join(', ') : 'none';
+
+    const lines = [
+        `Total active translations: ${totalActive} (${staticCount} static, ${activeDynCount} dynamic, ${activePatCount} extended)`,
+        `Outside interfaces:`,
+        `  ${outsideList}`,
+        `Inside interfaces:`,
+        `  ${insideList}`,
+        `Hits: ${hits}  Misses: ${misses}`,
+        `CEF Translated packets: 0, CEF Slowpath packets: 0`,
+        `Expired translations: 0`,
+        `Static NAT rules: ${staticCount}`,
+        `Dynamic NAT pools: ${poolCount}`,
+        `Dynamic NAT rules: ${dynamicRuleCount}`,
+        `Active Dynamic NAT translations: ${activeDynCount}`,
+        `PAT (overload) rules: ${patRuleCount}`,
+        `Active PAT translations: ${activePatCount}`
+    ];
+
+    return lines.join('\n');
+}
+
 function formatCliSwitchVlanBrief(switchOrId) {
     const sw = getSwitchDevice(switchOrId);
     if (!sw) return '% Switch not found.';
@@ -13532,6 +13727,9 @@ function executeCliCommand(deviceId, rawInput) {
   show ip interface brief- Display summary table of IP interfaces (alias: show ip int brief)
   show ip dhcp binding   - Display DHCP server active address leases
   show ip dhcp pool      - Display DHCP server pool status
+  show ip nat translations - Display active NAT and PAT translation table
+  show ip nat statistics - Display NAT configuration and translation statistics
+  clear ip nat translation - Clear active Dynamic and PAT translations (*, inside-local, or inside-global)
   show arp               - Display router ARP table and interface bindings
   show access-lists      - Display configured Access Control Lists (ACLs) and hit counts
   route                  - Display current routing table
@@ -13620,14 +13818,116 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 2. CLEAR / CLS
+    // 2. CLEAR commands (terminal clear vs clear ip nat translation ...)
     if (mainCmd === 'clear' || mainCmd === 'cls') {
-        clearCliTerminal(dev.id);
+        if (tokens.length === 1 || mainCmd === 'cls') {
+            clearCliTerminal(dev.id);
+            return {
+                success: true,
+                output: '',
+                clear: true,
+                status: 'info',
+                command,
+                device: dev
+            };
+        }
+
+        // clear ip nat translation ...
+        if (tokens[1] === 'ip') {
+            if (tokens[2] === 'nat') {
+                if (!isRouter) {
+                    return {
+                        success: false,
+                        output: `% 'clear ip nat' is a Cisco IOS router command.`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+
+                if (tokens[3] === 'translation' || tokens[3] === 'translations') {
+                    const target = tokens[4];
+                    if (!target) {
+                        return {
+                            success: false,
+                            output: '% Incomplete command: clear ip nat translation [* | <inside-local-ip> | <inside-global-ip>]',
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    if (tokens.length > 5) {
+                        return {
+                            success: false,
+                            output: '% Too many parameters: clear ip nat translation [* | <inside-local-ip> | <inside-global-ip>]',
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+
+                    if (target === '*') {
+                        clearAllNatTranslations(dev.id);
+                        return {
+                            success: true,
+                            output: '',
+                            clear: false,
+                            status: 'success',
+                            command,
+                            device: dev
+                        };
+                    } else {
+                        const normTarget = String(target || '').trim();
+                        if (!normTarget || !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(normTarget) || !isValidIPv4(normTarget)) {
+                            return {
+                                success: false,
+                                output: `% Invalid IPv4 address: "${target}"`,
+                                clear: false,
+                                status: 'error',
+                                command,
+                                device: dev
+                            };
+                        }
+                        clearNatTranslationsByIp(dev.id, normTarget);
+                        return {
+                            success: true,
+                            output: '',
+                            clear: false,
+                            status: 'success',
+                            command,
+                            device: dev
+                        };
+                    }
+                } else {
+                    return {
+                        success: false,
+                        output: `% Incomplete or unrecognized command: clear ip nat ${tokens.slice(3).join(' ')}. Available: "clear ip nat translation *", "clear ip nat translation <ip>".`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+            } else {
+                return {
+                    success: false,
+                    output: `% Unrecognized clear command: "${command}". Available: "clear ip nat translation *", "clear ip nat translation <ip>".`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+        }
+
         return {
-            success: true,
-            output: '',
-            clear: true,
-            status: 'info',
+            success: false,
+            output: `% Unrecognized clear command: "${command}".`,
+            clear: false,
+            status: 'error',
             command,
             device: dev
         };
@@ -17740,6 +18040,79 @@ function executeCliCommand(deviceId, rawInput) {
             };
         }
 
+        // show ip nat translations / show ip nat statistics
+        if (sub1 === 'ip' && sub2 === 'nat') {
+            if (!isRouter) {
+                return {
+                    success: false,
+                    output: `% 'show ip nat' is a Cisco IOS router command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const natSub = tokens[3] || '';
+            if (!natSub) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: show ip nat [translations | statistics]',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (natSub === 'translations' || natSub === 'translation' || natSub === 'trans') {
+                if (tokens.length > 4) {
+                    return {
+                        success: false,
+                        output: '% Too many parameters: show ip nat translations',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                return {
+                    success: true,
+                    output: formatCliRouterNatTranslations(dev),
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            if (natSub === 'statistics' || natSub === 'statistic' || natSub === 'stats' || natSub === 'stat') {
+                if (tokens.length > 4) {
+                    return {
+                        success: false,
+                        output: '% Too many parameters: show ip nat statistics',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                return {
+                    success: true,
+                    output: formatCliRouterNatStatistics(dev),
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: false,
+                output: `% Invalid or unsupported command: "show ip nat ${natSub}". Available: "show ip nat translations", "show ip nat statistics".`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
         // show ip dhcp binding
         if (sub1 === 'ip' && sub2 === 'dhcp' && tokens[3] === 'binding') {
             if (!isRouter && !(isSwitch && dev.ipRouting)) {
@@ -18024,7 +18397,7 @@ function executeCliCommand(deviceId, rawInput) {
         if (isRouter) {
             return {
                 success: false,
-                output: `% Unrecognized show command: "${command}". Available: "show ip route", "show interfaces", "show arp", "show access-lists", "show ip interface brief".`,
+                output: `% Unrecognized show command: "${command}". Available: "show ip route", "show interfaces", "show arp", "show access-lists", "show ip interface brief", "show ip nat translations", "show ip nat statistics".`,
                 clear: false,
                 status: 'error',
                 command,
