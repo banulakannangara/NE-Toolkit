@@ -4815,6 +4815,42 @@ function isValidIPv4(value) {
     });
 }
 
+function isValidStrictIPv4(value) {
+    if (typeof value !== 'string') {
+        return false;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+        return false;
+    }
+    if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(trimmed)) {
+        return false;
+    }
+    return trimmed.split('.').every((octet) => {
+        const parsed = Number(octet);
+        return Number.isInteger(parsed) && parsed >= 0 && parsed <= 255;
+    });
+}
+
+function isValidHostname(value) {
+    if (typeof value !== 'string') {
+        return false;
+    }
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.length > 253) {
+        return false;
+    }
+    if (trimmed.includes('..')) {
+        return false;
+    }
+    if (isValidStrictIPv4(trimmed)) {
+        return false;
+    }
+    const labels = trimmed.split('.');
+    const labelRegex = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/;
+    return labels.every(label => label.length >= 1 && label.length <= 63 && labelRegex.test(label));
+}
+
 function ipv4ToInteger(value) {
     if (!isValidIPv4(value)) {
         return null;
@@ -12057,7 +12093,7 @@ function formatCliIpconfigAll(device) {
     const dhcpClient = device.dhcpClient || {};
     const isDhcp = dhcpClient.enabled !== false;
     const lease = dhcpClient.lease || {};
-    const dns = device.dnsServer || lease.dnsServer || '0.0.0.0';
+    const dns = (Array.isArray(device.dnsServers) && device.dnsServers.length > 0) ? device.dnsServers.join(', ') : (device.dnsServer || lease.dnsServer || '0.0.0.0');
     const dhcpServer = dhcpClient.serverIp || lease.serverIp || lease.serverId || '0.0.0.0';
     const domainSuffix = device.domainName || lease.domainName || '';
     const obtained = lease.obtainedAt || lease.leaseStart;
@@ -13100,19 +13136,24 @@ function executeCliPing(sourceDev, targetIpArg) {
         };
     }
 
-    if (!isValidIPv4(rawTarget)) {
-        return {
-            success: false,
-            output: `Ping request could not find host ${rawTarget}. Please check the name and try again.`,
-            clear: false,
-            status: 'error'
-        };
+    let targetIp = rawTarget;
+    if (!isValidStrictIPv4(rawTarget)) {
+        const dnsRes = resolveDnsForDevice(sourceDev, rawTarget);
+        if (!dnsRes || !dnsRes.success || !dnsRes.address) {
+            return {
+                success: false,
+                output: `Ping request could not find host ${rawTarget}. Please check the name and try again.`,
+                clear: false,
+                status: 'error'
+            };
+        }
+        targetIp = dnsRes.address;
     }
 
     // Source device readiness check
     let srcEndpoint = null;
     if (sourceDev.type === 'router') {
-        const routeMatch = lookupRoute(sourceDev.id, rawTarget);
+        const routeMatch = lookupRoute(sourceDev.id, targetIp);
         if (routeMatch && routeMatch.success && routeMatch.route && routeMatch.route.interface && sourceDev.interfaces?.[routeMatch.route.interface]) {
             const iface = sourceDev.interfaces[routeMatch.route.interface];
             srcEndpoint = {
@@ -13148,7 +13189,7 @@ function executeCliPing(sourceDev, targetIpArg) {
         }
     } else if (sourceDev.type === 'switch') {
         if (sourceDev.ipRouting) {
-            const routeMatch = lookupRoute(sourceDev.id, rawTarget);
+            const routeMatch = lookupRoute(sourceDev.id, targetIp);
             if (routeMatch && routeMatch.success && routeMatch.route && routeMatch.route.interface) {
                 const vlanId = getSviVlanId(routeMatch.route.interface);
                 const svi = sourceDev.svis?.[vlanId];
@@ -13172,7 +13213,7 @@ function executeCliPing(sourceDev, targetIpArg) {
                 const vlanId = parseInt(vlanIdStr, 10);
                 if (svi && svi.ip && getEffectiveSviStatus(sourceDev, vlanId) === 'up') {
                     const normMask = normalizeSubnetMask(svi.subnetMask);
-                    if (normMask && isSameSubnet(svi.ip, rawTarget, normMask)) {
+                    if (normMask && isSameSubnet(svi.ip, targetIp, normMask)) {
                         srcEndpoint = {
                             id: sourceDev.id,
                             name: sourceDev.name,
@@ -13223,7 +13264,7 @@ function executeCliPing(sourceDev, targetIpArg) {
         };
     }
 
-    const targetMatch = findDeviceByIp(rawTarget);
+    const targetMatch = findDeviceByIp(targetIp);
     if (!targetMatch) {
         const lines = [
             `Pinging ${rawTarget}...`,
@@ -13240,6 +13281,8 @@ function executeCliPing(sourceDev, targetIpArg) {
             status: 'error'
         };
     }
+
+    const replyHost = (targetIp && isValidStrictIPv4(targetIp)) ? targetIp : rawTarget;
 
     // Local ICMP delivery: pinging an IP belonging to the source device itself
     if (targetMatch.device && targetMatch.device.id === sourceDev.id) {
@@ -13267,10 +13310,10 @@ function executeCliPing(sourceDev, targetIpArg) {
         const lines = [
             `Pinging ${rawTarget}...`,
             '',
-            `Reply from ${rawTarget}: bytes=32 TTL=64`,
-            `Reply from ${rawTarget}: bytes=32 TTL=64`,
-            `Reply from ${rawTarget}: bytes=32 TTL=64`,
-            `Reply from ${rawTarget}: bytes=32 TTL=64`,
+            `Reply from ${replyHost}: bytes=32 TTL=64`,
+            `Reply from ${replyHost}: bytes=32 TTL=64`,
+            `Reply from ${replyHost}: bytes=32 TTL=64`,
+            `Reply from ${replyHost}: bytes=32 TTL=64`,
             '',
             `Ping statistics for ${rawTarget}:`,
             '    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss)'
@@ -13315,10 +13358,10 @@ function executeCliPing(sourceDev, targetIpArg) {
         const lines = [
             `Pinging ${rawTarget}...`,
             '',
-            `Reply from ${rawTarget}: bytes=32 TTL=64`,
-            `Reply from ${rawTarget}: bytes=32 TTL=64`,
-            `Reply from ${rawTarget}: bytes=32 TTL=64`,
-            `Reply from ${rawTarget}: bytes=32 TTL=64`,
+            `Reply from ${replyHost}: bytes=32 TTL=64`,
+            `Reply from ${replyHost}: bytes=32 TTL=64`,
+            `Reply from ${replyHost}: bytes=32 TTL=64`,
+            `Reply from ${replyHost}: bytes=32 TTL=64`,
             '',
             `Ping statistics for ${rawTarget}:`,
             '    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss)'
@@ -13379,19 +13422,24 @@ function executeCliTraceroute(sourceDev, targetIpArg) {
         };
     }
 
-    if (!isValidIPv4(rawTarget)) {
-        return {
-            success: false,
-            output: `Unable to resolve target system name ${rawTarget}.`,
-            clear: false,
-            status: 'error'
-        };
+    let targetIp = rawTarget;
+    if (!isValidStrictIPv4(rawTarget)) {
+        const dnsRes = resolveDnsForDevice(sourceDev, rawTarget);
+        if (!dnsRes || !dnsRes.success || !dnsRes.address) {
+            return {
+                success: false,
+                output: `Unable to resolve target system name ${rawTarget}.`,
+                clear: false,
+                status: 'error'
+            };
+        }
+        targetIp = dnsRes.address;
     }
 
     // Source device readiness check
     let srcEndpoint = null;
     if (sourceDev.type === 'router') {
-        const routeMatch = lookupRoute(sourceDev.id, rawTarget);
+        const routeMatch = lookupRoute(sourceDev.id, targetIp);
         if (routeMatch && routeMatch.success && routeMatch.route && routeMatch.route.interface && sourceDev.interfaces?.[routeMatch.route.interface]) {
             const iface = sourceDev.interfaces[routeMatch.route.interface];
             srcEndpoint = {
@@ -13427,7 +13475,7 @@ function executeCliTraceroute(sourceDev, targetIpArg) {
         }
     } else if (sourceDev.type === 'switch') {
         if (sourceDev.ipRouting) {
-            const routeMatch = lookupRoute(sourceDev.id, rawTarget);
+            const routeMatch = lookupRoute(sourceDev.id, targetIp);
             if (routeMatch && routeMatch.success && routeMatch.route && routeMatch.route.interface) {
                 const vlanId = getSviVlanId(routeMatch.route.interface);
                 const svi = sourceDev.svis?.[vlanId];
@@ -13451,7 +13499,7 @@ function executeCliTraceroute(sourceDev, targetIpArg) {
                 const vlanId = parseInt(vlanIdStr, 10);
                 if (svi && svi.ip && getEffectiveSviStatus(sourceDev, vlanId) === 'up') {
                     const normMask = normalizeSubnetMask(svi.subnetMask);
-                    if (normMask && isSameSubnet(svi.ip, rawTarget, normMask)) {
+                    if (normMask && isSameSubnet(svi.ip, targetIp, normMask)) {
                         srcEndpoint = {
                             id: sourceDev.id,
                             name: sourceDev.name,
@@ -13502,7 +13550,7 @@ function executeCliTraceroute(sourceDev, targetIpArg) {
         };
     }
 
-    const targetMatch = findDeviceByIp(rawTarget);
+    const targetMatch = findDeviceByIp(targetIp);
     if (!targetMatch) {
         const lines = [
             `Tracing route to ${rawTarget}`,
@@ -13679,6 +13727,12 @@ function executeCliCommand(deviceId, rawInput) {
   no router ospf [process-id]   - Disable OSPF routing process
   ip dhcp pool <name>           - Configure DHCP pool (enters DHCP config mode)
   ip dhcp excluded-address <low> [high] - Configure excluded IP addresses
+  ip dns server                 - Enable local DNS server service
+  no ip dns server              - Disable local DNS server service
+  ip host <hostname> <ip>       - Configure static hostname-to-IP mapping
+  no ip host <hostname>         - Remove static hostname-to-IP mapping
+  ip name-server <ip...>        - Configure DNS server(s) for name resolution
+  no ip name-server [ip...]     - Remove DNS server(s)
   ip nat inside source static <local> <global> - Configure 1:1 Static NAT rule
   no ip nat inside source static <local> <global> - Remove 1:1 Static NAT rule
   ip nat pool <name> <start> <end> netmask <mask> - Configure Dynamic NAT address pool
@@ -13730,12 +13784,14 @@ function executeCliCommand(deviceId, rawInput) {
   show ip nat translations - Display active NAT and PAT translation table
   show ip nat statistics - Display NAT configuration and translation statistics
   clear ip nat translation - Clear active Dynamic and PAT translations (*, inside-local, or inside-global)
+  show hosts             - Display DNS status and static host mappings
   show arp               - Display router ARP table and interface bindings
   show access-lists      - Display configured Access Control Lists (ACLs) and hit counts
   route                  - Display current routing table
   ifconfig               - Display interface configuration
   ping <IP>              - Send ICMP Echo requests to test IPv4 reachability
   traceroute <IP>        - Trace packet hops to a destination IPv4 address (alias: tracert)
+  nslookup <host>        - Query DNS name server for hostname to IP mapping
   clear, cls             - Clear the terminal screen
   help, ?                - Show available commands and usage`;
             }
@@ -13764,6 +13820,12 @@ function executeCliCommand(deviceId, rawInput) {
   hostname <name>               - Set device system name
   vlan <id>                     - Configure VLAN (enters VLAN config mode)
   no vlan <id>                  - Delete a VLAN
+  ip dns server                 - Enable local DNS server service
+  no ip dns server              - Disable local DNS server service
+  ip host <hostname> <ip>       - Configure static hostname-to-IP mapping
+  no ip host <hostname>         - Remove static hostname-to-IP mapping
+  ip name-server <ip...>        - Configure DNS server(s) for name resolution
+  no ip name-server [ip...]     - Remove DNS server(s)
   interface <name>              - Enter interface configuration mode (alias: int)
   exit                          - Return to Privileged EXEC mode
   end                           - Return to Privileged EXEC mode
@@ -13790,6 +13852,8 @@ function executeCliCommand(deviceId, rawInput) {
   show interfaces               - Display switch interface status (alias: show int)
   show interfaces trunk         - Display trunk interface summary table (alias: show int trunk)
   show interfaces <port> switchport - Display detailed switchport status (alias: show int <port> switchport)
+  show hosts                    - Display DNS status and static host mappings
+  nslookup <host>               - Query DNS name server for hostname to IP mapping
   clear, cls                    - Clear the terminal screen
   help, ?                       - Show available commands and usage`;
             }
@@ -13805,6 +13869,7 @@ function executeCliCommand(deviceId, rawInput) {
   route, route print- Display current IPv4 routing table
   ping <IP>         - Send ICMP Echo requests to test IPv4 reachability
   traceroute <IP>   - Trace packet hops to a destination IPv4 address (alias: tracert)
+  nslookup <host>   - Query DNS name server for hostname to IP mapping
   clear, cls        - Clear the terminal screen
   help, ?           - Show available commands and usage`;
         }
@@ -15666,6 +15731,159 @@ function executeCliCommand(deviceId, rawInput) {
             };
         }
 
+        // no ip dns server
+        if (sub1 === 'ip' && sub2 === 'dns') {
+            if (!isRouter && !isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'no ip dns' is a Cisco IOS command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode !== 'config') {
+                return {
+                    success: false,
+                    output: '% "no ip dns server" must be executed in global configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (tokens[3] === 'server') {
+                if (tokens.length > 4) {
+                    return {
+                        success: false,
+                        output: '% Too many parameters: no ip dns server',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                disableDnsServer(dev);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: false,
+                output: '% Incomplete or unrecognized command: no ip dns server',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
+        // no ip host <hostname>
+        if (sub1 === 'ip' && sub2 === 'host') {
+            if (!isRouter && !isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'no ip host' is a Cisco IOS command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode !== 'config') {
+                return {
+                    success: false,
+                    output: '% "no ip host" must be executed in global configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const rawHost = (rawTokens[3] || '').trim();
+            if (!rawHost) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: no ip host <hostname>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (tokens.length > 5) {
+                return {
+                    success: false,
+                    output: '% Too many parameters: no ip host <hostname>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            pushHistory();
+            removeDnsRecord(dev, rawHost);
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // no ip name-server [ip1...]
+        if (sub1 === 'ip' && (sub2 === 'name-server' || sub2 === 'nameserver')) {
+            if (!isRouter && !isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'no ip name-server' is a Cisco IOS command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode !== 'config') {
+                return {
+                    success: false,
+                    output: '% "no ip name-server" must be executed in global configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const serverIps = rawTokens.slice(3).map(s => s.trim()).filter(Boolean);
+            pushHistory();
+            if (serverIps.length === 0) {
+                clearDnsServers(dev);
+            } else {
+                for (const sIp of serverIps) {
+                    removeDnsServer(dev, sIp);
+                }
+            }
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
         // no ip nat
         if (sub1 === 'ip' && sub2 === 'nat') {
             if (!isRouter) {
@@ -16429,8 +16647,190 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
-    // 13. IP ROUTING / IP DEFAULT-GATEWAY / IP ADDRESS / IP DHCP / IP HELPER-ADDRESS
+    // 13. IP ROUTING / IP DEFAULT-GATEWAY / IP ADDRESS / IP DHCP / IP HELPER-ADDRESS / IP DNS / IP HOST / IP NAME-SERVER
     if (mainCmd === 'ip') {
+        // ip dns server
+        if (tokens[1] === 'dns') {
+            if (!isRouter && !isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'ip dns' is a Cisco IOS command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode !== 'config') {
+                return {
+                    success: false,
+                    output: '% "ip dns server" must be executed in global configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (tokens[2] === 'server') {
+                if (tokens.length > 3) {
+                    return {
+                        success: false,
+                        output: '% Too many parameters: ip dns server',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                enableDnsServer(dev);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: false,
+                output: '% Incomplete or unrecognized command: ip dns server',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
+        // ip host <hostname> <ip-address>
+        if (tokens[1] === 'host') {
+            if (!isRouter && !isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'ip host' is a Cisco IOS command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode !== 'config') {
+                return {
+                    success: false,
+                    output: '% "ip host" must be executed in global configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const rawHost = (rawTokens[2] || '').trim();
+            const rawIp = (rawTokens[3] || '').trim();
+            if (!rawHost || !rawIp) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: ip host <hostname> <ip-address>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (tokens.length > 4) {
+                return {
+                    success: false,
+                    output: '% Too many parameters: ip host <hostname> <ip-address>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            pushHistory();
+            const res = addDnsRecord(dev, rawHost, rawIp);
+            if (!res.success) {
+                return {
+                    success: false,
+                    output: `% ${res.reason}`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // ip name-server <ip1> [ip2...]
+        if (tokens[1] === 'name-server' || tokens[1] === 'nameserver') {
+            if (!isRouter && !isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'ip name-server' is a Cisco IOS command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode !== 'config') {
+                return {
+                    success: false,
+                    output: '% "ip name-server" must be executed in global configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const serverIps = rawTokens.slice(2).map(s => s.trim()).filter(Boolean);
+            if (serverIps.length === 0) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: ip name-server <server-ip-1> [server-ip-2 ...]',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            for (const sIp of serverIps) {
+                if (!isValidStrictIPv4(sIp)) {
+                    return {
+                        success: false,
+                        output: `% Invalid DNS server IPv4 address: "${sIp}".`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+            }
+            pushHistory();
+            for (const sIp of serverIps) {
+                addDnsServer(dev, sIp);
+            }
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
         // ip nat
         if (tokens[1] === 'nat') {
             if (!isRouter) {
@@ -17886,6 +18286,39 @@ function executeCliCommand(deviceId, rawInput) {
         const sub1 = tokens[1] || '';
         const sub2 = tokens[2] || '';
 
+        // show hosts / show ip hosts
+        if (sub1 === 'hosts' || (sub1 === 'ip' && sub2 === 'hosts')) {
+            if (!isRouter && !isSwitch) {
+                return {
+                    success: false,
+                    output: `% 'show hosts' is a Cisco IOS command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const maxTokens = sub1 === 'ip' ? 3 : 2;
+            if (tokens.length > maxTokens) {
+                return {
+                    success: false,
+                    output: '% Too many parameters: show hosts',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: true,
+                output: formatCliShowHosts(dev),
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
         // show spanning-tree / show spanningtree / show stp
         if (sub1 === 'spanning-tree' || sub1 === 'spanningtree' || sub1 === 'stp') {
             if (!isSwitch) {
@@ -18440,6 +18873,36 @@ function executeCliCommand(deviceId, rawInput) {
         const traceRes = executeCliTraceroute(dev, targetArg);
         return {
             ...traceRes,
+            command,
+            device: dev
+        };
+    }
+
+    if (mainCmd === 'nslookup') {
+        const targetArg = rawTokens.slice(1);
+        if (targetArg.length === 0 || !targetArg[0].trim()) {
+            return {
+                success: false,
+                output: '% Incomplete command: nslookup <hostname>',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (targetArg.length > 1) {
+            return {
+                success: false,
+                output: '% Too many parameters for nslookup. Usage: nslookup <hostname>',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        const lookupRes = executeCliNslookup(dev, targetArg[0].trim());
+        return {
+            ...lookupRes,
             command,
             device: dev
         };
@@ -20162,6 +20625,900 @@ function simulateDhcpRelease(clientDeviceId, options = {}) {
         packets: [releasePacket],
         events
     };
+}
+
+// ==========================================
+// DNS V5.15 FOUNDATION & NAME RESOLUTION
+// ==========================================
+
+let dnsRecordCounter = 0;
+
+/**
+ * Ensures a device has a valid DNS server data structure.
+ */
+function ensureDeviceDnsServerState(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return null;
+
+    if (!dev.dnsServerService || typeof dev.dnsServerService !== 'object') {
+        dev.dnsServerService = {
+            enabled: false,
+            records: []
+        };
+    }
+    if (typeof dev.dnsServerService.enabled !== 'boolean') {
+        dev.dnsServerService.enabled = false;
+    }
+    if (!Array.isArray(dev.dnsServerService.records)) {
+        dev.dnsServerService.records = [];
+    }
+    return dev.dnsServerService;
+}
+
+/**
+ * Ensures a device has valid DNS client data structures.
+ */
+function ensureDeviceDnsClientState(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return null;
+
+    if (!Array.isArray(dev.dnsServers)) {
+        dev.dnsServers = [];
+        if (dev.dnsServer && isValidStrictIPv4(dev.dnsServer)) {
+            dev.dnsServers.push(dev.dnsServer.trim());
+        }
+    } else if (dev.dnsServers.length === 0 && dev.dnsServer && isValidStrictIPv4(dev.dnsServer)) {
+        dev.dnsServers.push(dev.dnsServer.trim());
+    }
+    return dev.dnsServers;
+}
+
+/**
+ * Gets all DNS records configured on a device.
+ */
+function getDnsRecords(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return [];
+    ensureDeviceDnsServerState(dev);
+    return [...dev.dnsServerService.records];
+}
+
+/**
+ * Performs a case-insensitive lookup for a single DNS record on a device.
+ */
+function getDnsRecord(deviceOrId, hostname) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return null;
+    const rawHost = String(hostname || '').trim().toLowerCase();
+    if (!rawHost) return null;
+    ensureDeviceDnsServerState(dev);
+    return dev.dnsServerService.records.find(r => r.hostname.toLowerCase() === rawHost) || null;
+}
+
+/**
+ * Adds a local DNS hostname-to-IPv4 record to a device.
+ */
+function addDnsRecord(deviceOrId, hostname, address) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) {
+        return { success: false, reason: 'Device not found.' };
+    }
+    const rawHost = typeof hostname === 'string' ? hostname.trim() : '';
+    const rawAddr = typeof address === 'string' ? address.trim() : '';
+
+    if (!rawHost) {
+        return { success: false, reason: 'Hostname cannot be empty.' };
+    }
+    if (!isValidHostname(rawHost)) {
+        return { success: false, reason: `Invalid hostname: "${rawHost}".` };
+    }
+    if (!isValidStrictIPv4(rawAddr)) {
+        return { success: false, reason: `Invalid IPv4 address: "${rawAddr}".` };
+    }
+
+    ensureDeviceDnsServerState(dev);
+    const lowerHost = rawHost.toLowerCase();
+    const existing = dev.dnsServerService.records.find(r => r.hostname.toLowerCase() === lowerHost);
+
+    if (existing) {
+        if (existing.address === rawAddr) {
+            // Same hostname + same IP = idempotent
+            return { success: true, record: existing, duplicate: true };
+        } else {
+            // Same hostname + different IP = reject
+            return {
+                success: false,
+                reason: `Conflicting DNS record: hostname "${rawHost}" already maps to IP "${existing.address}".`
+            };
+        }
+    }
+
+    dnsRecordCounter++;
+    const record = {
+        id: `dns_${dev.id}_${lowerHost.replace(/[^a-z0-9]/g, '_')}_${dnsRecordCounter}`,
+        hostname: rawHost,
+        address: rawAddr,
+        createdAt: Date.now()
+    };
+    dev.dnsServerService.records.push(record);
+    return { success: true, record };
+}
+
+/**
+ * Removes a DNS record by hostname (case-insensitive). Safe if record does not exist.
+ */
+function removeDnsRecord(deviceOrId, hostname) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) {
+        return { success: false, reason: 'Device not found.' };
+    }
+    const rawHost = typeof hostname === 'string' ? hostname.trim() : '';
+    if (!rawHost) {
+        return { success: false, reason: 'Hostname cannot be empty.' };
+    }
+    ensureDeviceDnsServerState(dev);
+    const lowerHost = rawHost.toLowerCase();
+    const initialLen = dev.dnsServerService.records.length;
+    dev.dnsServerService.records = dev.dnsServerService.records.filter(r => r.hostname.toLowerCase() !== lowerHost);
+    const removed = dev.dnsServerService.records.length < initialLen;
+    return { success: true, removed };
+}
+
+/**
+ * Enables DNS server capability on a device.
+ */
+function enableDnsServer(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return { success: false, reason: 'Device not found.' };
+    ensureDeviceDnsServerState(dev);
+    dev.dnsServerService.enabled = true;
+    return { success: true };
+}
+
+/**
+ * Disables DNS server capability on a device while preserving existing records.
+ */
+function disableDnsServer(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return { success: false, reason: 'Device not found.' };
+    ensureDeviceDnsServerState(dev);
+    dev.dnsServerService.enabled = false;
+    return { success: true };
+}
+
+/**
+ * Checks if DNS server service is enabled on a device.
+ */
+function isDnsServerEnabled(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return false;
+    ensureDeviceDnsServerState(dev);
+    return Boolean(dev.dnsServerService && dev.dnsServerService.enabled);
+}
+
+/**
+ * Resolves a hostname on a specific DNS server device.
+ */
+function resolveDnsHostname(deviceOrId, hostname) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) {
+        return { success: false, reason: 'DEVICE_NOT_FOUND' };
+    }
+    ensureDeviceDnsServerState(dev);
+    if (!dev.dnsServerService.enabled) {
+        return { success: false, reason: 'DNS_SERVICE_NOT_ENABLED' };
+    }
+    const rawHost = typeof hostname === 'string' ? hostname.trim() : '';
+    if (!rawHost || !isValidHostname(rawHost)) {
+        return { success: false, reason: 'INVALID_HOSTNAME' };
+    }
+    const record = dev.dnsServerService.records.find(r => r.hostname.toLowerCase() === rawHost.toLowerCase());
+    if (!record) {
+        return { success: false, reason: 'HOST_NOT_FOUND' };
+    }
+    return {
+        success: true,
+        hostname: record.hostname,
+        address: record.address
+    };
+}
+
+/**
+ * Client DNS configuration helpers.
+ */
+function getDnsServers(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return [];
+    ensureDeviceDnsClientState(dev);
+    return [...dev.dnsServers];
+}
+
+function addDnsServer(deviceOrId, serverIp) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return { success: false, reason: 'Device not found.' };
+    const rawIp = typeof serverIp === 'string' ? serverIp.trim() : '';
+    if (!isValidStrictIPv4(rawIp)) {
+        return { success: false, reason: `Invalid DNS server IPv4 address: "${serverIp}".` };
+    }
+    ensureDeviceDnsClientState(dev);
+    if (!dev.dnsServers.includes(rawIp)) {
+        dev.dnsServers.push(rawIp);
+    }
+    dev.dnsServer = dev.dnsServers[0] || '';
+    return { success: true, servers: [...dev.dnsServers] };
+}
+
+function removeDnsServer(deviceOrId, serverIp) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return { success: false, reason: 'Device not found.' };
+    const rawIp = typeof serverIp === 'string' ? serverIp.trim() : '';
+    ensureDeviceDnsClientState(dev);
+    dev.dnsServers = dev.dnsServers.filter(ip => ip !== rawIp);
+    dev.dnsServer = dev.dnsServers[0] || '';
+    return { success: true, servers: [...dev.dnsServers] };
+}
+
+function setDnsServers(deviceOrId, serverList) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return { success: false, reason: 'Device not found.' };
+    if (!Array.isArray(serverList)) {
+        return { success: false, reason: 'serverList must be an array.' };
+    }
+    const validated = [];
+    for (const s of serverList) {
+        const raw = typeof s === 'string' ? s.trim() : '';
+        if (!isValidStrictIPv4(raw)) {
+            return { success: false, reason: `Invalid DNS server IPv4 address: "${s}".` };
+        }
+        if (!validated.includes(raw)) {
+            validated.push(raw);
+        }
+    }
+    ensureDeviceDnsClientState(dev);
+    dev.dnsServers = validated;
+    dev.dnsServer = dev.dnsServers[0] || '';
+    return { success: true, servers: [...dev.dnsServers] };
+}
+
+function clearDnsServers(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return { success: false, reason: 'Device not found.' };
+    ensureDeviceDnsClientState(dev);
+    dev.dnsServers = [];
+    dev.dnsServer = '';
+    return { success: true, servers: [] };
+}
+
+let dnsPacketCounter = 0;
+
+/**
+ * Creates a deterministic simulated DNS query packet.
+ */
+function createDnsQueryPacket(options = {}) {
+    dnsPacketCounter++;
+    return {
+        id: `dns-pkt-${Date.now()}-${dnsPacketCounter}`,
+        type: 'DNS_QUERY',
+        sourceDeviceId: options.sourceDeviceId || null,
+        sourceIp: options.sourceIp || '',
+        destinationDeviceId: options.destinationDeviceId || null,
+        destinationIp: options.destinationIp || '',
+        hostname: options.hostname || '',
+        recordType: options.recordType || 'A',
+        createdAt: typeof options.createdAt === 'number' ? options.createdAt : Date.now()
+    };
+}
+
+/**
+ * Creates a deterministic simulated DNS response packet.
+ */
+function createDnsResponsePacket(options = {}) {
+    dnsPacketCounter++;
+    return {
+        id: `dns-pkt-${Date.now()}-${dnsPacketCounter}`,
+        type: 'DNS_RESPONSE',
+        queryId: options.queryId || null,
+        sourceDeviceId: options.sourceDeviceId || null,
+        sourceIp: options.sourceIp || '',
+        destinationDeviceId: options.destinationDeviceId || null,
+        destinationIp: options.destinationIp || '',
+        hostname: options.hostname || '',
+        recordType: options.recordType || 'A',
+        success: Boolean(options.success),
+        address: options.address || '',
+        reason: options.reason || null,
+        serverIp: options.serverIp || options.sourceIp || '',
+        createdAt: typeof options.createdAt === 'number' ? options.createdAt : Date.now()
+    };
+}
+
+/**
+ * Resolves source L3 endpoint properties for packet simulation.
+ */
+function getDeviceL3Endpoint(device, targetIp) {
+    if (!device) return null;
+    if (device.type === 'router') {
+        const routeMatch = lookupRoute(device.id, targetIp);
+        if (routeMatch && routeMatch.success && routeMatch.route && routeMatch.route.interface && device.interfaces?.[routeMatch.route.interface]) {
+            const iface = device.interfaces[routeMatch.route.interface];
+            return {
+                id: device.id,
+                name: device.name,
+                ip: iface.ip,
+                subnetMask: iface.subnetMask,
+                mac: iface.mac,
+                type: 'router',
+                interfaces: device.interfaces
+            };
+        }
+        if (device.interfaces) {
+            for (const ifObj of Object.values(device.interfaces)) {
+                if (ifObj && ifObj.ip && isValidIPv4(ifObj.ip)) {
+                    return {
+                        id: device.id,
+                        name: device.name,
+                        ip: ifObj.ip,
+                        subnetMask: ifObj.subnetMask,
+                        mac: ifObj.mac,
+                        type: 'router',
+                        interfaces: device.interfaces
+                    };
+                }
+            }
+        }
+    } else if (device.type === 'switch') {
+        if (device.ipRouting) {
+            const routeMatch = lookupRoute(device.id, targetIp);
+            if (routeMatch && routeMatch.success && routeMatch.route && routeMatch.route.interface) {
+                const vlanId = getSviVlanId(routeMatch.route.interface);
+                const svi = device.svis?.[vlanId];
+                if (svi && svi.ip) {
+                    return {
+                        id: device.id,
+                        name: device.name,
+                        ip: svi.ip,
+                        subnetMask: svi.subnetMask,
+                        gateway: device.defaultGateway || '',
+                        mac: svi.mac || device.mac,
+                        type: 'switch',
+                        svis: device.svis,
+                        ipRouting: device.ipRouting
+                    };
+                }
+            }
+        }
+        if (device.svis) {
+            for (const [vlanIdStr, svi] of Object.entries(device.svis)) {
+                const vlanId = parseInt(vlanIdStr, 10);
+                if (svi && svi.ip && getEffectiveSviStatus(device, vlanId) === 'up') {
+                    const normMask = normalizeSubnetMask(svi.subnetMask);
+                    if (normMask && isSameSubnet(svi.ip, targetIp, normMask)) {
+                        return {
+                            id: device.id,
+                            name: device.name,
+                            ip: svi.ip,
+                            subnetMask: svi.subnetMask,
+                            gateway: device.defaultGateway || '',
+                            mac: svi.mac || device.mac,
+                            type: 'switch',
+                            svis: device.svis,
+                            ipRouting: device.ipRouting
+                        };
+                    }
+                }
+            }
+            for (const [vlanIdStr, svi] of Object.entries(device.svis)) {
+                const vlanId = parseInt(vlanIdStr, 10);
+                if (svi && svi.ip && getEffectiveSviStatus(device, vlanId) === 'up') {
+                    return {
+                        id: device.id,
+                        name: device.name,
+                        ip: svi.ip,
+                        subnetMask: svi.subnetMask,
+                        gateway: device.defaultGateway || '',
+                        mac: svi.mac || device.mac,
+                        type: 'switch',
+                        svis: device.svis,
+                        ipRouting: device.ipRouting
+                    };
+                }
+            }
+        }
+    } else {
+        if (device.ip && isValidIPv4(device.ip)) {
+            return device;
+        }
+    }
+    return null;
+}
+
+/**
+ * Checks reachability of a target IP from a source device using the simulated topology.
+ */
+function checkIpReachability(sourceDev, targetIp) {
+    const targetMatch = findDeviceByIp(targetIp);
+    if (!targetMatch || !targetMatch.device) {
+        return { reachable: false, reason: 'DNS_SERVER_NOT_FOUND' };
+    }
+    if (targetMatch.device.id === sourceDev.id) {
+        return { reachable: targetMatch.status !== 'down', targetMatch };
+    }
+
+    // If there are connections in the network, enforce full L2/L3 topology reachability
+    if (Array.isArray(networkState.connections) && networkState.connections.length > 0) {
+        const srcEndpoint = getDeviceL3Endpoint(sourceDev, targetIp);
+        if (!srcEndpoint || !srcEndpoint.ip) {
+            return { reachable: false, reason: 'SOURCE_IP_NOT_CONFIGURED', targetMatch };
+        }
+        let destEndpoint = null;
+        if (targetMatch.device.type === 'router') {
+            destEndpoint = {
+                id: targetMatch.device.id,
+                name: targetMatch.device.name,
+                ip: targetMatch.ip,
+                subnetMask: targetMatch.subnetMask,
+                mac: targetMatch.mac,
+                type: 'router',
+                interfaces: targetMatch.device.interfaces
+            };
+        } else if (targetMatch.device.type === 'switch') {
+            destEndpoint = {
+                id: targetMatch.device.id,
+                name: targetMatch.device.name,
+                ip: targetMatch.ip,
+                subnetMask: targetMatch.subnetMask,
+                mac: targetMatch.mac,
+                type: 'switch',
+                svis: targetMatch.device.svis,
+                ipRouting: targetMatch.device.ipRouting
+            };
+        } else {
+            destEndpoint = targetMatch.device;
+        }
+        const simResult = simulateSendFrame(srcEndpoint, destEndpoint, { icmp: false });
+        return {
+            reachable: Boolean(simResult.success),
+            simResult,
+            targetMatch,
+            srcEndpoint,
+            destEndpoint
+        };
+    }
+
+    // If lab has no connections at all (pure unit test environment), server is reachable if up
+    return {
+        reachable: targetMatch.status !== 'down',
+        targetMatch,
+        unitTestDirect: true
+    };
+}
+
+/**
+ * Simulates a full DNS query / response flow for a client device across its configured DNS servers.
+ */
+function simulateDnsQuery(clientDeviceOrId, hostname, options = {}) {
+    const clientDev = typeof clientDeviceOrId === 'object' && clientDeviceOrId ? clientDeviceOrId : getDeviceById(clientDeviceOrId);
+    if (!clientDev) {
+        return {
+            success: false,
+            reason: 'CLIENT_DEVICE_NOT_FOUND',
+            hostname: typeof hostname === 'string' ? hostname.trim() : '',
+            attempts: [],
+            events: ['Client device not found']
+        };
+    }
+
+    const rawHost = typeof hostname === 'string' ? hostname.trim() : '';
+    if (!rawHost) {
+        return {
+            success: false,
+            reason: 'EMPTY_HOSTNAME',
+            hostname: '',
+            attempts: [],
+            events: ['Empty hostname provided for DNS query']
+        };
+    }
+
+    if (!isValidHostname(rawHost)) {
+        return {
+            success: false,
+            reason: 'INVALID_HOSTNAME',
+            hostname: rawHost,
+            attempts: [],
+            events: [`Invalid hostname format: "${rawHost}"`]
+        };
+    }
+
+    const servers = getDnsServers(clientDev);
+    if (!servers || servers.length === 0) {
+        return {
+            success: false,
+            reason: 'NO_DNS_SERVERS_CONFIGURED',
+            hostname: rawHost,
+            attempts: [],
+            events: [`No DNS servers configured on ${clientDev.name || 'client device'}`]
+        };
+    }
+
+    const attempts = [];
+    const events = [];
+    let lastFailureReason = 'HOST_NOT_FOUND';
+
+    for (const serverIp of servers) {
+        events.push(`Initiating DNS query from ${clientDev.name} to server ${serverIp} for "${rawHost}" (type A)`);
+
+        const queryPacket = createDnsQueryPacket({
+            sourceDeviceId: clientDev.id,
+            sourceIp: clientDev.ip || '',
+            destinationIp: serverIp,
+            hostname: rawHost,
+            recordType: 'A'
+        });
+
+        const reachCheck = checkIpReachability(clientDev, serverIp);
+        if (!reachCheck.targetMatch || !reachCheck.targetMatch.device) {
+            lastFailureReason = 'DNS_SERVER_NOT_FOUND';
+            const respPacket = createDnsResponsePacket({
+                queryId: queryPacket.id,
+                sourceIp: serverIp,
+                destinationDeviceId: clientDev.id,
+                destinationIp: queryPacket.sourceIp,
+                hostname: rawHost,
+                recordType: 'A',
+                success: false,
+                reason: 'DNS_SERVER_NOT_FOUND',
+                serverIp
+            });
+            attempts.push({
+                serverIp,
+                serverDeviceId: null,
+                success: false,
+                reason: 'DNS_SERVER_NOT_FOUND',
+                query: queryPacket,
+                response: respPacket
+            });
+            events.push(`DNS server ${serverIp} not found in network topology`);
+            continue;
+        }
+
+        const serverDev = reachCheck.targetMatch.device;
+        queryPacket.destinationDeviceId = serverDev.id;
+        if (reachCheck.srcEndpoint && reachCheck.srcEndpoint.ip) {
+            queryPacket.sourceIp = reachCheck.srcEndpoint.ip;
+        }
+
+        if (!reachCheck.reachable) {
+            lastFailureReason = 'DNS_SERVER_UNREACHABLE';
+            const respPacket = createDnsResponsePacket({
+                queryId: queryPacket.id,
+                sourceDeviceId: serverDev.id,
+                sourceIp: serverIp,
+                destinationDeviceId: clientDev.id,
+                destinationIp: queryPacket.sourceIp,
+                hostname: rawHost,
+                recordType: 'A',
+                success: false,
+                reason: 'DNS_SERVER_UNREACHABLE',
+                serverIp
+            });
+            attempts.push({
+                serverIp,
+                serverDeviceId: serverDev.id,
+                success: false,
+                reason: 'DNS_SERVER_UNREACHABLE',
+                query: queryPacket,
+                response: respPacket
+            });
+            events.push(`DNS server ${serverDev.name} (${serverIp}) is unreachable from ${clientDev.name}`);
+            continue;
+        }
+
+        ensureDeviceDnsServerState(serverDev);
+        if (!serverDev.dnsServerService.enabled) {
+            lastFailureReason = 'DNS_SERVICE_NOT_ENABLED';
+            const respPacket = createDnsResponsePacket({
+                queryId: queryPacket.id,
+                sourceDeviceId: serverDev.id,
+                sourceIp: serverIp,
+                destinationDeviceId: clientDev.id,
+                destinationIp: queryPacket.sourceIp,
+                hostname: rawHost,
+                recordType: 'A',
+                success: false,
+                reason: 'DNS_SERVICE_NOT_ENABLED',
+                serverIp
+            });
+            attempts.push({
+                serverIp,
+                serverDeviceId: serverDev.id,
+                success: false,
+                reason: 'DNS_SERVICE_NOT_ENABLED',
+                query: queryPacket,
+                response: respPacket
+            });
+            events.push(`DNS service is disabled on server ${serverDev.name} (${serverIp})`);
+            continue;
+        }
+
+        const record = getDnsRecord(serverDev, rawHost);
+        if (!record) {
+            lastFailureReason = 'HOST_NOT_FOUND';
+            const respPacket = createDnsResponsePacket({
+                queryId: queryPacket.id,
+                sourceDeviceId: serverDev.id,
+                sourceIp: serverIp,
+                destinationDeviceId: clientDev.id,
+                destinationIp: queryPacket.sourceIp,
+                hostname: rawHost,
+                recordType: 'A',
+                success: false,
+                reason: 'HOST_NOT_FOUND',
+                serverIp
+            });
+            attempts.push({
+                serverIp,
+                serverDeviceId: serverDev.id,
+                success: false,
+                reason: 'HOST_NOT_FOUND',
+                query: queryPacket,
+                response: respPacket
+            });
+            events.push(`Server ${serverDev.name} (${serverIp}) has no A record for "${rawHost}"`);
+            continue;
+        }
+
+        // Successful resolution
+        const respPacket = createDnsResponsePacket({
+            queryId: queryPacket.id,
+            sourceDeviceId: serverDev.id,
+            sourceIp: serverIp,
+            destinationDeviceId: clientDev.id,
+            destinationIp: queryPacket.sourceIp,
+            hostname: record.hostname,
+            recordType: 'A',
+            success: true,
+            address: record.address,
+            serverIp
+        });
+        events.push(`Server ${serverDev.name} (${serverIp}) successfully resolved "${rawHost}" to ${record.address}`);
+        attempts.push({
+            serverIp,
+            serverDeviceId: serverDev.id,
+            success: true,
+            query: queryPacket,
+            response: respPacket
+        });
+
+        return {
+            success: true,
+            hostname: record.hostname,
+            address: record.address,
+            serverIp,
+            serverDeviceId: serverDev.id,
+            query: queryPacket,
+            response: respPacket,
+            attempts,
+            events
+        };
+    }
+
+    return {
+        success: false,
+        reason: lastFailureReason,
+        hostname: rawHost,
+        attempts,
+        events
+    };
+}
+
+/**
+ * Resolves a hostname across configured DNS servers for a client device.
+ */
+function resolveHostnameAcrossDnsServers(clientDeviceOrId, hostname) {
+    const sim = simulateDnsQuery(clientDeviceOrId, hostname);
+    if (sim.success) {
+        return {
+            success: true,
+            hostname: sim.hostname,
+            address: sim.address,
+            serverIp: sim.serverIp,
+            serverDeviceId: sim.serverDeviceId,
+            query: sim.query,
+            response: sim.response,
+            attempts: sim.attempts,
+            events: sim.events
+        };
+    }
+    return {
+        success: false,
+        reason: sim.reason || 'HOST_NOT_FOUND',
+        hostname: sim.hostname,
+        attempts: sim.attempts,
+        events: sim.events
+    };
+}
+
+/**
+ * Resolves a hostname for a device (checks local static host records first, then configured DNS servers).
+ */
+function resolveDnsForDevice(deviceOrId, hostname) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) {
+        return { success: false, reason: 'DEVICE_NOT_FOUND' };
+    }
+    const rawHost = typeof hostname === 'string' ? hostname.trim() : '';
+    if (!rawHost) {
+        return { success: false, reason: 'EMPTY_HOSTNAME' };
+    }
+    if (!isValidHostname(rawHost)) {
+        return { success: false, reason: 'INVALID_HOSTNAME' };
+    }
+
+    // 1. Check local static DNS / host record table on device
+    const localRecord = getDnsRecord(dev, rawHost);
+    if (localRecord) {
+        return {
+            success: true,
+            hostname: localRecord.hostname,
+            address: localRecord.address,
+            source: 'local'
+        };
+    }
+
+    // 2. Query configured DNS servers via simulated query
+    const sim = simulateDnsQuery(dev, rawHost);
+    if (sim.success) {
+        return {
+            success: true,
+            hostname: sim.hostname,
+            address: sim.address,
+            serverIp: sim.serverIp,
+            serverDeviceId: sim.serverDeviceId,
+            source: 'dns_query',
+            query: sim.query,
+            response: sim.response,
+            attempts: sim.attempts,
+            events: sim.events
+        };
+    }
+    return {
+        success: false,
+        reason: sim.reason || 'HOST_NOT_FOUND',
+        hostname: sim.hostname,
+        attempts: sim.attempts,
+        events: sim.events
+    };
+}
+
+/**
+ * Executes CLI nslookup command for a device.
+ */
+function executeCliNslookup(deviceOrId, rawHostname) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) {
+        return {
+            success: false,
+            output: '% Error: Device not found.',
+            clear: false,
+            status: 'error'
+        };
+    }
+    const host = typeof rawHostname === 'string' ? rawHostname.trim() : '';
+    if (!host) {
+        return {
+            success: false,
+            output: '% Incomplete command: nslookup <hostname>',
+            clear: false,
+            status: 'error'
+        };
+    }
+    if (!isValidHostname(host)) {
+        return {
+            success: false,
+            output: `*** Invalid hostname: "${host}".`,
+            clear: false,
+            status: 'error'
+        };
+    }
+
+    // Check local static record first
+    const localRecord = getDnsRecord(dev, host);
+    if (localRecord) {
+        const lines = [
+            `Server:  Local Table`,
+            `Address: 127.0.0.1`,
+            '',
+            `Name:    ${localRecord.hostname}`,
+            `Address: ${localRecord.address}`
+        ];
+        return {
+            success: true,
+            output: lines.join('\n'),
+            clear: false,
+            status: 'success',
+            address: localRecord.address,
+            serverIp: '127.0.0.1',
+            source: 'local'
+        };
+    }
+
+    // Query configured DNS servers
+    const simResult = simulateDnsQuery(dev, host);
+    if (simResult.success) {
+        const lines = [
+            `Server:  ${simResult.serverIp}`,
+            `Address: ${simResult.serverIp}`,
+            '',
+            `Name:    ${simResult.hostname}`,
+            `Address: ${simResult.address}`
+        ];
+        return {
+            success: true,
+            output: lines.join('\n'),
+            clear: false,
+            status: 'success',
+            address: simResult.address,
+            serverIp: simResult.serverIp,
+            query: simResult.query,
+            response: simResult.response
+        };
+    } else {
+        let errDesc = 'Non-existent domain';
+        if (simResult.reason === 'NO_DNS_SERVERS_CONFIGURED') {
+            errDesc = 'No DNS servers configured';
+        } else if (simResult.reason === 'DNS_SERVER_UNREACHABLE') {
+            errDesc = 'DNS server unreachable';
+        } else if (simResult.reason === 'DNS_SERVICE_NOT_ENABLED') {
+            errDesc = 'DNS server service disabled';
+        } else if (simResult.reason === 'DNS_SERVER_NOT_FOUND') {
+            errDesc = 'DNS server not found';
+        }
+        const srvLine = (simResult.attempts && simResult.attempts.length > 0 && simResult.attempts[0].serverIp) ? simResult.attempts[0].serverIp : 'UnKnown';
+        const lines = [
+            `*** ${srvLine} can't find ${host}: ${errDesc}`
+        ];
+        return {
+            success: false,
+            output: lines.join('\n'),
+            clear: false,
+            status: 'error',
+            reason: simResult.reason,
+            attempts: simResult.attempts
+        };
+    }
+}
+
+/**
+ * Formats "show hosts" / "show ip hosts" output.
+ */
+function formatCliShowHosts(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return '% Device not found';
+    const servers = getDnsServers(dev);
+    const serverStr = servers.length > 0 ? servers.join(', ') : 'none';
+    const srvEnabled = isDnsServerEnabled(dev);
+    const records = getDnsRecords(dev);
+    const lines = [
+        'Default domain is not set',
+        `Name servers are ${serverStr}`,
+        `Local DNS Server service: ${srvEnabled ? 'enabled' : 'disabled'}`,
+        '',
+        'Host                      Flags      Age Type   Address(es)',
+        '------------------------- ---------- --- ------ ----------------'
+    ];
+    if (records.length === 0) {
+        lines.push('% No static host records configured');
+    } else {
+        for (const rec of records) {
+            const hostCol = rec.hostname.padEnd(25);
+            const flagsCol = '(static)  '.padEnd(10);
+            const ageCol = '-  '.padEnd(3);
+            const typeCol = 'IP    '.padEnd(6);
+            const addrCol = rec.address;
+            lines.push(`${hostCol} ${flagsCol} ${ageCol} ${typeCol} ${addrCol}`);
+        }
+    }
+    return lines.join('\n');
 }
 
 // ==========================================
