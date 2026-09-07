@@ -3942,15 +3942,35 @@ function renderRouterAclSection(router) {
     } else {
         aclCardsHtml = aclList.map((acl) => {
             const ruleRows = acl.rules.map((rule) => {
+                if (rule.action === 'remark') {
+                    const actionBadge = '<span class="acl-badge acl-badge--remark">REMARK</span>';
+                    const remarkText = rule.remark || '';
+                    return `
+                    <tr>
+                        <td><strong>${escapeHtml(String(rule.sequence))}</strong></td>
+                        <td>${actionBadge}</td>
+                        ${acl.type === 'extended' ? `<td><code>-</code></td>` : ''}
+                        <td><em>${escapeHtml(remarkText)}</em></td>
+                        ${acl.type === 'extended' ? `<td><code>-</code></td>` : ''}
+                        <td><span class="acl-hits-badge">-</span></td>
+                        <td class="table-action-cell">
+                            <button class="acl-rule-delete-btn table-action-btn" data-acl-id="${escapeHtml(acl.id)}" data-sequence="${escapeHtml(String(rule.sequence))}" title="Delete Rule">✕</button>
+                        </td>
+                    </tr>
+                `;
+                }
+
                 const actionBadge = rule.action === 'permit'
                     ? '<span class="acl-badge acl-badge--permit">PERMIT</span>'
                     : '<span class="acl-badge acl-badge--deny">DENY</span>';
 
-                const srcText = rule.source.isAny
+                const srcText = rule.source?.isAny
                     ? 'any'
-                    : rule.source.isHost
+                    : rule.source?.isHost
                         ? `host ${rule.source.ip}`
-                        : `${rule.source.ip} ${rule.source.wildcard}`;
+                        : rule.source
+                            ? `${rule.source.ip} ${rule.source.wildcard}`
+                            : 'any';
 
                 let dstText = '-';
                 if (acl.type === 'extended') {
@@ -8184,9 +8204,65 @@ function clearNatTranslationsByIp(deviceOrId, targetIp) {
     return { success: true };
 }
 
+function parseAclSourceTokens(tokens, startIndex) {
+    if (!Array.isArray(tokens) || startIndex >= tokens.length) {
+        return { success: false, error: '% Incomplete command.' };
+    }
+    const first = String(tokens[startIndex] || '').toLowerCase();
+    if (first === 'any') {
+        if (tokens.length > startIndex + 1) {
+            return { success: false, error: '% Too many parameters.' };
+        }
+        return {
+            success: true,
+            sourceIp: '0.0.0.0',
+            sourceWildcard: '255.255.255.255',
+            isAny: true,
+            isHost: false
+        };
+    }
+    if (first === 'host') {
+        const hostIp = tokens[startIndex + 1];
+        if (!hostIp) {
+            return { success: false, error: '% Incomplete host specification.' };
+        }
+        if (!isValidIPv4(hostIp)) {
+            return { success: false, error: `% Invalid host IP address: "${hostIp}".` };
+        }
+        if (tokens.length > startIndex + 2) {
+            return { success: false, error: '% Too many parameters.' };
+        }
+        return {
+            success: true,
+            sourceIp: hostIp,
+            sourceWildcard: '0.0.0.0',
+            isAny: false,
+            isHost: true
+        };
+    }
+    const ip = tokens[startIndex];
+    if (!isValidIPv4(ip)) {
+        return { success: false, error: `% Invalid IP address: "${ip}".` };
+    }
+    const wildcard = tokens[startIndex + 1] || '0.0.0.0';
+    if (!isValidIPv4(wildcard)) {
+        return { success: false, error: `% Invalid wildcard mask: "${wildcard}".` };
+    }
+    if (tokens.length > startIndex + 2) {
+        return { success: false, error: '% Too many parameters.' };
+    }
+    return {
+        success: true,
+        sourceIp: ip,
+        sourceWildcard: wildcard,
+        isAny: false,
+        isHost: wildcard === '0.0.0.0'
+    };
+}
+
 function parseAclAddressSpec(rawIp, rawMaskOrWildcard) {
     const ipStr = String(rawIp || '').trim();
-    if (!ipStr || ipStr.toLowerCase() === 'any') {
+    if (!ipStr || ipStr.toLowerCase() === 'any' || (ipStr === '0.0.0.0' && rawMaskOrWildcard === '255.255.255.255')) {
         return {
             ip: '0.0.0.0',
             wildcard: '255.255.255.255',
@@ -8301,7 +8377,7 @@ function getRouterAcl(routerId, aclId) {
     return acls[key] || null;
 }
 
-function createRouterAcl(routerId, aclConfig) {
+function createRouterAcl(routerId, aclConfig, explicitType) {
     if (!aclConfig || (typeof aclConfig !== 'object' && typeof aclConfig !== 'string' && typeof aclConfig !== 'number')) {
         return { success: false, reason: 'Invalid ACL configuration.' };
     }
@@ -8323,8 +8399,9 @@ function createRouterAcl(routerId, aclConfig) {
     }
 
     let aclType = 'standard';
-    if (typeof aclConfig === 'object' && aclConfig.type) {
-        const t = String(aclConfig.type).toLowerCase().trim();
+    const typeCandidate = (typeof aclConfig === 'object' && aclConfig.type) ? aclConfig.type : explicitType;
+    if (typeCandidate) {
+        const t = String(typeCandidate).toLowerCase().trim();
         if (t === 'extended' || t === 'ext') {
             aclType = 'extended';
         } else {
@@ -8371,6 +8448,9 @@ function deleteRouterAcl(routerId, aclId) {
             const ifAcl = runtime.interfaceAcls[ifName];
             if (ifAcl.in === key) delete ifAcl.in;
             if (ifAcl.out === key) delete ifAcl.out;
+            if (Object.keys(ifAcl).length === 0) {
+                delete runtime.interfaceAcls[ifName];
+            }
         });
     }
 
@@ -8388,6 +8468,37 @@ function addRouterAclRule(routerId, aclId, ruleData) {
     }
 
     const action = String(ruleData.action || '').toLowerCase().trim();
+    if (action === 'remark') {
+        let sequence = typeof ruleData.sequence === 'number' ? ruleData.sequence : parseInt(ruleData.sequence, 10);
+        if (isNaN(sequence) || sequence <= 0) {
+            const existingSeqs = acl.rules.map((r) => r.sequence);
+            const maxSeq = existingSeqs.length > 0 ? Math.max(...existingSeqs) : 0;
+            sequence = (Math.floor(maxSeq / 10) + 1) * 10;
+            if (sequence <= maxSeq) sequence = maxSeq + 10;
+        }
+
+        if (acl.rules.some((r) => r.sequence === sequence)) {
+            return { success: false, reason: `Rule with sequence number ${sequence} already exists in ACL ${aclId}.` };
+        }
+
+        const remarkText = String(ruleData.remark || ruleData.text || '').trim();
+        const newRule = {
+            sequence,
+            action: 'remark',
+            protocol: null,
+            source: null,
+            destination: null,
+            remark: remarkText,
+            isHost: false,
+            isAny: false,
+            hits: 0
+        };
+
+        acl.rules.push(newRule);
+        acl.rules.sort((a, b) => a.sequence - b.sequence);
+        return { success: true, rule: newRule };
+    }
+
     if (action !== 'permit' && action !== 'deny') {
         return { success: false, reason: 'Action must be "permit" or "deny".' };
     }
@@ -8416,19 +8527,32 @@ function addRouterAclRule(routerId, aclId, ruleData) {
     if (isNaN(sequence) || sequence <= 0) {
         const existingSeqs = acl.rules.map((r) => r.sequence);
         const maxSeq = existingSeqs.length > 0 ? Math.max(...existingSeqs) : 0;
-        sequence = maxSeq + 10;
+        sequence = (Math.floor(maxSeq / 10) + 1) * 10;
+        if (sequence <= maxSeq) sequence = maxSeq + 10;
     }
 
     if (acl.rules.some((r) => r.sequence === sequence)) {
         return { success: false, reason: `Rule with sequence number ${sequence} already exists in ACL ${aclId}.` };
     }
 
+    const isHost = ruleData.isHost !== undefined ? !!ruleData.isHost : (parsedSource?.isHost || false);
+    const isAny = ruleData.isAny !== undefined ? !!ruleData.isAny : (parsedSource?.isAny || false);
+
     const newRule = {
         sequence,
         action,
         protocol,
-        source: parsedSource,
+        source: {
+            ip: parsedSource.ip,
+            wildcard: parsedSource.wildcard,
+            mask: parsedSource.mask,
+            isAny,
+            isHost
+        },
         destination: parsedDestination,
+        remark: ruleData.remark ?? null,
+        isHost,
+        isAny,
         hits: 0
     };
 
@@ -8461,9 +8585,9 @@ function bindRouterInterfaceAcl(routerId, interfaceName, direction, aclId) {
         return { success: false, reason: 'Router not found.' };
     }
 
-    const ifName = String(interfaceName || '').trim();
-    if (!router.interfaces || !router.interfaces[ifName]) {
-        return { success: false, reason: `Interface ${ifName} does not exist on router ${router.name}.` };
+    const normIf = normalizeRouterInterfaceName(interfaceName) || String(interfaceName || '').trim();
+    if (!router.interfaces || !router.interfaces[normIf]) {
+        return { success: false, reason: `Interface ${interfaceName} does not exist on router ${router.name}.` };
     }
 
     const dir = String(direction || '').toLowerCase().trim();
@@ -8473,16 +8597,14 @@ function bindRouterInterfaceAcl(routerId, interfaceName, direction, aclId) {
     const normalizedDir = (dir === 'in' || dir === 'inbound') ? 'in' : 'out';
 
     const aclKey = String(aclId || '').trim();
-    const acl = getRouterAcl(router.id, aclKey);
-    if (!acl) {
-        return { success: false, reason: `ACL ${aclKey} does not exist on router ${router.name}.` };
-    }
-
     const runtime = getRouterRuntime(router.id);
-    if (!runtime.interfaceAcls[ifName]) {
-        runtime.interfaceAcls[ifName] = {};
+    if (!runtime.interfaceAcls) {
+        runtime.interfaceAcls = {};
     }
-    runtime.interfaceAcls[ifName][normalizedDir] = aclKey;
+    if (!runtime.interfaceAcls[normIf]) {
+        runtime.interfaceAcls[normIf] = {};
+    }
+    runtime.interfaceAcls[normIf][normalizedDir] = aclKey;
 
     return { success: true };
 }
@@ -8493,29 +8615,32 @@ function unbindRouterInterfaceAcl(routerId, interfaceName, direction) {
         return { success: false, reason: 'Router not found.' };
     }
 
-    const ifName = String(interfaceName || '').trim();
+    const normIf = normalizeRouterInterfaceName(interfaceName) || String(interfaceName || '').trim();
     const dir = String(direction || '').toLowerCase().trim();
     const normalizedDir = (dir === 'in' || dir === 'inbound') ? 'in' : 'out';
 
     const runtime = getRouterRuntime(router.id);
-    if (runtime.interfaceAcls && runtime.interfaceAcls[ifName] && runtime.interfaceAcls[ifName][normalizedDir]) {
-        delete runtime.interfaceAcls[ifName][normalizedDir];
+    if (runtime.interfaceAcls && runtime.interfaceAcls[normIf] && runtime.interfaceAcls[normIf][normalizedDir]) {
+        delete runtime.interfaceAcls[normIf][normalizedDir];
+        if (Object.keys(runtime.interfaceAcls[normIf]).length === 0) {
+            delete runtime.interfaceAcls[normIf];
+        }
         return { success: true };
     }
 
-    return { success: false, reason: `No ${normalizedDir} ACL bound to interface ${ifName}.` };
+    return { success: false, reason: `No ${normalizedDir} ACL bound to interface ${interfaceName}.` };
 }
 
 function getRouterInterfaceAcl(routerId, interfaceName, direction) {
     const runtime = getRouterRuntime(routerId);
-    const ifName = String(interfaceName || '').trim();
+    const normIf = normalizeRouterInterfaceName(interfaceName) || String(interfaceName || '').trim();
     const dir = String(direction || '').toLowerCase().trim();
     const normalizedDir = (dir === 'in' || dir === 'inbound') ? 'in' : 'out';
-    return runtime.interfaceAcls?.[ifName]?.[normalizedDir] || null;
+    return runtime.interfaceAcls?.[normIf]?.[normalizedDir] || null;
 }
 
 function evaluatePacketAcl(acl, packet) {
-    if (!acl || !Array.isArray(acl.rules)) {
+    if (!acl || !Array.isArray(acl.rules) || acl.rules.length === 0) {
         return {
             matched: false,
             action: 'permit',
@@ -8525,24 +8650,37 @@ function evaluatePacketAcl(acl, packet) {
         };
     }
 
+    const activeRules = acl.rules.filter((r) => r && r.action !== 'remark');
+    if (activeRules.length === 0) {
+        return {
+            matched: false,
+            action: 'permit',
+            rule: null,
+            isImplicitDeny: false,
+            reason: 'No active ACL rules to evaluate'
+        };
+    }
+
     const pktSrcIp = packet?.sourceIp || packet?.packet?.sourceIp;
     const pktDstIp = packet?.destinationIp || packet?.packet?.destinationIp;
     const pktProto = String(packet?.protocol || packet?.packet?.protocol || (packet?.icmp ? 'ICMP' : 'IP')).toLowerCase();
 
-    for (const rule of acl.rules) {
+    const sortedRules = [...activeRules].sort((a, b) => a.sequence - b.sequence);
+
+    for (const rule of sortedRules) {
         if (acl.type === 'extended' && rule.protocol && rule.protocol !== 'ip') {
             if (rule.protocol !== pktProto) {
                 continue;
             }
         }
 
-        if (!rule.source.isAny) {
-            if (!isIpMatchWithWildcard(pktSrcIp, rule.source.ip, rule.source.wildcard)) {
+        if (!rule.source?.isAny) {
+            if (!isIpMatchWithWildcard(pktSrcIp, rule.source?.ip, rule.source?.wildcard)) {
                 continue;
             }
         }
 
-        if (acl.type === 'extended' && rule.destination && !rule.destination.isAny) {
+        if (acl.type === 'extended' && rule.destination && !rule.destination?.isAny) {
             if (!isIpMatchWithWildcard(pktDstIp, rule.destination.ip, rule.destination.wildcard)) {
                 continue;
             }
@@ -8554,6 +8692,7 @@ function evaluatePacketAcl(acl, packet) {
             action: rule.action,
             rule,
             isImplicitDeny: false,
+            reasonCode: rule.action === 'deny' ? 'ACL_DENIED' : undefined,
             aclId: acl.id,
             reason: `Matched rule ${rule.sequence}: ${rule.action.toUpperCase()}`
         };
@@ -8564,6 +8703,7 @@ function evaluatePacketAcl(acl, packet) {
         action: 'deny',
         rule: null,
         isImplicitDeny: true,
+        reasonCode: 'ACL_DENIED',
         aclId: acl.id,
         reason: 'Implicit deny (no matching ACL rule)'
     };
@@ -10256,6 +10396,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     return {
                         success: false,
                         reason: returnReason,
+                        dropReason: 'ACL_DENIED',
                         path: traversedPath,
                         action: 'DROP',
                         hopActions,
@@ -10514,6 +10655,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     return {
                         success: false,
                         reason: returnReason,
+                        dropReason: 'ACL_DENIED',
                         path: traversedPath,
                         action: 'DROP',
                         hopActions,
@@ -11785,6 +11927,7 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
             reason: forwardResult.reason,
             path: forwardResult.path,
             action: forwardResult.action,
+            dropReason: forwardResult.dropReason,
             hopActions: forwardResult.hopActions,
             reverseHopActions: returnHopActions,
             events: allEvents,
@@ -12540,6 +12683,9 @@ function getDeviceCliPrompt(deviceOrId) {
     const name = dev.name || dev.id;
     if (dev.type === 'router') {
         const session = getDeviceTerminalSession(dev.id);
+        if (session.mode === 'config-std-nacl') {
+            return `${name}(config-std-nacl)#`;
+        }
         if (session.mode === 'config-router') {
             return `${name}(config-router)#`;
         }
@@ -12559,6 +12705,9 @@ function getDeviceCliPrompt(deviceOrId) {
     }
     if (dev.type === 'switch') {
         const session = getDeviceTerminalSession(dev.id);
+        if (session.mode === 'config-std-nacl') {
+            return `${name}(config-std-nacl)#`;
+        }
         if (session.mode === 'config-router') {
             return `${name}(config-router)#`;
         }
@@ -12943,6 +13092,9 @@ function formatCliRouterIpInterfaceDetail(router, ifaceName = null) {
             ? helpers.map(h => `  Helper address is ${h}`).join('\n')
             : '  Helper address is not set';
 
+        const outAcl = getRouterInterfaceAcl(router.id, name, 'out');
+        const inAcl = getRouterInterfaceAcl(router.id, name, 'in');
+
         const lines = [
             `${name} is ${status}, line protocol is ${lineProto}`,
             iface.ip ? `  Internet address is ${iface.ip}/${getPrefixLengthFromMask(iface.subnetMask || '255.255.255.0')}` : '  Internet protocol processing disabled',
@@ -12951,8 +13103,8 @@ function formatCliRouterIpInterfaceDetail(router, ifaceName = null) {
             '  MTU is 1500 bytes',
             helperText,
             '  Directed broadcast forwarding is disabled',
-            '  Outgoing access list is not set',
-            '  Inbound access list is not set'
+            outAcl ? `  Outgoing access list is ${outAcl}` : '  Outgoing access list is not set',
+            inAcl ? `  Inbound  access list is ${inAcl}` : '  Inbound  access list is not set'
         ];
         blocks.push(lines.join('\n'));
     });
@@ -13060,9 +13212,14 @@ function formatCliRouterArpTable(router) {
     return lines.join('\n');
 }
 
-function formatCliRouterAcls(router) {
+function formatCliRouterAcls(router, targetAclId = null) {
     const acls = getRouterAcls(router.id);
-    const aclList = Object.values(acls || {});
+    let aclList = Object.values(acls || {});
+
+    if (targetAclId) {
+        const key = String(targetAclId).trim();
+        aclList = aclList.filter(a => String(a.id) === key || String(a.name) === key);
+    }
 
     if (!aclList || aclList.length === 0) {
         return 'No access lists configured.';
@@ -13079,8 +13236,13 @@ function formatCliRouterAcls(router) {
             return;
         }
 
-        acl.rules.forEach((rule) => {
+        const sortedRules = [...acl.rules].sort((a, b) => a.sequence - b.sequence);
+        sortedRules.forEach((rule) => {
             const seq = String(rule.sequence).padStart(4, ' ');
+            if (rule.action === 'remark') {
+                lines.push(`   ${seq} remark ${rule.remark || ''}`);
+                return;
+            }
             const action = rule.action || 'permit';
             const hits = rule.hits || 0;
             const matchesText = `(${hits} ${hits === 1 ? 'match' : 'matches'})`;
@@ -14255,6 +14417,8 @@ function executeCliCommand(deviceId, rawInput) {
   encapsulation dot1q <vlan-id> - Configure IEEE 802.1Q encapsulation for this subinterface
   ip address <IP> <mask/prefix> - Set IPv4 address and subnet mask on this subinterface
   no ip address                 - Remove IPv4 address from this subinterface
+  ip access-group <name|1-99> <in|out> - Apply access list to this subinterface
+  no ip access-group <name|1-99> <in|out> - Remove access list from this subinterface
   ip nat <inside|outside>       - Enable NAT inside or outside on this subinterface
   no ip nat <inside|outside>    - Remove NAT role from this subinterface
   shutdown                      - Administratively disable this subinterface
@@ -14268,6 +14432,8 @@ function executeCliCommand(deviceId, rawInput) {
                 helpText = `Commands available in Interface Configuration mode on ${dev.name}:
   ip address <IP> <mask/prefix> - Set IPv4 address and subnet mask on this interface
   no ip address                 - Remove IPv4 address from this interface
+  ip access-group <name|1-99> <in|out> - Apply access list to this interface
+  no ip access-group <name|1-99> <in|out> - Remove access list from this interface
   ip ospf cost <1-65535>        - Set OSPF interface metric cost
   ip ospf priority <0-255>      - Set OSPF router priority
   ip ospf hello-interval <sec>  - Set OSPF hello interval
@@ -14282,10 +14448,28 @@ function executeCliCommand(deviceId, rawInput) {
   end                           - Return to Privileged EXEC mode
   do <command>                  - Execute an operational command
   help, ?                       - Show available commands`;
+            } else if (session.mode === 'config-std-nacl') {
+                helpText = `Commands available in Standard Access-list Configuration mode on ${dev.name}:
+  permit <source> [wildcard]   - Specify packets to forward (source: <IP wildcard> | host <IP> | any)
+  deny <source> [wildcard]     - Specify packets to reject (source: <IP wildcard> | host <IP> | any)
+  remark <text>                - Access list entry comment
+  <seq> permit ...             - Specify rule with explicit sequence number
+  <seq> deny ...               - Specify rule with explicit sequence number
+  <seq> remark <text>          - Specify remark with explicit sequence number
+  no <sequence>                - Delete an access list rule by sequence number
+  exit                         - Return to Global Configuration mode
+  end                          - Return to Privileged EXEC mode
+  do <command>                 - Execute an operational command
+  help, ?                      - Show available commands`;
             } else if (session.mode === 'config') {
                 helpText = `Commands available in Global Configuration mode on ${dev.name}:
   hostname <name>               - Set device system name
   interface <name>              - Enter interface configuration mode (alias: int)
+  access-list <1-99> <permit|deny> <source> [wildcard] - Configure standard numbered access list
+  access-list <1-99> remark <text> - Set comment on numbered access list
+  no access-list <1-99>         - Delete numbered access list
+  ip access-list standard <name> - Configure standard named access list
+  no ip access-list standard <name> - Delete standard named access list
   ip route <net> <mask> <next-hop> [ad] [metric] - Configure a static route
   no ip route <net> <mask> [next-hop]            - Delete a static route
   router ospf <process-id>      - Configure OSPF routing process (enters router config mode)
@@ -14593,6 +14777,11 @@ function executeCliCommand(deviceId, rawInput) {
 
     // 4. EXIT
     if (mainCmd === 'exit') {
+        if (session.mode === 'config-std-nacl') {
+            session.mode = 'config';
+            session.selectedAcl = null;
+            return { success: true, output: '', clear: false, status: 'info', command, device: dev };
+        }
         if (session.mode === 'config-router') {
             session.mode = 'config';
             session.ospfProcessId = null;
@@ -14624,6 +14813,7 @@ function executeCliCommand(deviceId, rawInput) {
             session.selectedVlan = null;
             session.selectedPool = null;
             session.ospfProcessId = null;
+            session.selectedAcl = null;
             return { success: true, output: '', clear: false, status: 'info', command, device: dev };
         }
         return { success: true, output: '', clear: false, status: 'info', command, device: dev };
@@ -14637,6 +14827,7 @@ function executeCliCommand(deviceId, rawInput) {
             session.selectedVlan = null;
             session.selectedPool = null;
             session.ospfProcessId = null;
+            session.selectedAcl = null;
             return { success: true, output: '', clear: false, status: 'info', command, device: dev };
         }
         return { success: true, output: '', clear: false, status: 'info', command, device: dev };
@@ -15085,7 +15276,237 @@ function executeCliCommand(deviceId, rawInput) {
         }
     }
 
+    // 5d. STANDARD ACL CONFIGURATION MODE COMMANDS (config-std-nacl)
+    if (session.mode === 'config-std-nacl') {
+        const aclName = session.selectedAcl;
+        const acl = getRouterAcl(dev.id, aclName);
+        if (!acl) {
+            session.mode = 'config';
+            session.selectedAcl = null;
+            return {
+                success: false,
+                output: `% Access list ${aclName} not found. Returning to global configuration mode.`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
 
+        // no <sequence>
+        if (mainCmd === 'no') {
+            const seqArg = tokens[1];
+            if (!seqArg) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: no <sequence>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const seqNum = parseInt(seqArg, 10);
+            if (isNaN(seqNum) || seqNum <= 0) {
+                return {
+                    success: false,
+                    output: `% Invalid sequence number: "${seqArg}"`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            pushHistory();
+            const delRes = deleteRouterAclRule(dev.id, aclName, seqNum);
+            if (!delRes.success) {
+                return {
+                    success: false,
+                    output: `% ${delRes.reason}`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // remark <text>
+        if (mainCmd === 'remark') {
+            const remarkText = command.replace(/^\s*remark\s+/i, '').trim();
+            if (!remarkText) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: remark <text>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            pushHistory();
+            const addRes = addRouterAclRule(dev.id, aclName, { action: 'remark', remark: remarkText });
+            if (!addRes.success) {
+                return {
+                    success: false,
+                    output: `% ${addRes.reason}`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // permit <source> | deny <source>
+        if (mainCmd === 'permit' || mainCmd === 'deny') {
+            const parseRes = parseAclSourceTokens(tokens, 1);
+            if (!parseRes.success) {
+                return {
+                    success: false,
+                    output: parseRes.error,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            pushHistory();
+            const addRes = addRouterAclRule(dev.id, aclName, {
+                action: mainCmd,
+                sourceIp: parseRes.sourceIp,
+                sourceWildcard: parseRes.sourceWildcard,
+                isAny: parseRes.isAny,
+                isHost: parseRes.isHost
+            });
+            if (!addRes.success) {
+                return {
+                    success: false,
+                    output: `% ${addRes.reason}`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // Explicit sequence: <seq> permit ... | <seq> deny ... | <seq> remark ...
+        if (/^\d+$/.test(mainCmd)) {
+            const seq = parseInt(mainCmd, 10);
+            const subAction = (tokens[1] || '').toLowerCase();
+            if (subAction === 'remark') {
+                const remarkText = command.replace(/^\s*\d+\s+remark\s+/i, '').trim();
+                if (!remarkText) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: <seq> remark <text>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                const addRes = addRouterAclRule(dev.id, aclName, { sequence: seq, action: 'remark', remark: remarkText });
+                if (!addRes.success) {
+                    return {
+                        success: false,
+                        output: `% ${addRes.reason}`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            if (subAction === 'permit' || subAction === 'deny') {
+                const parseRes = parseAclSourceTokens(tokens, 2);
+                if (!parseRes.success) {
+                    return {
+                        success: false,
+                        output: parseRes.error,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                const addRes = addRouterAclRule(dev.id, aclName, {
+                    sequence: seq,
+                    action: subAction,
+                    sourceIp: parseRes.sourceIp,
+                    sourceWildcard: parseRes.sourceWildcard,
+                    isAny: parseRes.isAny,
+                    isHost: parseRes.isHost
+                });
+                if (!addRes.success) {
+                    return {
+                        success: false,
+                        output: `% ${addRes.reason}`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: false,
+                output: `% Invalid action after sequence number: "${subAction}". Expected "permit", "deny", or "remark".`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+    }
 
     // 6. HOSTNAME
     if (mainCmd === 'hostname') {
@@ -15537,6 +15958,165 @@ function executeCliCommand(deviceId, rawInput) {
         };
     }
 
+    // 9b. ACCESS-LIST <1-99> <permit|deny|remark> ...
+    if (mainCmd === 'access-list') {
+        if (!isRouter && !isSwitch) {
+            return {
+                success: false,
+                output: "% 'access-list' is a Cisco IOS command.",
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (session.mode === 'exec') {
+            return {
+                success: false,
+                output: '% "access-list" command must be executed in configuration mode.',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        const aclNumStr = tokens[1];
+        if (!aclNumStr) {
+            return {
+                success: false,
+                output: '% Incomplete command: access-list <1-99> <permit|deny|remark> ...',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        const aclNum = parseInt(aclNumStr, 10);
+        if (isNaN(aclNum) || aclNum < 1 || aclNum > 99) {
+            return {
+                success: false,
+                output: '% Invalid access list number. Standard access lists must be between 1 and 99.',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
+        const action = (tokens[2] || '').toLowerCase();
+        if (!action) {
+            return {
+                success: false,
+                output: '% Incomplete command: access-list <1-99> <permit|deny|remark> ...',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
+        let acl = getRouterAcl(dev.id, String(aclNum));
+        if (!acl) {
+            const createRes = createRouterAcl(dev.id, String(aclNum), 'standard');
+            if (!createRes.success) {
+                return {
+                    success: false,
+                    output: `% ${createRes.reason}`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            acl = createRes.acl;
+        }
+
+        if (action === 'remark') {
+            const remarkText = command.replace(/^\s*(?:do\s+)?access-list\s+\d+\s+remark\s+/i, '').trim();
+            if (!remarkText) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: access-list <1-99> remark <text>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            pushHistory();
+            const addRes = addRouterAclRule(dev.id, String(aclNum), { action: 'remark', remark: remarkText });
+            if (!addRes.success) {
+                return {
+                    success: false,
+                    output: `% ${addRes.reason}`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        if (action === 'permit' || action === 'deny') {
+            const parseRes = parseAclSourceTokens(tokens, 3);
+            if (!parseRes.success) {
+                return {
+                    success: false,
+                    output: parseRes.error,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            pushHistory();
+            const addRes = addRouterAclRule(dev.id, String(aclNum), {
+                action,
+                sourceIp: parseRes.sourceIp,
+                sourceWildcard: parseRes.sourceWildcard,
+                isAny: parseRes.isAny,
+                isHost: parseRes.isHost
+            });
+            if (!addRes.success) {
+                return {
+                    success: false,
+                    output: `% ${addRes.reason}`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        return {
+            success: false,
+            output: `% Invalid action "${action}". Expected "permit", "deny", or "remark".`,
+            clear: false,
+            status: 'error',
+            command,
+            device: dev
+        };
+    }
+
     // 10. INTERFACE <ifName> / INT <ifName>
     if (mainCmd === 'interface' || mainCmd === 'int') {
         if (!isRouter && !isSwitch) {
@@ -15805,6 +16385,173 @@ function executeCliCommand(deviceId, rawInput) {
     if (mainCmd === 'no') {
         const sub1 = tokens[1] || '';
         const sub2 = tokens[2] || '';
+        // no access-list <1-99>
+        if (sub1 === 'access-list' || sub1 === 'access-lists') {
+            if (!isRouter && !isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'no access-list' is a Cisco IOS command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode === 'exec') {
+                return {
+                    success: false,
+                    output: '% "no access-list" must be executed in configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const aclNumStr = tokens[2];
+            if (!aclNumStr) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: no access-list <1-99>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const num = parseInt(aclNumStr, 10);
+            if (isNaN(num) || num < 1 || num > 99) {
+                return {
+                    success: false,
+                    output: '% Invalid access list number. Standard access lists must be between 1 and 99.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            pushHistory();
+            deleteRouterAcl(dev.id, String(num));
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // no ip access-list standard <name>
+        if (sub1 === 'ip' && (sub2 === 'access-list' || sub2 === 'access-lists')) {
+            if (!isRouter && !isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'no ip access-list' is a Cisco IOS command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode === 'exec') {
+                return {
+                    success: false,
+                    output: '% "no ip access-list" must be executed in configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const aclType = (tokens[3] || '').toLowerCase();
+            const aclName = (rawTokens[4] || tokens[4] || '').trim();
+            if (aclType !== 'standard') {
+                return {
+                    success: false,
+                    output: '% Only standard access lists are supported: no ip access-list standard <name>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (!aclName) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: no ip access-list standard <name>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            pushHistory();
+            deleteRouterAcl(dev.id, aclName);
+            if (session.mode === 'config-std-nacl' && session.selectedAcl === aclName) {
+                session.mode = 'config';
+                session.selectedAcl = null;
+            }
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // no ip access-group [acl] <in|out>
+        if (sub1 === 'ip' && sub2 === 'access-group') {
+            if (session.mode !== 'config-if' && session.mode !== 'config-subif') {
+                return {
+                    success: false,
+                    output: '% "no ip access-group" must be executed inside interface configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            let dir = '';
+            if (tokens.length >= 5) {
+                dir = (tokens[4] || '').toLowerCase();
+            } else if (tokens.length === 4) {
+                const candidate = (tokens[3] || '').toLowerCase();
+                if (candidate === 'in' || candidate === 'out') {
+                    dir = candidate;
+                }
+            } else if (tokens.length === 3) {
+                const candidate = (tokens[2] || '').toLowerCase();
+                if (candidate === 'in' || candidate === 'out') {
+                    dir = candidate;
+                }
+            }
+            if (dir !== 'in' && dir !== 'out') {
+                return {
+                    success: false,
+                    output: '% Incomplete command: no ip access-group <1-99|name> <in|out>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const iface = session.selectedInterface;
+            pushHistory();
+            unbindRouterInterfaceAcl(dev.id, iface, dir);
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
 
         // no vlan <id>
         if (sub1 === 'vlan') {
@@ -17384,6 +18131,135 @@ function executeCliCommand(deviceId, rawInput) {
             pushHistory();
             for (const sIp of serverIps) {
                 addDnsServer(dev, sIp);
+            }
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // ip access-list standard <name>
+        if (tokens[1] === 'access-list' || tokens[1] === 'access-lists') {
+            if (!isRouter && !isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'ip access-list' is a Cisco IOS command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode === 'exec') {
+                return {
+                    success: false,
+                    output: '% "ip access-list" must be executed in configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const aclType = (tokens[2] || '').toLowerCase();
+            const aclName = (rawTokens[3] || tokens[3] || '').trim();
+            if (!aclType || !aclName) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: ip access-list standard <name>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (aclType !== 'standard') {
+                return {
+                    success: false,
+                    output: '% Only standard access lists are supported: ip access-list standard <name>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            let acl = getRouterAcl(dev.id, aclName);
+            if (!acl) {
+                const createRes = createRouterAcl(dev.id, aclName, 'standard');
+                if (!createRes.success) {
+                    return {
+                        success: false,
+                        output: `% ${createRes.reason}`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+            }
+            session.prevMode = session.mode;
+            session.mode = 'config-std-nacl';
+            session.selectedAcl = aclName;
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // ip access-group <1-99|name> <in|out>
+        if (tokens[1] === 'access-group') {
+            if (!isRouter && !isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'ip access-group' is a Cisco IOS command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode !== 'config-if' && session.mode !== 'config-subif') {
+                return {
+                    success: false,
+                    output: '% "ip access-group" must be executed inside interface configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const aclKey = (rawTokens[2] || tokens[2] || '').trim();
+            const dir = (tokens[3] || '').toLowerCase().trim();
+            if (!aclKey || (dir !== 'in' && dir !== 'out')) {
+                return {
+                    success: false,
+                    output: '% Incomplete command: ip access-group <1-99|name> <in|out>',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const iface = session.selectedInterface;
+            pushHistory();
+            const bindRes = bindRouterInterfaceAcl(dev.id, iface, dir, aclKey);
+            if (!bindRes.success) {
+                return {
+                    success: false,
+                    output: `% ${bindRes.reason}`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
             }
             render();
             return {
