@@ -40,6 +40,7 @@ const networkState = {
     sendFrameState: null,
     lastFrameResult: null,
     lastTracerouteResult: null,
+    lastDnsResult: null,
     switchRuntime: {},
     routerRuntime: {},
     arpRuntime: {},
@@ -1411,6 +1412,9 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
     const icmpErrorPacket = options.icmpErrorPacket || networkState.lastFrameResult?.icmpErrorPacket;
     const icmpErrorResult = options.icmpErrorResult || networkState.lastFrameResult?.icmpErrorResult;
     const isIcmp = Boolean(packetInfo?.icmp && reverseHopActions.length > 0);
+    const isDns = Boolean(options.isDns);
+    const dnsResult = options.dnsResult || null;
+    const dnsAttempt = options.dnsAttempt || null;
 
     const animation = {
         packet,
@@ -1421,6 +1425,9 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
         reverseHopActions,
         arpResult,
         isIcmp,
+        isDns,
+        dnsResult,
+        dnsAttempt,
         icmpErrorPacket,
         icmpErrorResult,
         animationFrame: null,
@@ -1469,7 +1476,15 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
 
         if (delivered && !finishOptions.isIcmpError) {
             setFrameDeviceHighlight(endNodeId, 'is-frame-destination');
-            setBadgeConfig(getHopBadgeConfig(null, false, true, { isIcmp }));
+            if (animation.isDns) {
+                setBadgeConfig({
+                    title: 'DNS RESOLVED',
+                    subtitle: `${animation.dnsResult?.hostname || ''} → ${animation.dnsAttempt?.response?.address || animation.dnsResult?.address || ''}`,
+                    modifier: 'dns-success'
+                });
+            } else {
+                setBadgeConfig(getHopBadgeConfig(null, false, true, { isIcmp }));
+            }
         } else if (finishOptions.isErrorDelivered) {
             setFrameDeviceHighlight(endNodeId, 'is-frame-destination');
             const errType = formatIcmpType(animation.icmpErrorPacket?.icmp?.type || animation.icmpErrorPacket?.icmp?.typeName);
@@ -1480,9 +1495,17 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
             });
         } else {
             setFrameDeviceHighlight(endNodeId, 'is-frame-dropped');
-            const dropHop = (animation.isReverse ? reverseHopActions : hopActions).find((h) => h.deviceId === endNodeId && h.action === 'DROP')
-                || (animation.isReverse ? reverseHopActions : hopActions).slice(-1)[0];
-            setBadgeConfig(getHopBadgeConfig(dropHop || { action: 'DROP', reason }, true, false));
+            if (animation.isDns) {
+                setBadgeConfig({
+                    title: 'DNS QUERY FAILED',
+                    subtitle: animation.dnsAttempt?.reason || reason || dropReason || 'Lookup failed',
+                    modifier: 'drop'
+                });
+            } else {
+                const dropHop = (animation.isReverse ? reverseHopActions : hopActions).find((h) => h.deviceId === endNodeId && h.action === 'DROP')
+                    || (animation.isReverse ? reverseHopActions : hopActions).slice(-1)[0];
+                setBadgeConfig(getHopBadgeConfig(dropHop || { action: 'DROP', reason }, true, false));
+            }
         }
 
         animation.cleanupTimer = window.setTimeout(() => {
@@ -1529,7 +1552,13 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
                 isIcmpError: animation.isIcmpError
             }));
         } else {
-            if (animation.isIcmpError) {
+            if (animation.isDns) {
+                setBadgeConfig({
+                    title: 'DNS RESPONSE',
+                    subtitle: `${animation.dnsResult?.hostname || ''} = ${animation.dnsAttempt?.response?.address || animation.dnsResult?.address || ''}`,
+                    modifier: 'dns-success'
+                });
+            } else if (animation.isIcmpError) {
                 const errType = formatIcmpType(animation.icmpErrorPacket?.icmp?.type || animation.icmpErrorPacket?.icmp?.typeName);
                 setBadgeConfig({
                     title: `ICMP ${errType.toUpperCase()}`,
@@ -1621,7 +1650,13 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
             const isArpFlood = Boolean(arpResult && !arpResult.cacheHit && (hopAction?.reason === 'broadcast' || hopAction?.destinationMac === 'FF:FF:FF:FF:FF:FF'));
             setBadgeConfig(getHopBadgeConfig(hopAction, false, false, { isArpFlood }));
         } else {
-            if (arpResult && !arpResult.cacheHit && arpResult.targetIp) {
+            if (animation.isDns) {
+                setBadgeConfig({
+                    title: 'DNS QUERY',
+                    subtitle: `${sourceId} → ${curPath[curPath.length - 1]} (${animation.dnsResult?.hostname || ''})`,
+                    modifier: 'dns-query'
+                });
+            } else if (arpResult && !arpResult.cacheHit && arpResult.targetIp) {
                 setBadgeConfig(getHopBadgeConfig(null, false, false, {
                     isArpRequest: true,
                     targetIp: arpResult.targetIp
@@ -1710,6 +1745,29 @@ function startFrameAnimation(path, callbacks = {}, isDelivered = true, dropReaso
 
                     finish(false, dropReason, curPath[curPath.length - 1]);
                     return;
+                }
+
+                if (animation.isDns) {
+                    if (isDelivered && animation.dnsAttempt?.success) {
+                        const destNodeId = curPath[curPath.length - 1];
+                        setFrameDeviceHighlight(destNodeId, 'is-frame-destination');
+                        packet.classList.remove('is-moving');
+                        setBadgeConfig({
+                            title: 'DNS QUERY ACCEPTED',
+                            subtitle: `Resolved to ${animation.dnsAttempt?.response?.address || animation.dnsResult?.address || ''}`,
+                            modifier: 'dns-reply'
+                        });
+                        animation.turnaroundTimer = window.setTimeout(() => {
+                            if (frameAnimation !== animation || animation.cancelled) return;
+                            animation.isReverse = true;
+                            packet.innerHTML = '<span class="frame-packet__icon">DNS RESP</span>';
+                            animateReverseHop(0);
+                        }, 400);
+                        return;
+                    } else {
+                        finish(false, dropReason, curPath[curPath.length - 1]);
+                        return;
+                    }
                 }
 
                 if (!isIcmp) {
@@ -2066,6 +2124,8 @@ function renderPropertiesPanel() {
                     `).join('')}
                 </div>
                 ${['pc', 'laptop', 'server'].includes(selected.type) ? renderArpTableInspector(selected) : ''}
+                ${renderDnsClientInspector(selected)}
+                ${['server', 'switch'].includes(selected.type) || (selected.dnsServerService && (selected.dnsServerService.enabled || selected.dnsServerService.records?.length > 0)) ? renderDnsServerInspector(selected) : ''}
                 ${selected.type === 'switch' ? renderSwitchInspector(selected) : ''}
                 <div class="property-summary property-summary--subtle" id="connectionTestPanel">
                     <h4>CONNECTION TEST</h4>
@@ -2815,12 +2875,501 @@ function renderArpResolutionSection(arpResult) {
     `;
 }
 
+/**
+ * V5.15 PHASE 3 — DNS PACKET OBSERVABILITY, TIMELINE & INSPECTORS
+ */
+
+function renderDnsPacketInspector(packet, options = {}) {
+    if (!packet) {
+        return `
+            <div class="packet-inspector packet-inspector--dns" role="region" aria-label="DNS Packet Inspector">
+                <h4>PACKET INSPECTOR</h4>
+                <div class="packet-inspector__summary">
+                    <div class="packet-inspector__summary-title">DNS Packet</div>
+                </div>
+                <p class="empty-state">No DNS packet</p>
+            </div>
+        `;
+    }
+    const pkt = packet.packet || packet;
+    const isQuery = pkt.type === 'DNS_QUERY';
+    const isResponse = pkt.type === 'DNS_RESPONSE';
+
+    // If passed a DNS simulation result or attempt containing both query and response
+    if (!isQuery && !isResponse && (packet.query || packet.response || packet.queryPacket || packet.responsePacket)) {
+        let html = '';
+        const q = packet.query || packet.queryPacket;
+        const r = packet.response || packet.responsePacket;
+        if (q) html += renderDnsPacketInspector(q, options);
+        if (r) html += renderDnsPacketInspector(r, options);
+        return html;
+    }
+
+    if (!isQuery && !isResponse && pkt.protocol !== 'DNS') {
+        return '';
+    }
+
+    const sourceDev = pkt.sourceDeviceId ? getDeviceById(pkt.sourceDeviceId) : null;
+    const destDev = pkt.destinationDeviceId ? getDeviceById(pkt.destinationDeviceId) : null;
+
+    const sourceText = sourceDev
+        ? `${sourceDev.name} (${pkt.sourceIp || 'N/A'})`
+        : (pkt.sourceIp || 'N/A');
+
+    const destText = destDev
+        ? `${destDev.name} (${pkt.destinationIp || 'N/A'})`
+        : (pkt.destinationIp || 'N/A');
+
+    const serverDisplay = pkt.serverIp || (isResponse ? (sourceDev?.name || pkt.sourceIp) : (destDev?.name || pkt.destinationIp));
+
+    const fields = [];
+    fields.push({ label: 'Protocol', value: 'DNS' });
+    fields.push({ label: 'Packet Type', value: pkt.type || (isQuery ? 'DNS_QUERY' : 'DNS_RESPONSE') });
+    if (pkt.id) {
+        fields.push({ label: 'Packet ID', value: pkt.id, mono: true });
+    }
+    if (pkt.transactionId) {
+        fields.push({ label: 'Transaction ID', value: pkt.transactionId, mono: true });
+    }
+    if (isResponse && pkt.queryId) {
+        fields.push({ label: 'Query ID', value: pkt.queryId, mono: true });
+    }
+    if (pkt.sourceMac) {
+        fields.push({ label: 'Source MAC', value: pkt.sourceMac, mono: true });
+    }
+    if (pkt.destinationMac) {
+        fields.push({ label: 'Destination MAC', value: pkt.destinationMac, mono: true });
+    }
+    fields.push({ label: 'Source', value: sourceText, mono: true });
+    fields.push({ label: 'Destination', value: destText, mono: true });
+    fields.push({ label: 'Hostname', value: pkt.hostname || 'N/A' });
+    fields.push({ label: 'Record Type', value: pkt.recordType || 'A' });
+
+    if (isResponse && serverDisplay) {
+        fields.push({ label: 'DNS Server', value: serverDisplay, mono: true });
+    }
+
+    const resolvedAddr = pkt.resolvedIp || pkt.address || '';
+
+    if (isResponse) {
+        fields.push({
+            label: 'Success',
+            value: pkt.success ? 'true' : 'false',
+            statusClass: pkt.success ? 'packet-inspector__value--success' : 'packet-inspector__value--error'
+        });
+        if (pkt.success) {
+            fields.push({
+                label: 'Resolved Address',
+                value: resolvedAddr || 'N/A',
+                mono: true,
+                statusClass: 'packet-inspector__value--success'
+            });
+        } else {
+            fields.push({
+                label: 'Failure Reason',
+                value: pkt.reason || 'Unknown failure',
+                statusClass: 'packet-inspector__value--warning'
+            });
+        }
+    }
+
+    const itemsHtml = fields.map((f) => `
+        <div class="packet-inspector__item">
+            <span class="packet-inspector__label">${escapeHtml(f.label)}</span>
+            <strong class="packet-inspector__value ${f.mono ? 'packet-inspector__value--mono' : ''} ${f.statusClass || ''}">${escapeHtml(String(f.value))}</strong>
+        </div>
+    `).join('');
+
+    const title = isQuery ? 'DNS Query' : (pkt.success ? 'DNS Response (Success)' : 'DNS Response (Failed)');
+    const endpoints = (pkt.sourceIp && pkt.destinationIp)
+        ? `${pkt.sourceIp} → ${pkt.destinationIp}`
+        : '';
+
+    const answerSection = (isResponse && pkt.success)
+        ? `
+            <div class="packet-inspector__section dns-section dns-section--answer">
+                <h5 class="packet-inspector__section-title">DNS Answer Section</h5>
+                <div class="packet-inspector__grid">
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Hostname</span>
+                        <strong class="packet-inspector__value packet-inspector__value--mono">${escapeHtml(pkt.hostname || '')}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Type</span>
+                        <strong class="packet-inspector__value">${escapeHtml(pkt.recordType || 'A')}</strong>
+                    </div>
+                    <div class="packet-inspector__item">
+                        <span class="packet-inspector__label">Address</span>
+                        <strong class="packet-inspector__value packet-inspector__value--mono packet-inspector__value--success">${escapeHtml(resolvedAddr)}</strong>
+                    </div>
+                </div>
+            </div>
+        `
+        : '';
+
+    const failureBanner = (isResponse && !pkt.success)
+        ? `
+            <div class="dns-status-badge dns-status-badge--failure" style="margin: 8px 0;">
+                Resolution Failed: ${escapeHtml(pkt.reason || 'FAILED')}
+            </div>
+        `
+        : '';
+
+    const successBanner = (isResponse && pkt.success)
+        ? `
+            <div class="dns-status-badge dns-status-badge--success" style="margin: 8px 0;">
+                SUCCESS: Resolved
+            </div>
+        `
+        : '';
+
+    return `
+        <div class="packet-inspector packet-inspector--dns" role="region" aria-label="DNS Packet Inspector">
+            <h4>PACKET INSPECTOR</h4>
+            <div class="packet-inspector__summary">
+                <div class="packet-inspector__summary-title">${escapeHtml(title)}</div>
+                ${endpoints ? `<div class="packet-inspector__summary-endpoints">${escapeHtml(endpoints)}</div>` : ''}
+                ${successBanner}
+                ${failureBanner}
+            </div>
+            <div class="packet-inspector__section packet-inspector__section--dns dns-section dns-section--query">
+                <h5 class="packet-inspector__section-title">DNS ${isQuery ? 'Query Section' : 'QUERY'}</h5>
+                <div class="packet-inspector__grid">
+                    ${itemsHtml}
+                </div>
+            </div>
+            ${answerSection}
+        </div>
+    `;
+}
+
+function renderDnsTimeline(dnsResult) {
+    if (!dnsResult) {
+        return `
+            <div class="dns-timeline-panel property-summary" role="region" aria-label="DNS Timeline">
+                <h4>DNS EVENT TIMELINE</h4>
+                <p class="empty-state">No DNS resolution events</p>
+            </div>
+        `;
+    }
+    const attempts = Array.isArray(dnsResult.attempts) ? dnsResult.attempts : [];
+    const clientDev = dnsResult.query?.sourceDeviceId
+        ? getDeviceById(dnsResult.query.sourceDeviceId)
+        : null;
+    const clientName = clientDev?.name || dnsResult.query?.sourceDeviceId || 'Client';
+    const targetHost = dnsResult.hostname || '';
+    const resolvedIp = dnsResult.resolvedIp || dnsResult.address || '';
+
+    let timelineItems = [];
+
+    if (attempts.length === 0) {
+        timelineItems.push(`
+            <div class="dns-timeline-step dns-timeline-step--failed dns-timeline-step--step-1">
+                <div class="dns-timeline-marker">✕</div>
+                <div class="dns-timeline-content">
+                    <span class="dns-timeline-time">${new Date().toLocaleTimeString()}</span>
+                    <strong class="dns-timeline-node">${escapeHtml(clientName)}</strong>
+                    <div class="dns-timeline-detail dns-timeline-detail--error">${escapeHtml(dnsResult.reason || 'DNS lookup failed')}</div>
+                </div>
+            </div>
+        `);
+    } else {
+        attempts.forEach((attempt, index) => {
+            const serverDev = attempt.serverDeviceId
+                ? getDeviceById(attempt.serverDeviceId)
+                : findDeviceByIp(attempt.serverIp)?.device;
+            const serverName = serverDev ? `${serverDev.name} (${attempt.serverIp})` : attempt.serverIp;
+            const isLast = index === attempts.length - 1;
+            const roleLabel = index === 0 ? 'Primary' : (index === 1 ? 'Secondary' : `Attempt ${index + 1}`);
+            const attemptTime = new Date(attempt.query?.createdAt || Date.now()).toLocaleTimeString();
+
+            // 1. Client → DNS Server (Query)
+            timelineItems.push(`
+                <div class="dns-timeline-step dns-timeline-step--query dns-timeline-step--step-${index * 4 + 1}">
+                    <div class="dns-timeline-marker">↓</div>
+                    <div class="dns-timeline-content">
+                        <div class="dns-timeline-header">
+                            <span class="dns-timeline-time">${attemptTime}</span>
+                            <span class="dns-server-priority-badge">${roleLabel}</span>
+                            <span class="dns-timeline-node">${escapeHtml(clientName)}</span>
+                            <span class="dns-timeline-arrow">→</span>
+                            <span class="dns-timeline-node">${escapeHtml(serverName)}</span>
+                        </div>
+                        <div class="dns-timeline-detail">DNS Query: <code>${escapeHtml(targetHost)}</code> (type ${escapeHtml(attempt.query?.recordType || 'A')})</div>
+                    </div>
+                </div>
+            `);
+
+            // 2. Evaluation / Result
+            if (attempt.success) {
+                timelineItems.push(`
+                    <div class="dns-timeline-step dns-timeline-step--accepted dns-timeline-step--step-${index * 4 + 2}">
+                        <div class="dns-timeline-marker">✓</div>
+                        <div class="dns-timeline-content">
+                            <span class="dns-timeline-time">${attemptTime}</span>
+                            <strong class="dns-timeline-node">${escapeHtml(serverName)}</strong>
+                            <div class="dns-timeline-detail dns-timeline-detail--success">Query accepted</div>
+                        </div>
+                    </div>
+                `);
+
+                // 3. DNS Server → Client (Response)
+                const answerAddr = attempt.response?.address || attempt.response?.resolvedIp || resolvedIp;
+                timelineItems.push(`
+                    <div class="dns-timeline-step dns-timeline-step--response dns-timeline-step--step-${index * 4 + 3}">
+                        <div class="dns-timeline-marker">↓</div>
+                        <div class="dns-timeline-content">
+                            <div class="dns-timeline-header">
+                                <span class="dns-timeline-time">${attemptTime}</span>
+                                <span class="dns-timeline-node">${escapeHtml(serverName)}</span>
+                                <span class="dns-timeline-arrow">→</span>
+                                <span class="dns-timeline-node">${escapeHtml(clientName)}</span>
+                            </div>
+                            <div class="dns-timeline-detail">Response: <code>${escapeHtml(answerAddr)}</code></div>
+                        </div>
+                    </div>
+                `);
+
+                // 4. Client resolved
+                timelineItems.push(`
+                    <div class="dns-timeline-step dns-timeline-step--complete dns-timeline-step--step-${index * 4 + 4}">
+                        <div class="dns-timeline-marker">★</div>
+                        <div class="dns-timeline-content">
+                            <span class="dns-timeline-time">${attemptTime}</span>
+                            <strong class="dns-timeline-node">${escapeHtml(clientName)}</strong>
+                            <div class="dns-timeline-detail">Resolved <code>${escapeHtml(targetHost)}</code> to <code>${escapeHtml(answerAddr)}</code></div>
+                        </div>
+                    </div>
+                `);
+            } else {
+                let reasonLabel = attempt.reason || 'Lookup failed';
+                if (attempt.reason === 'DNS_SERVER_UNREACHABLE') {
+                    reasonLabel = `DNS_SERVER_UNREACHABLE: Server ${attempt.serverIp} unreachable`;
+                } else if (attempt.reason === 'DNS_SERVER_NOT_FOUND') {
+                    reasonLabel = `DNS_SERVER_NOT_FOUND: Server ${attempt.serverIp} not found`;
+                } else if (attempt.reason === 'DNS_SERVICE_NOT_ENABLED') {
+                    reasonLabel = `DNS_SERVICE_NOT_ENABLED: DNS service disabled on server ${attempt.serverIp}`;
+                } else if (attempt.reason === 'HOST_NOT_FOUND') {
+                    reasonLabel = `HOST_NOT_FOUND: No record for "${targetHost}" on server ${attempt.serverIp}`;
+                }
+
+                timelineItems.push(`
+                    <div class="dns-timeline-step dns-timeline-step--failed dns-timeline-step--step-${index * 4 + 2}">
+                        <div class="dns-timeline-marker">✕</div>
+                        <div class="dns-timeline-content">
+                            <span class="dns-timeline-time">${attemptTime}</span>
+                            <strong class="dns-timeline-node">${escapeHtml(serverName)}</strong>
+                            <div class="dns-timeline-detail dns-timeline-detail--error">${escapeHtml(reasonLabel)}</div>
+                        </div>
+                    </div>
+                `);
+
+                if (!isLast) {
+                    const nextAttempt = attempts[index + 1];
+                    timelineItems.push(`
+                        <div class="dns-timeline-step dns-timeline-step--failover dns-timeline-step--step-${index * 4 + 3}">
+                            <div class="dns-timeline-marker">↷</div>
+                            <div class="dns-timeline-content">
+                                <span class="dns-timeline-time">${attemptTime}</span>
+                                <div class="dns-timeline-failover-banner dns-timeline-detail dns-timeline-detail--failover">
+                                    Failover to next DNS server (${escapeHtml(nextAttempt.serverIp)})
+                                </div>
+                            </div>
+                        </div>
+                    `);
+                }
+            }
+        });
+    }
+
+    const badgeClass = dnsResult.success ? 'dns-status-badge--success' : 'dns-status-badge--failure';
+    const badgeText = dnsResult.success ? 'SUCCESS' : 'FAILED';
+
+    return `
+        <div class="dns-timeline-panel property-summary" role="region" aria-label="DNS Timeline">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h4>DNS EVENT TIMELINE</h4>
+                <span class="dns-status-badge ${badgeClass}">${badgeText}</span>
+            </div>
+            <div class="property-status-message ${dnsResult.success ? 'property-status-message--success' : 'property-status-message--warning'}">
+                ${dnsResult.success ? `✓ Resolved "${escapeHtml(targetHost)}" to ${escapeHtml(resolvedIp)}` : `✕ Failed to resolve "${escapeHtml(targetHost)}": ${escapeHtml(dnsResult.reason)}`}
+            </div>
+            <div class="dns-timeline-flow">
+                ${timelineItems.join('')}
+            </div>
+        </div>
+    `;
+}
+
+function renderDnsServerInspector(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev || (dev.type !== 'router' && dev.type !== 'server')) return '';
+    ensureDeviceDnsServerState(dev);
+    const enabled = isDnsServerEnabled(dev);
+    const records = getDnsRecords(dev);
+
+    const recordsHtml = records.length > 0
+        ? records.map((r) => `
+            <div class="dns-record-item">
+                <span class="dns-record-host">${escapeHtml(r.hostname)}</span>
+                <span class="dns-record-arrow">→</span>
+                <span class="dns-record-addr">${escapeHtml(r.address || r.ip || '')}</span>
+            </div>
+        `).join('')
+        : '<p class="empty-state">No static DNS records configured</p>';
+
+    const badgeClass = enabled ? 'dns-status-badge--success' : 'dns-status-badge--disabled';
+
+    return `
+        <div class="property-summary dns-server-inspector" id="dnsServerSection">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h4>DNS SERVER</h4>
+                <span class="dns-status-badge ${badgeClass}">${enabled ? 'Enabled' : 'Disabled'}</span>
+            </div>
+            <div class="property-status-message ${enabled ? 'property-status-message--success' : 'property-status-message--subtle'}">
+                DNS Service: ${enabled ? 'Enabled' : 'Disabled'}
+            </div>
+            <div class="dns-records-container">
+                <h5>DNS Records:</h5>
+                <div class="dns-records-list">
+                    ${recordsHtml}
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function renderDnsClientInspector(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' && deviceOrId ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return '';
+    ensureDeviceDnsClientState(dev);
+    const servers = getDnsServers(dev);
+
+    const serversHtml = servers.length > 0
+        ? servers.map((ip, idx) => {
+            const role = idx === 0 ? 'Primary' : (idx === 1 ? 'Secondary' : 'Backup');
+            return `
+            <div class="dns-server-entry">
+                <span class="dns-server-order">${idx + 1}.</span>
+                <strong class="dns-server-ip">${escapeHtml(ip)}</strong>
+                <span class="dns-server-priority-badge">${role}</span>
+            </div>
+        `;}).join('')
+        : '<p class="empty-state">No DNS servers configured</p>';
+
+    return `
+        <div class="property-summary dns-client-inspector" id="dnsClientSection">
+            <h4>DNS CLIENT</h4>
+            <div class="dns-servers-container">
+                <h5>DNS Servers:</h5>
+                <div class="dns-servers-list">
+                    ${serversHtml}
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function startDnsAnimation(dnsResult, callbacks = {}) {
+    if (!dnsResult) {
+        callbacks.onDropped?.('No DNS result provided');
+        callbacks.onComplete?.();
+        return;
+    }
+    const layer = document.getElementById('frameAnimationLayer');
+    const attempts = Array.isArray(dnsResult.attempts) ? dnsResult.attempts : [];
+
+    if (!layer || typeof layer.getBoundingClientRect !== 'function' || !document.body?.contains?.(layer)) {
+        if (attempts.length === 0) {
+            callbacks.onStep?.(null, 0);
+        } else {
+            attempts.forEach((att, idx) => {
+                callbacks.onStep?.(att, idx);
+            });
+        }
+        if (dnsResult.success) {
+            callbacks.onDelivered?.();
+        } else {
+            callbacks.onDropped?.(dnsResult.reason);
+        }
+        callbacks.onComplete?.(dnsResult);
+        return;
+    }
+
+    if (attempts.length === 0) {
+        callbacks.onDropped?.(dnsResult.reason);
+        callbacks.onComplete?.(dnsResult);
+        return;
+    }
+
+    let attemptIndex = 0;
+
+    const runNextAttempt = () => {
+        if (attemptIndex >= attempts.length) {
+            if (dnsResult.success) {
+                callbacks.onDelivered?.();
+            } else {
+                callbacks.onDropped?.(dnsResult.reason);
+            }
+            callbacks.onComplete?.(dnsResult);
+            return;
+        }
+
+        const attempt = attempts[attemptIndex];
+        callbacks.onStep?.(attempt, attemptIndex);
+
+        const path = attempt.path && attempt.path.length >= 2
+            ? attempt.path
+            : [dnsResult.query?.sourceDeviceId, attempt.serverDeviceId].filter(Boolean);
+
+        if (path.length < 2) {
+            attemptIndex++;
+            runNextAttempt();
+            return;
+        }
+
+        const isDelivered = Boolean(attempt.success);
+        const dropReason = attempt.reason || 'DNS query failed';
+
+        startFrameAnimation(path, {
+            onDelivered: () => {
+                if (attempt.success) {
+                    callbacks.onDelivered?.();
+                    callbacks.onComplete?.(dnsResult);
+                } else {
+                    attemptIndex++;
+                    runNextAttempt();
+                }
+            },
+            onDropped: (reason) => {
+                if (attemptIndex < attempts.length - 1) {
+                    attemptIndex++;
+                    runNextAttempt();
+                } else {
+                    callbacks.onDropped?.(reason || dropReason);
+                    callbacks.onComplete?.(dnsResult);
+                }
+            }
+        }, isDelivered, dropReason, {
+            isDns: true,
+            dnsResult,
+            dnsAttempt: attempt,
+            packet: attempt.query
+        });
+    };
+
+    runNextAttempt();
+}
+
 function renderPacketInspector(packet, result) {
     if (!packet && !result) {
         return '';
     }
 
     const pkt = packet || result?.packet || {};
+    if (pkt.type === 'DNS_QUERY' || pkt.type === 'DNS_RESPONSE' || pkt.protocol === 'DNS' || result?.query || result?.response) {
+        return renderDnsPacketInspector(pkt.type ? pkt : (result.response || result.query || result), { result });
+    }
     const path = result?.path || [];
     const sourceDev = path.length ? getDeviceById(path[0]) : null;
     const destDev = path.length ? getDeviceById(path[path.length - 1]) : null;
@@ -3127,6 +3676,19 @@ function getSendFramePanelHtml() {
         `;
     }
 
+    let dnsHtml = '';
+    if (networkState.lastDnsResult) {
+        const dnsRes = networkState.lastDnsResult;
+        const dnsTimelineHtml = renderDnsTimeline(dnsRes);
+        const dnsInspectorHtml = renderDnsPacketInspector(dnsRes.response || dnsRes.query || dnsRes);
+        dnsHtml = `
+            <div class="dns-activity-container">
+                ${dnsTimelineHtml}
+                ${dnsInspectorHtml}
+            </div>
+        `;
+    }
+
     return cleanDisplayText(`
         <div class="property-card">
             <h3>Send Frame</h3>
@@ -3164,6 +3726,7 @@ function getSendFramePanelHtml() {
                 </div>
             </div>
             ${tracerouteHtml}
+            ${dnsHtml}
             ${networkState.lastFrameResult ? `
                 <div class="property-summary frame-transmission">
                     <h4>FRAME TRANSMISSION</h4>
@@ -3709,6 +4272,8 @@ function renderRouterInspector(selected) {
             ${renderOspfInspector(selected)}
             ${renderRouterAclSection(selected)}
             ${renderDhcpServerInspector(selected)}
+            ${renderDnsServerInspector(selected)}
+            ${renderDnsClientInspector(selected)}
             ${renderArpTableInspector(selected)}
             <div class="property-actions">
                 <button id="applyDeviceConfig" class="toolbar-button" type="button" ${isValid ? '' : 'disabled'}>Apply Changes</button>
@@ -20894,41 +21459,151 @@ let dnsPacketCounter = 0;
 /**
  * Creates a deterministic simulated DNS query packet.
  */
-function createDnsQueryPacket(options = {}) {
+function createDnsQueryPacket(optionsOrDeviceId = {}, sourceIp, destinationIp, hostname, recordType) {
     dnsPacketCounter++;
+    let opts = {};
+    if (typeof optionsOrDeviceId === 'string') {
+        opts = {
+            sourceDeviceId: optionsOrDeviceId,
+            sourceIp: sourceIp || '',
+            destinationIp: destinationIp || '',
+            hostname: hostname || '',
+            recordType: recordType || 'A'
+        };
+    } else {
+        opts = optionsOrDeviceId || {};
+    }
     return {
         id: `dns-pkt-${Date.now()}-${dnsPacketCounter}`,
         type: 'DNS_QUERY',
-        sourceDeviceId: options.sourceDeviceId || null,
-        sourceIp: options.sourceIp || '',
-        destinationDeviceId: options.destinationDeviceId || null,
-        destinationIp: options.destinationIp || '',
-        hostname: options.hostname || '',
-        recordType: options.recordType || 'A',
-        createdAt: typeof options.createdAt === 'number' ? options.createdAt : Date.now()
+        protocol: 'DNS',
+        sourceDeviceId: opts.sourceDeviceId || null,
+        sourceIp: opts.sourceIp || '',
+        destinationDeviceId: opts.destinationDeviceId || null,
+        destinationIp: opts.destinationIp || '',
+        hostname: opts.hostname || '',
+        recordType: opts.recordType || 'A',
+        createdAt: typeof opts.createdAt === 'number' ? opts.createdAt : Date.now()
     };
 }
 
 /**
  * Creates a deterministic simulated DNS response packet.
  */
-function createDnsResponsePacket(options = {}) {
+function createDnsResponsePacket(optionsOrQuery = {}, success, address, reason, serverIp) {
     dnsPacketCounter++;
+    let opts = {};
+    if (optionsOrQuery && (optionsOrQuery.id || typeof success === 'boolean')) {
+        opts = {
+            queryId: optionsOrQuery.id || null,
+            sourceDeviceId: optionsOrQuery.destinationDeviceId || null,
+            sourceIp: serverIp || optionsOrQuery.destinationIp || '',
+            destinationDeviceId: optionsOrQuery.sourceDeviceId || null,
+            destinationIp: optionsOrQuery.sourceIp || '',
+            hostname: optionsOrQuery.hostname || '',
+            recordType: optionsOrQuery.recordType || 'A',
+            success: Boolean(success),
+            address: address || '',
+            resolvedIp: address || '',
+            reason: reason || null,
+            serverIp: serverIp || optionsOrQuery.destinationIp || ''
+        };
+    } else {
+        opts = optionsOrQuery || {};
+    }
     return {
         id: `dns-pkt-${Date.now()}-${dnsPacketCounter}`,
         type: 'DNS_RESPONSE',
-        queryId: options.queryId || null,
-        sourceDeviceId: options.sourceDeviceId || null,
-        sourceIp: options.sourceIp || '',
-        destinationDeviceId: options.destinationDeviceId || null,
-        destinationIp: options.destinationIp || '',
-        hostname: options.hostname || '',
-        recordType: options.recordType || 'A',
-        success: Boolean(options.success),
-        address: options.address || '',
-        reason: options.reason || null,
-        serverIp: options.serverIp || options.sourceIp || '',
-        createdAt: typeof options.createdAt === 'number' ? options.createdAt : Date.now()
+        protocol: 'DNS',
+        queryId: opts.queryId || null,
+        sourceDeviceId: opts.sourceDeviceId || null,
+        sourceIp: opts.sourceIp || '',
+        destinationDeviceId: opts.destinationDeviceId || null,
+        destinationIp: opts.destinationIp || '',
+        hostname: opts.hostname || '',
+        recordType: opts.recordType || 'A',
+        success: Boolean(opts.success),
+        address: opts.address || opts.resolvedIp || '',
+        resolvedIp: opts.resolvedIp || opts.address || '',
+        reason: opts.reason || null,
+        serverIp: opts.serverIp || opts.sourceIp || '',
+        createdAt: typeof opts.createdAt === 'number' ? opts.createdAt : Date.now()
+    };
+}
+
+/**
+ * Creates a structured observable DNS Query event object.
+ */
+function createDnsQueryEvent(queryPacket, clientDev, serverDev, extra = {}) {
+    const pkt = queryPacket || {};
+    const srcDev = clientDev || (pkt.sourceDeviceId ? getDeviceById(pkt.sourceDeviceId) : null);
+    const dstDev = serverDev || (pkt.destinationDeviceId ? getDeviceById(pkt.destinationDeviceId) : null);
+    const destServerName = dstDev ? dstDev.name : (extra.destinationDnsServer || pkt.destinationIp || 'DNS Server');
+    return {
+        eventType: 'DNS_QUERY',
+        type: 'DNS_QUERY',
+        packetId: pkt.id || null,
+        packetID: pkt.id || null,
+        queryId: pkt.id || extra.queryId || null,
+        sourceDeviceId: srcDev?.id || pkt.sourceDeviceId || null,
+        sourceDevice: srcDev?.name || srcDev?.id || 'Client',
+        clientDeviceId: srcDev?.id || pkt.sourceDeviceId || null,
+        clientIp: pkt.sourceIp || srcDev?.ip || '',
+        sourceIp: pkt.sourceIp || srcDev?.ip || '',
+        destinationDeviceId: dstDev?.id || pkt.destinationDeviceId || null,
+        destinationDnsServer: destServerName,
+        destinationIp: pkt.destinationIp || '',
+        serverIp: pkt.destinationIp || (extra.serverIp || ''),
+        serverDeviceId: dstDev?.id || pkt.destinationDeviceId || null,
+        hostname: pkt.hostname || '',
+        recordType: pkt.recordType || 'A',
+        timestamp: pkt.createdAt || Date.now(),
+        queryStage: extra.queryStage || extra.stage || 'query',
+        stage: extra.stage || 'query',
+        result: extra.result || 'sent',
+        status: extra.status || 'in_flight',
+        ...extra
+    };
+}
+
+/**
+ * Creates a structured observable DNS Response event object.
+ */
+function createDnsResponseEvent(respPacket, queryPacket, clientDev, serverDev, extra = {}) {
+    const rPkt = respPacket || {};
+    const qPkt = queryPacket || {};
+    const srcDev = serverDev || (rPkt.sourceDeviceId ? getDeviceById(rPkt.sourceDeviceId) : null);
+    const dstDev = clientDev || (rPkt.destinationDeviceId ? getDeviceById(rPkt.destinationDeviceId) : null);
+    const serverName = srcDev ? srcDev.name : (extra.dnsServer || rPkt.serverIp || rPkt.sourceIp || 'DNS Server');
+    const clientName = dstDev ? dstDev.name : (extra.destinationClient || dstDev?.id || 'Client');
+    return {
+        eventType: 'DNS_RESPONSE',
+        type: 'DNS_RESPONSE',
+        packetId: rPkt.id || null,
+        packetID: rPkt.id || null,
+        responseId: rPkt.id || null,
+        queryId: rPkt.queryId || qPkt.id || extra.queryId || null,
+        queryID: rPkt.queryId || qPkt.id || extra.queryId || null,
+        sourceDeviceId: srcDev?.id || rPkt.sourceDeviceId || null,
+        dnsServer: serverName,
+        serverIp: rPkt.serverIp || rPkt.sourceIp || (extra.serverIp || ''),
+        serverDeviceId: srcDev?.id || rPkt.sourceDeviceId || null,
+        destinationDeviceId: dstDev?.id || rPkt.destinationDeviceId || null,
+        destinationClient: clientName,
+        destination: clientName,
+        clientIp: rPkt.destinationIp || qPkt.sourceIp || (extra.clientIp || ''),
+        clientDeviceId: dstDev?.id || rPkt.destinationDeviceId || null,
+        hostname: rPkt.hostname || qPkt.hostname || '',
+        recordType: rPkt.recordType || qPkt.recordType || 'A',
+        success: Boolean(rPkt.success),
+        resolvedAddress: rPkt.address || rPkt.resolvedIp || extra.resolvedAddress || null,
+        resolvedIp: rPkt.address || rPkt.resolvedIp || extra.resolvedIp || null,
+        address: rPkt.address || rPkt.resolvedIp || null,
+        failureReason: rPkt.reason || extra.failureReason || null,
+        reason: rPkt.reason || extra.reason || null,
+        status: extra.status || (rPkt.success ? 'completed' : 'failed'),
+        timestamp: rPkt.createdAt || Date.now(),
+        ...extra
     };
 }
 
@@ -21099,49 +21774,66 @@ function checkIpReachability(sourceDev, targetIp) {
 function simulateDnsQuery(clientDeviceOrId, hostname, options = {}) {
     const clientDev = typeof clientDeviceOrId === 'object' && clientDeviceOrId ? clientDeviceOrId : getDeviceById(clientDeviceOrId);
     if (!clientDev) {
-        return {
+        const failRes = {
             success: false,
             reason: 'CLIENT_DEVICE_NOT_FOUND',
             hostname: typeof hostname === 'string' ? hostname.trim() : '',
             attempts: [],
-            events: ['Client device not found']
+            events: ['Client device not found'],
+            structuredEvents: [],
+            packetEvents: []
         };
+        networkState.lastDnsResult = failRes;
+        return failRes;
     }
 
     const rawHost = typeof hostname === 'string' ? hostname.trim() : '';
     if (!rawHost) {
-        return {
+        const failRes = {
             success: false,
             reason: 'EMPTY_HOSTNAME',
             hostname: '',
             attempts: [],
-            events: ['Empty hostname provided for DNS query']
+            events: ['Empty hostname provided for DNS query'],
+            structuredEvents: [],
+            packetEvents: []
         };
+        networkState.lastDnsResult = failRes;
+        return failRes;
     }
 
     if (!isValidHostname(rawHost)) {
-        return {
+        const failRes = {
             success: false,
             reason: 'INVALID_HOSTNAME',
             hostname: rawHost,
             attempts: [],
-            events: [`Invalid hostname format: "${rawHost}"`]
+            events: [`Invalid hostname format: "${rawHost}"`],
+            structuredEvents: [],
+            packetEvents: []
         };
+        networkState.lastDnsResult = failRes;
+        return failRes;
     }
 
     const servers = getDnsServers(clientDev);
     if (!servers || servers.length === 0) {
-        return {
+        const failRes = {
             success: false,
             reason: 'NO_DNS_SERVERS_CONFIGURED',
             hostname: rawHost,
             attempts: [],
-            events: [`No DNS servers configured on ${clientDev.name || 'client device'}`]
+            events: [`No DNS servers configured on ${clientDev.name || 'client device'}`],
+            structuredEvents: [],
+            packetEvents: []
         };
+        networkState.lastDnsResult = failRes;
+        return failRes;
     }
 
     const attempts = [];
     const events = [];
+    const structuredEvents = [];
     let lastFailureReason = 'HOST_NOT_FOUND';
 
     for (const serverIp of servers) {
@@ -21156,6 +21848,20 @@ function simulateDnsQuery(clientDeviceOrId, hostname, options = {}) {
         });
 
         const reachCheck = checkIpReachability(clientDev, serverIp);
+        const serverDev = reachCheck?.targetMatch?.device || null;
+        if (serverDev) {
+            queryPacket.destinationDeviceId = serverDev.id;
+        }
+        if (reachCheck.srcEndpoint && reachCheck.srcEndpoint.ip) {
+            queryPacket.sourceIp = reachCheck.srcEndpoint.ip;
+        }
+
+        const queryEvent = createDnsQueryEvent(queryPacket, clientDev, serverDev, {
+            destinationIp: serverIp,
+            queryStage: 'query'
+        });
+        structuredEvents.push(queryEvent);
+
         if (!reachCheck.targetMatch || !reachCheck.targetMatch.device) {
             lastFailureReason = 'DNS_SERVER_NOT_FOUND';
             const respPacket = createDnsResponsePacket({
@@ -21169,22 +21875,26 @@ function simulateDnsQuery(clientDeviceOrId, hostname, options = {}) {
                 reason: 'DNS_SERVER_NOT_FOUND',
                 serverIp
             });
+            const respEvent = createDnsResponseEvent(respPacket, queryPacket, clientDev, null, {
+                failureReason: 'DNS_SERVER_NOT_FOUND',
+                dnsServer: serverIp
+            });
+            structuredEvents.push(respEvent);
+
             attempts.push({
                 serverIp,
                 serverDeviceId: null,
                 success: false,
                 reason: 'DNS_SERVER_NOT_FOUND',
                 query: queryPacket,
-                response: respPacket
+                response: respPacket,
+                path: [clientDev.id],
+                queryEvent,
+                responseEvent: respEvent,
+                structuredEvents: [queryEvent, respEvent]
             });
             events.push(`DNS server ${serverIp} not found in network topology`);
             continue;
-        }
-
-        const serverDev = reachCheck.targetMatch.device;
-        queryPacket.destinationDeviceId = serverDev.id;
-        if (reachCheck.srcEndpoint && reachCheck.srcEndpoint.ip) {
-            queryPacket.sourceIp = reachCheck.srcEndpoint.ip;
         }
 
         if (!reachCheck.reachable) {
@@ -21201,13 +21911,22 @@ function simulateDnsQuery(clientDeviceOrId, hostname, options = {}) {
                 reason: 'DNS_SERVER_UNREACHABLE',
                 serverIp
             });
+            const respEvent = createDnsResponseEvent(respPacket, queryPacket, clientDev, serverDev, {
+                failureReason: 'DNS_SERVER_UNREACHABLE'
+            });
+            structuredEvents.push(respEvent);
+
             attempts.push({
                 serverIp,
                 serverDeviceId: serverDev.id,
                 success: false,
                 reason: 'DNS_SERVER_UNREACHABLE',
                 query: queryPacket,
-                response: respPacket
+                response: respPacket,
+                path: reachCheck.simResult?.path || [clientDev.id, serverDev.id],
+                queryEvent,
+                responseEvent: respEvent,
+                structuredEvents: [queryEvent, respEvent]
             });
             events.push(`DNS server ${serverDev.name} (${serverIp}) is unreachable from ${clientDev.name}`);
             continue;
@@ -21228,13 +21947,22 @@ function simulateDnsQuery(clientDeviceOrId, hostname, options = {}) {
                 reason: 'DNS_SERVICE_NOT_ENABLED',
                 serverIp
             });
+            const respEvent = createDnsResponseEvent(respPacket, queryPacket, clientDev, serverDev, {
+                failureReason: 'DNS_SERVICE_NOT_ENABLED'
+            });
+            structuredEvents.push(respEvent);
+
             attempts.push({
                 serverIp,
                 serverDeviceId: serverDev.id,
                 success: false,
                 reason: 'DNS_SERVICE_NOT_ENABLED',
                 query: queryPacket,
-                response: respPacket
+                response: respPacket,
+                path: reachCheck.simResult?.path || [clientDev.id, serverDev.id],
+                queryEvent,
+                responseEvent: respEvent,
+                structuredEvents: [queryEvent, respEvent]
             });
             events.push(`DNS service is disabled on server ${serverDev.name} (${serverIp})`);
             continue;
@@ -21255,13 +21983,22 @@ function simulateDnsQuery(clientDeviceOrId, hostname, options = {}) {
                 reason: 'HOST_NOT_FOUND',
                 serverIp
             });
+            const respEvent = createDnsResponseEvent(respPacket, queryPacket, clientDev, serverDev, {
+                failureReason: 'HOST_NOT_FOUND'
+            });
+            structuredEvents.push(respEvent);
+
             attempts.push({
                 serverIp,
                 serverDeviceId: serverDev.id,
                 success: false,
                 reason: 'HOST_NOT_FOUND',
                 query: queryPacket,
-                response: respPacket
+                response: respPacket,
+                path: reachCheck.simResult?.path || [clientDev.id, serverDev.id],
+                queryEvent,
+                responseEvent: respEvent,
+                structuredEvents: [queryEvent, respEvent]
             });
             events.push(`Server ${serverDev.name} (${serverIp}) has no A record for "${rawHost}"`);
             continue;
@@ -21280,35 +22017,68 @@ function simulateDnsQuery(clientDeviceOrId, hostname, options = {}) {
             address: record.address,
             serverIp
         });
+        const respEvent = createDnsResponseEvent(respPacket, queryPacket, clientDev, serverDev, {
+            resolvedAddress: record.address
+        });
+        structuredEvents.push(respEvent);
+
         events.push(`Server ${serverDev.name} (${serverIp}) successfully resolved "${rawHost}" to ${record.address}`);
         attempts.push({
             serverIp,
             serverDeviceId: serverDev.id,
             success: true,
             query: queryPacket,
-            response: respPacket
+            response: respPacket,
+            path: reachCheck.simResult?.path || [clientDev.id, serverDev.id],
+            queryEvent,
+            responseEvent: respEvent,
+            structuredEvents: [queryEvent, respEvent]
         });
 
-        return {
+        const lastAtt = attempts[attempts.length - 1];
+        const successRes = {
             success: true,
             hostname: record.hostname,
             address: record.address,
+            resolvedIp: record.address,
             serverIp,
             serverDeviceId: serverDev.id,
             query: queryPacket,
             response: respPacket,
+            queryPacket,
+            responsePacket: respPacket,
+            queryEvent,
+            responseEvent: respEvent,
+            path: lastAtt?.path || [clientDev.id, serverDev.id],
             attempts,
-            events
+            events,
+            structuredEvents,
+            packetEvents: structuredEvents
         };
+        networkState.lastDnsResult = successRes;
+        return successRes;
     }
 
-    return {
+    const lastAtt = attempts.length ? attempts[attempts.length - 1] : null;
+    const finalRes = {
         success: false,
         reason: lastFailureReason,
         hostname: rawHost,
+        resolvedIp: null,
+        query: lastAtt ? (lastAtt.queryPacket || lastAtt.query) : null,
+        response: lastAtt ? (lastAtt.responsePacket || lastAtt.response) : null,
+        queryPacket: lastAtt ? (lastAtt.queryPacket || lastAtt.query) : null,
+        responsePacket: lastAtt ? (lastAtt.responsePacket || lastAtt.response) : null,
+        queryEvent: lastAtt ? lastAtt.queryEvent : null,
+        responseEvent: lastAtt ? lastAtt.responseEvent : null,
+        path: lastAtt ? lastAtt.path : (clientDev ? [clientDev.id] : []),
         attempts,
-        events
+        events,
+        structuredEvents,
+        packetEvents: structuredEvents
     };
+    networkState.lastDnsResult = finalRes;
+    return finalRes;
 }
 
 /**
@@ -21326,7 +22096,9 @@ function resolveHostnameAcrossDnsServers(clientDeviceOrId, hostname) {
             query: sim.query,
             response: sim.response,
             attempts: sim.attempts,
-            events: sim.events
+            events: sim.events,
+            structuredEvents: sim.structuredEvents,
+            packetEvents: sim.packetEvents
         };
     }
     return {
@@ -21334,7 +22106,9 @@ function resolveHostnameAcrossDnsServers(clientDeviceOrId, hostname) {
         reason: sim.reason || 'HOST_NOT_FOUND',
         hostname: sim.hostname,
         attempts: sim.attempts,
-        events: sim.events
+        events: sim.events,
+        structuredEvents: sim.structuredEvents,
+        packetEvents: sim.packetEvents
     };
 }
 
@@ -21378,7 +22152,9 @@ function resolveDnsForDevice(deviceOrId, hostname) {
             query: sim.query,
             response: sim.response,
             attempts: sim.attempts,
-            events: sim.events
+            events: sim.events,
+            structuredEvents: sim.structuredEvents,
+            packetEvents: sim.packetEvents
         };
     }
     return {
@@ -21386,7 +22162,9 @@ function resolveDnsForDevice(deviceOrId, hostname) {
         reason: sim.reason || 'HOST_NOT_FOUND',
         hostname: sim.hostname,
         attempts: sim.attempts,
-        events: sim.events
+        events: sim.events,
+        structuredEvents: sim.structuredEvents,
+        packetEvents: sim.packetEvents
     };
 }
 
@@ -21460,7 +22238,10 @@ function executeCliNslookup(deviceOrId, rawHostname) {
             address: simResult.address,
             serverIp: simResult.serverIp,
             query: simResult.query,
-            response: simResult.response
+            response: simResult.response,
+            dnsResult: simResult,
+            structuredEvents: simResult.structuredEvents,
+            packetEvents: simResult.packetEvents
         };
     } else {
         let errDesc = 'Non-existent domain';
@@ -21483,7 +22264,10 @@ function executeCliNslookup(deviceOrId, rawHostname) {
             clear: false,
             status: 'error',
             reason: simResult.reason,
-            attempts: simResult.attempts
+            attempts: simResult.attempts,
+            dnsResult: simResult,
+            structuredEvents: simResult.structuredEvents,
+            packetEvents: simResult.packetEvents
         };
     }
 }

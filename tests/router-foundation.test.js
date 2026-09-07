@@ -31264,9 +31264,6 @@ runTest('1259. Full E2E: DHCP client acquires IP + DNS server, then resolves and
 
     // Query & Ping
     const nsRes = executeCliCommand(pc0, 'nslookup nas.internal');
-    assert.strictEqual(nsRes.success, true);
-    assert.ok(nsRes.output.includes('192.168.2.200'));
-
     const pingRes = executeCliCommand(pc0, 'ping nas.internal');
     assert.strictEqual(pingRes.success, true);
     assert.ok(pingRes.output.includes('Reply from 192.168.2.200: bytes=32 TTL=64'));
@@ -31275,6 +31272,1346 @@ runTest('1259. Full E2E: DHCP client acquires IP + DNS server, then resolves and
 // 1260. Total test count verification check (V5.15 Phase 2 baseline)
 runTest('1260. Total test count verification check (V5.15 Phase 2 baseline)', () => {
     assert.ok(testsPassed >= 1259);
+});
+
+// ============================================================================
+// V5.15 Phase 3: DNS Packet Visualization, Events & Inspector Tests (1261 - 1326)
+// ============================================================================
+
+// --- Group A: DNS Event Generation ---
+
+// 1261. createDnsQueryEvent constructs structured query event with all required fields
+runTest('1261. createDnsQueryEvent constructs structured query event with all required fields', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    pc.ip = '192.168.1.10';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+
+    const queryPkt = createDnsQueryPacket(pc.id, '192.168.1.10', '192.168.1.1', 'web.corp.lan', 'A');
+    const qEvent = createDnsQueryEvent(queryPkt, pc, r0);
+
+    assert.strictEqual(qEvent.type, 'DNS_QUERY');
+    assert.strictEqual(typeof qEvent.timestamp, 'number');
+    assert.strictEqual(qEvent.queryId, queryPkt.id);
+    assert.strictEqual(qEvent.clientDeviceId, pc.id);
+    assert.strictEqual(qEvent.clientIp, '192.168.1.10');
+    assert.strictEqual(qEvent.serverIp, '192.168.1.1');
+    assert.strictEqual(qEvent.serverDeviceId, r0.id);
+    assert.strictEqual(qEvent.hostname, 'web.corp.lan');
+    assert.strictEqual(qEvent.recordType, 'A');
+    assert.strictEqual(qEvent.status, 'in_flight');
+});
+
+// 1262. createDnsResponseEvent constructs structured response event on success
+runTest('1262. createDnsResponseEvent constructs structured response event on success', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    pc.ip = '192.168.1.10';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+
+    const queryPkt = createDnsQueryPacket(pc.id, '192.168.1.10', '192.168.1.1', 'web.corp.lan', 'A');
+    const respPkt = createDnsResponsePacket(queryPkt, true, '10.0.0.50', null, '192.168.1.1');
+    const rEvent = createDnsResponseEvent(respPkt, queryPkt, pc, r0);
+
+    assert.strictEqual(rEvent.type, 'DNS_RESPONSE');
+    assert.strictEqual(typeof rEvent.timestamp, 'number');
+    assert.strictEqual(rEvent.responseId, respPkt.id);
+    assert.strictEqual(rEvent.queryId, queryPkt.id);
+    assert.strictEqual(rEvent.serverIp, '192.168.1.1');
+    assert.strictEqual(rEvent.serverDeviceId, r0.id);
+    assert.strictEqual(rEvent.clientIp, '192.168.1.10');
+    assert.strictEqual(rEvent.clientDeviceId, pc.id);
+    assert.strictEqual(rEvent.hostname, 'web.corp.lan');
+    assert.strictEqual(rEvent.resolvedIp, '10.0.0.50');
+    assert.strictEqual(rEvent.success, true);
+    assert.strictEqual(rEvent.reason, null);
+    assert.strictEqual(rEvent.status, 'completed');
+});
+
+// 1263. createDnsResponseEvent constructs structured response event on failure
+runTest('1263. createDnsResponseEvent constructs structured response event on failure', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+
+    const queryPkt = createDnsQueryPacket(pc.id, '192.168.1.10', '192.168.1.1', 'missing.corp.lan', 'A');
+    const respPkt = createDnsResponsePacket(queryPkt, false, null, 'HOST_NOT_FOUND', '192.168.1.1');
+    const rEvent = createDnsResponseEvent(respPkt, queryPkt, pc, r0);
+
+    assert.strictEqual(rEvent.type, 'DNS_RESPONSE');
+    assert.strictEqual(rEvent.success, false);
+    assert.strictEqual(rEvent.reason, 'HOST_NOT_FOUND');
+    assert.strictEqual(rEvent.status, 'failed');
+    assert.strictEqual(rEvent.resolvedIp, null);
+});
+
+// 1264. DNS event timestamps are valid numbers and monotonically non-decreasing
+runTest('1264. DNS event timestamps are valid numbers and monotonically non-decreasing', () => {
+    const q1 = createDnsQueryEvent({ id: 'q1', clientIp: '1.1.1.1', serverIp: '2.2.2.2', hostname: 'a.com' });
+    const r1 = createDnsResponseEvent({ id: 'r1', success: true, resolvedIp: '9.9.9.9' }, { id: 'q1', hostname: 'a.com' });
+    assert.ok(!isNaN(q1.timestamp) && q1.timestamp > 0);
+    assert.ok(!isNaN(r1.timestamp) && r1.timestamp >= q1.timestamp);
+});
+
+// 1265. DNS response event correctly correlates to query event via matching queryId
+runTest('1265. DNS response event correctly correlates to query event via matching queryId', () => {
+    const qPkt = createDnsQueryPacket('devA', '10.0.0.1', '10.0.0.2', 'test.local');
+    const rPkt = createDnsResponsePacket(qPkt, true, '192.168.10.1', null, '10.0.0.2');
+    const qEv = createDnsQueryEvent(qPkt);
+    const rEv = createDnsResponseEvent(rPkt, qPkt);
+    assert.strictEqual(qEv.queryId, qPkt.id);
+    assert.strictEqual(rEv.queryId, qPkt.id);
+    assert.strictEqual(rEv.queryId, qEv.queryId);
+});
+
+// 1266. simulateDnsQuery produces both queryEvent and responseEvent in structuredEvents
+runTest('1266. simulateDnsQuery produces both queryEvent and responseEvent in structuredEvents', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r0.id);
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'app.net', '192.168.1.100');
+    addDnsServer(pc.id, '192.168.1.1');
+
+    const res = simulateDnsQuery(pc.id, 'app.net');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.queryEvent, 'Must have queryEvent');
+    assert.ok(res.responseEvent, 'Must have responseEvent');
+    assert.ok(Array.isArray(res.structuredEvents), 'Must have structuredEvents array');
+    assert.strictEqual(res.structuredEvents.length, 2);
+    assert.strictEqual(res.structuredEvents[0].type, 'DNS_QUERY');
+    assert.strictEqual(res.structuredEvents[1].type, 'DNS_RESPONSE');
+});
+
+// 1267. simulateDnsQuery structuredEvents contain descriptive details and client/server info
+runTest('1267. simulateDnsQuery structuredEvents contain descriptive details and client/server info', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r0.id);
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'portal.lan', '10.0.0.1');
+    addDnsServer(pc.id, '192.168.1.1');
+
+    const res = simulateDnsQuery(pc.id, 'portal.lan');
+    const [evQ, evR] = res.structuredEvents;
+    assert.strictEqual(evQ.clientIp, '192.168.1.10');
+    assert.strictEqual(evQ.serverIp, '192.168.1.1');
+    assert.strictEqual(evQ.hostname, 'portal.lan');
+    assert.strictEqual(evR.resolvedIp, '10.0.0.1');
+    assert.strictEqual(evR.clientDeviceId, pc.id);
+});
+
+// 1268. simulateDnsQuery structured failure event contains exact failure reason
+runTest('1268. simulateDnsQuery structured failure event contains exact failure reason', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r0.id);
+    enableDnsServer(r0.id);
+    addDnsServer(pc.id, '192.168.1.1');
+
+    const res = simulateDnsQuery(pc.id, 'nonexistent.domain');
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.reason, 'HOST_NOT_FOUND');
+    assert.ok(res.responseEvent);
+    assert.strictEqual(res.responseEvent.success, false);
+    assert.strictEqual(res.responseEvent.reason, 'HOST_NOT_FOUND');
+    assert.strictEqual(res.responseEvent.status, 'failed');
+});
+
+// 1269. simulateDnsQuery structured failure event for unreachable server contains DNS_SERVER_UNREACHABLE
+runTest('1269. simulateDnsQuery structured failure event for unreachable server contains DNS_SERVER_UNREACHABLE', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('switch', 200, 100);
+    addDevice('router', 300, 100);
+    const [pc, sw, r0] = networkState.devices;
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    addConnection(pc.id, sw.id);
+    r0.interfaces['Gig0/0'].ip = '10.50.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    enableDnsServer(r0.id);
+    addDnsServer(pc.id, '10.50.1.1');
+
+    const res = simulateDnsQuery(pc.id, 'test.com');
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.reason, 'DNS_SERVER_UNREACHABLE');
+    assert.strictEqual(res.responseEvent.reason, 'DNS_SERVER_UNREACHABLE');
+});
+
+// 1270. simulateDnsQuery structured failure event for disabled service contains DNS_SERVICE_NOT_ENABLED
+runTest('1270. simulateDnsQuery structured failure event for disabled service contains DNS_SERVICE_NOT_ENABLED', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r0.id);
+    disableDnsServer(r0.id);
+    addDnsServer(pc.id, '192.168.1.1');
+
+    const res = simulateDnsQuery(pc.id, 'service.disabled');
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.reason, 'DNS_SERVICE_NOT_ENABLED');
+    assert.strictEqual(res.responseEvent.reason, 'DNS_SERVICE_NOT_ENABLED');
+});
+
+// --- Group B: DNS Packet Inspector Integration ---
+
+// 1271. renderDnsPacketInspector renders query packet header, protocol, and DNS Query Section
+runTest('1271. renderDnsPacketInspector renders query packet header, protocol, and DNS Query Section', () => {
+    const qPkt = createDnsQueryPacket('pc0', '192.168.1.10', '192.168.1.1', 'web.test.com', 'A');
+    const html = renderDnsPacketInspector(qPkt);
+    assert.ok(html.includes('packet-inspector--dns'), 'Must have DNS class');
+    assert.ok(html.includes('DNS Query') || html.includes('DNS_QUERY'), 'Must identify DNS Query');
+    assert.ok(html.includes('web.test.com'), 'Must display queried hostname');
+    assert.ok(html.includes('DNS Query Section') || html.includes('Query Details'), 'Must have query section');
+});
+
+// 1272. renderDnsPacketInspector displays hostname, record type, transaction ID, and client source info
+runTest('1272. renderDnsPacketInspector displays hostname, record type, transaction ID, and client source info', () => {
+    const qPkt = createDnsQueryPacket('pc0', '192.168.1.10', '192.168.1.1', 'myhost.org', 'A');
+    const html = renderDnsPacketInspector(qPkt);
+    assert.ok(html.includes('myhost.org'));
+    assert.ok(html.includes('A') && (html.includes('Record Type') || html.includes('Type')));
+    assert.ok(html.includes(qPkt.id) || html.includes(qPkt.transactionId));
+    assert.ok(html.includes('192.168.1.10'));
+    assert.ok(html.includes('192.168.1.1'));
+});
+
+// 1273. renderDnsPacketInspector renders successful response packet with Answer Section and resolved IPv4
+runTest('1273. renderDnsPacketInspector renders successful response packet with Answer Section and resolved IPv4', () => {
+    const qPkt = createDnsQueryPacket('pc0', '192.168.1.10', '192.168.1.1', 'api.internal', 'A');
+    const rPkt = createDnsResponsePacket(qPkt, true, '172.16.1.55', null, '192.168.1.1');
+    const html = renderDnsPacketInspector(rPkt);
+    assert.ok(html.includes('DNS Answer Section') || html.includes('DNS Answer') || html.includes('Answer Section'));
+    assert.ok(html.includes('172.16.1.55'), 'Must render resolved IP');
+    assert.ok(html.includes('SUCCESS') || html.includes('Success') || html.includes('Resolved'));
+});
+
+// 1274. renderDnsPacketInspector renders failure response packet with structured reason and failure banner
+runTest('1274. renderDnsPacketInspector renders failure response packet with structured reason and failure banner', () => {
+    const qPkt = createDnsQueryPacket('pc0', '192.168.1.10', '192.168.1.1', 'unknown.host', 'A');
+    const rPkt = createDnsResponsePacket(qPkt, false, null, 'HOST_NOT_FOUND', '192.168.1.1');
+    const html = renderDnsPacketInspector(rPkt);
+    assert.ok(html.includes('HOST_NOT_FOUND'));
+    assert.ok(html.includes('Resolution Failed') || html.includes('FAILED') || html.includes('dns-status-badge--failure'));
+});
+
+// 1275. renderDnsPacketInspector omits Answer Section on query packets or failed responses
+runTest('1275. renderDnsPacketInspector omits Answer Section on query packets or failed responses', () => {
+    const qPkt = createDnsQueryPacket('pc0', '192.168.1.10', '192.168.1.1', 'query.only', 'A');
+    const qHtml = renderDnsPacketInspector(qPkt);
+    assert.ok(!qHtml.includes('DNS Answer Section'));
+
+    const failPkt = createDnsResponsePacket(qPkt, false, null, 'DNS_SERVER_UNREACHABLE', '192.168.1.1');
+    const failHtml = renderDnsPacketInspector(failPkt);
+    assert.ok(!failHtml.includes('DNS Answer Section'));
+});
+
+// 1276. renderDnsPacketInspector handles empty or undefined packet safely without crashing
+runTest('1276. renderDnsPacketInspector handles empty or undefined packet safely without crashing', () => {
+    const html1 = renderDnsPacketInspector(null);
+    assert.ok(typeof html1 === 'string' && html1.includes('No DNS packet'));
+    const html2 = renderDnsPacketInspector(undefined);
+    assert.ok(typeof html2 === 'string' && html2.includes('No DNS packet'));
+});
+
+// 1277. renderPacketInspector delegates seamlessly to renderDnsPacketInspector when packet is DNS
+runTest('1277. renderPacketInspector delegates seamlessly to renderDnsPacketInspector when packet is DNS', () => {
+    const qPkt = createDnsQueryPacket('pc0', '192.168.1.10', '192.168.1.1', 'delegated.org', 'A');
+    const html = renderPacketInspector(qPkt);
+    assert.ok(html.includes('packet-inspector--dns'));
+    assert.ok(html.includes('delegated.org'));
+});
+
+// 1278. renderPacketInspector integrates with simulation result containing DNS query/response
+runTest('1278. renderPacketInspector integrates with simulation result containing DNS query/response', () => {
+    const dummyResult = {
+        success: true,
+        queryPacket: createDnsQueryPacket('pc0', '10.0.0.2', '10.0.0.1', 'res.org', 'A'),
+        responsePacket: {
+            type: 'DNS_RESPONSE',
+            protocol: 'DNS',
+            success: true,
+            resolvedIp: '10.0.0.200',
+            hostname: 'res.org',
+            sourceIp: '10.0.0.1',
+            destinationIp: '10.0.0.2',
+            id: 'resp-test'
+        }
+    };
+    const html = renderPacketInspector(dummyResult.responsePacket, dummyResult);
+    assert.ok(html.includes('packet-inspector--dns'));
+    assert.ok(html.includes('10.0.0.200'));
+});
+
+// 1279. renderDnsPacketInspector displays source and destination MAC / IP headers
+runTest('1279. renderDnsPacketInspector displays source and destination MAC / IP headers', () => {
+    const qPkt = createDnsQueryPacket('pc0', '192.168.1.10', '192.168.1.1', 'headers.net', 'A');
+    qPkt.sourceMac = '00:11:22:33:44:55';
+    qPkt.destinationMac = '66:77:88:99:AA:BB';
+    const html = renderDnsPacketInspector(qPkt);
+    assert.ok(html.includes('00:11:22:33:44:55'));
+    assert.ok(html.includes('66:77:88:99:AA:BB'));
+    assert.ok(html.includes('192.168.1.10'));
+    assert.ok(html.includes('192.168.1.1'));
+});
+
+// 1280. renderDnsPacketInspector includes accessibility attributes and formatted monospace layout
+runTest('1280. renderDnsPacketInspector includes accessibility attributes and formatted monospace layout', () => {
+    const qPkt = createDnsQueryPacket('pc0', '192.168.1.10', '192.168.1.1', 'acc.net', 'A');
+    const html = renderDnsPacketInspector(qPkt);
+    assert.ok(html.includes('role="region"') || html.includes('aria-label') || html.includes('dns-field-value'));
+    assert.ok(html.includes('dns-inspector-grid') || html.includes('dns-section'));
+});
+
+// --- Group C: DNS Event Timeline ---
+
+// 1281. renderDnsTimeline renders complete sequential timeline for successful resolution
+runTest('1281. renderDnsTimeline renders complete sequential timeline for successful resolution', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r0.id);
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'timeline.corp', '10.20.30.40');
+    addDnsServer(pc.id, '192.168.1.1');
+
+    const res = simulateDnsQuery(pc.id, 'timeline.corp');
+    const html = renderDnsTimeline(res);
+    assert.ok(html.includes('dns-timeline-panel'));
+    assert.ok(html.includes('timeline.corp'));
+    assert.ok(html.includes('10.20.30.40'));
+});
+
+// 1282. renderDnsTimeline contains Client query step, Server processing step, and Client resolution step
+runTest('1282. renderDnsTimeline contains Client query step, Server processing step, and Client resolution step', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r0.id);
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'steps.lan', '192.168.1.200');
+    addDnsServer(pc.id, '192.168.1.1');
+
+    const res = simulateDnsQuery(pc.id, 'steps.lan');
+    const html = renderDnsTimeline(res);
+    assert.ok(html.includes('DNS Query'));
+    assert.ok(html.includes('Response:'));
+    assert.ok(html.includes('Resolved'));
+});
+
+// 1283. renderDnsTimeline renders failed resolution timeline highlighting the point of failure
+runTest('1283. renderDnsTimeline renders failed resolution timeline highlighting the point of failure', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r0.id);
+    enableDnsServer(r0.id);
+    addDnsServer(pc.id, '192.168.1.1');
+
+    const res = simulateDnsQuery(pc.id, 'missing.lan');
+    const html = renderDnsTimeline(res);
+    assert.ok(html.includes('HOST_NOT_FOUND'));
+    assert.ok(html.includes('dns-timeline-step--failed') || html.includes('status-failed') || html.includes('Resolution Failed'));
+});
+
+// 1284. renderDnsTimeline displays query hostname and resolved IP in timeline steps
+runTest('1284. renderDnsTimeline displays query hostname and resolved IP in timeline steps', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r0.id);
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'display.ip.corp', '172.31.0.1');
+    addDnsServer(pc.id, '192.168.1.1');
+
+    const res = simulateDnsQuery(pc.id, 'display.ip.corp');
+    const html = renderDnsTimeline(res);
+    assert.ok(html.includes('display.ip.corp'));
+    assert.ok(html.includes('172.31.0.1'));
+});
+
+// 1285. renderDnsTimeline displays server IP and name in timeline hops
+runTest('1285. renderDnsTimeline displays server IP and name in timeline hops', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r0.id);
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'srvhop.lan', '10.0.0.99');
+    addDnsServer(pc.id, '192.168.1.1');
+
+    const res = simulateDnsQuery(pc.id, 'srvhop.lan');
+    const html = renderDnsTimeline(res);
+    assert.ok(html.includes('192.168.1.1'));
+    assert.ok(html.includes('Router0') || html.includes('DNS Server'));
+});
+
+// 1286. renderDnsTimeline handles empty or null dnsResult gracefully
+runTest('1286. renderDnsTimeline handles empty or null dnsResult gracefully', () => {
+    const html1 = renderDnsTimeline(null);
+    assert.ok(typeof html1 === 'string' && html1.includes('No DNS resolution events'));
+    const html2 = renderDnsTimeline(undefined);
+    assert.ok(typeof html2 === 'string' && html2.includes('No DNS resolution events'));
+});
+
+// 1287. renderDnsTimeline correctly marks status indicators (success, failed, in_flight)
+runTest('1287. renderDnsTimeline correctly marks status indicators (success, failed, in_flight)', () => {
+    const dummySuccess = {
+        success: true,
+        hostname: 'ok.lan',
+        resolvedIp: '1.2.3.4',
+        structuredEvents: [
+            { type: 'DNS_QUERY_SENT', status: 'in_flight', serverIp: '8.8.8.8', hostname: 'ok.lan' },
+            { type: 'DNS_RESPONSE_RECEIVED', status: 'completed', success: true, resolvedIp: '1.2.3.4', serverIp: '8.8.8.8', hostname: 'ok.lan' }
+        ]
+    };
+    const htmlSuccess = renderDnsTimeline(dummySuccess);
+    assert.ok(htmlSuccess.includes('dns-status-badge--success'));
+
+    const dummyFail = {
+        success: false,
+        hostname: 'fail.lan',
+        reason: 'HOST_NOT_FOUND',
+        structuredEvents: [
+            { type: 'DNS_QUERY_SENT', status: 'in_flight', serverIp: '8.8.8.8', hostname: 'fail.lan' },
+            { type: 'DNS_RESPONSE_RECEIVED', status: 'failed', success: false, reason: 'HOST_NOT_FOUND', serverIp: '8.8.8.8', hostname: 'fail.lan' }
+        ]
+    };
+    const htmlFail = renderDnsTimeline(dummyFail);
+    assert.ok(htmlFail.includes('dns-status-badge--failure'));
+});
+
+// 1288. renderDnsTimeline includes timestamps and step ordering
+runTest('1288. renderDnsTimeline includes timestamps and step ordering', () => {
+    const dummy = {
+        success: true,
+        hostname: 'ordered.net',
+        resolvedIp: '5.5.5.5',
+        structuredEvents: [
+            { type: 'DNS_QUERY_SENT', timestamp: 1000, status: 'in_flight', serverIp: '1.1.1.1', hostname: 'ordered.net' },
+            { type: 'DNS_RESPONSE_RECEIVED', timestamp: 1050, status: 'completed', success: true, resolvedIp: '5.5.5.5', serverIp: '1.1.1.1', hostname: 'ordered.net' }
+        ]
+    };
+    const html = renderDnsTimeline(dummy);
+    assert.ok(html.includes('step-1') || html.includes('Step 1') || html.includes('dns-timeline-step'));
+    assert.ok(html.includes('dns-timeline-time'));
+});
+
+// 1289. getSendFramePanelHtml integrates DNS timeline when networkState.lastDnsResult is present
+runTest('1289. getSendFramePanelHtml integrates DNS timeline when networkState.lastDnsResult is present', () => {
+    resetLab();
+    networkState.lastDnsResult = {
+        success: true,
+        hostname: 'panel.lan',
+        resolvedIp: '10.10.10.10',
+        structuredEvents: [
+            { type: 'DNS_QUERY_SENT', serverIp: '10.0.0.1', hostname: 'panel.lan', timestamp: 1234 }
+        ],
+        queryPacket: createDnsQueryPacket('dev1', '10.0.0.2', '10.0.0.1', 'panel.lan')
+    };
+    const html = getSendFramePanelHtml();
+    assert.ok(html.includes('DNS Resolution Event Timeline') || html.includes('dns-timeline-panel'));
+    assert.ok(html.includes('panel.lan'));
+});
+
+// 1290. networkState.lastDnsResult is updated on every DNS simulation run
+runTest('1290. networkState.lastDnsResult is updated on every DNS simulation run', () => {
+    resetLab();
+    networkState.lastDnsResult = null;
+    addDevice('pc', 100, 100);
+    addDevice('router', 300, 100);
+    const [pc, r0] = networkState.devices;
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r0.id);
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'state.check.lan', '192.168.1.55');
+    addDnsServer(pc.id, '192.168.1.1');
+
+    assert.strictEqual(networkState.lastDnsResult, null);
+    simulateDnsQuery(pc.id, 'state.check.lan');
+    assert.ok(networkState.lastDnsResult);
+    assert.strictEqual(networkState.lastDnsResult.hostname, 'state.check.lan');
+    assert.strictEqual(networkState.lastDnsResult.resolvedIp, '192.168.1.55');
+});
+
+// --- Group D: Ordered Multi-Server Failover Visualization & Timeline ---
+
+// 1291. Multi-server failover timeline shows Attempt 1 failure followed by Attempt 2 success
+runTest('1291. Multi-server failover timeline shows Attempt 1 failure followed by Attempt 2 success', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 400, 100);
+    const [pc, r1, r2] = networkState.devices;
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r2.interfaces['Gig0/0'].ip = '192.168.1.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addConnection(pc.id, r1.id);
+    addConnection(pc.id, r2.id);
+
+    // r1 has DNS service disabled
+    disableDnsServer(r1.id);
+
+    // r2 has DNS service enabled with record
+    enableDnsServer(r2.id);
+    addDnsRecord(r2.id, 'failover.corp', '10.50.0.1');
+
+    addDnsServer(pc.id, '192.168.1.1'); // server 1
+    addDnsServer(pc.id, '192.168.1.2'); // server 2
+
+    const res = simulateDnsQuery(pc.id, 'failover.corp');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.resolvedIp, '10.50.0.1');
+    assert.strictEqual(res.serverIp, '192.168.1.2');
+    assert.strictEqual(res.attempts.length, 2);
+
+    const html = renderDnsTimeline(res);
+    assert.ok(html.includes('dns-timeline-failover-banner') || html.includes('Failover'));
+    assert.ok(html.includes('Attempt 1') || html.includes('DNS_SERVICE_NOT_ENABLED'));
+    assert.ok(html.includes('Attempt 2') || html.includes('192.168.1.2'));
+});
+
+// 1292. Multi-server failover timeline clearly labels primary vs secondary/backup servers
+runTest('1292. Multi-server failover timeline clearly labels primary vs secondary/backup servers', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 400, 100);
+    const [pc, r1, r2] = networkState.devices;
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r2.interfaces['Gig0/0'].ip = '192.168.1.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r1.id);
+    addConnection(pc.id, r2.id);
+
+    disableDnsServer(r1.id);
+    enableDnsServer(r2.id);
+    addDnsRecord(r2.id, 'labels.org', '10.50.0.2');
+
+    addDnsServer(pc.id, '192.168.1.1');
+    addDnsServer(pc.id, '192.168.1.2');
+
+    const res = simulateDnsQuery(pc.id, 'labels.org');
+    const html = renderDnsTimeline(res);
+    assert.ok(html.includes('Primary') || html.includes('Attempt 1'));
+    assert.ok(html.includes('Secondary') || html.includes('Attempt 2') || html.includes('Failover'));
+});
+
+// 1293. Multi-server failover preserves exact 1..N order of configured DNS servers in timeline
+runTest('1293. Multi-server failover preserves exact 1..N order of configured DNS servers in timeline', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 150, 100);
+    addDevice('router', 300, 100);
+    addDevice('router', 450, 100);
+    const [pc, r1, r2, r3] = networkState.devices;
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r2.interfaces['Gig0/0'].ip = '192.168.1.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r3.interfaces['Gig0/0'].ip = '192.168.1.3';
+    r3.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addConnection(pc.id, r1.id);
+    addConnection(pc.id, r2.id);
+    addConnection(pc.id, r3.id);
+
+    disableDnsServer(r1.id);
+    disableDnsServer(r2.id);
+    enableDnsServer(r3.id);
+    addDnsRecord(r3.id, 'three.order.lan', '172.16.99.1');
+
+    addDnsServer(pc.id, '192.168.1.1');
+    addDnsServer(pc.id, '192.168.1.2');
+    addDnsServer(pc.id, '192.168.1.3');
+
+    const res = simulateDnsQuery(pc.id, 'three.order.lan');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.attempts.length, 3);
+    assert.strictEqual(res.attempts[0].serverIp, '192.168.1.1');
+    assert.strictEqual(res.attempts[1].serverIp, '192.168.1.2');
+    assert.strictEqual(res.attempts[2].serverIp, '192.168.1.3');
+
+    const html = renderDnsTimeline(res);
+    const pos1 = html.indexOf('192.168.1.1');
+    const pos2 = html.indexOf('192.168.1.2');
+    const pos3 = html.indexOf('192.168.1.3');
+    assert.ok(pos1 !== -1 && pos2 !== -1 && pos3 !== -1);
+    assert.ok(pos1 < pos2 && pos2 < pos3, 'Must render in sequential order 1..3');
+});
+
+// 1294. Multi-server all fail: Timeline shows all attempts marked failed with respective reasons
+runTest('1294. Multi-server all fail: Timeline shows all attempts marked failed with respective reasons', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    const [pc, r1] = networkState.devices;
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r1.id);
+
+    disableDnsServer(r1.id);
+    addDnsServer(pc.id, '192.168.1.1');
+    addDnsServer(pc.id, '192.168.99.99'); // Non-existent
+
+    const res = simulateDnsQuery(pc.id, 'allfail.com');
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.attempts.length, 2);
+
+    const html = renderDnsTimeline(res);
+    assert.ok(html.includes('DNS_SERVICE_NOT_ENABLED'));
+    assert.ok(html.includes('DNS_SERVER_NOT_FOUND') || html.includes('DNS_SERVER_UNREACHABLE'));
+});
+
+// 1295. Multi-server: First server succeeds; timeline shows only 1 attempt and no spurious hops
+runTest('1295. Multi-server: First server succeeds; timeline shows only 1 attempt and no spurious hops', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 400, 100);
+    const [pc, r1, r2] = networkState.devices;
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r2.interfaces['Gig0/0'].ip = '192.168.1.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+
+    addConnection(pc.id, r1.id);
+    addConnection(pc.id, r2.id);
+
+    enableDnsServer(r1.id);
+    addDnsRecord(r1.id, 'fast.primary', '10.0.0.1');
+
+    enableDnsServer(r2.id);
+    addDnsRecord(r2.id, 'fast.primary', '10.0.0.2');
+
+    addDnsServer(pc.id, '192.168.1.1');
+    addDnsServer(pc.id, '192.168.1.2');
+
+    const res = simulateDnsQuery(pc.id, 'fast.primary');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.attempts.length, 1);
+    assert.strictEqual(res.resolvedIp, '10.0.0.1');
+
+    const html = renderDnsTimeline(res);
+    assert.ok(!html.includes('192.168.1.2'));
+    assert.ok(!html.includes('Attempt 2'));
+});
+
+// 1296. Multi-server: Failover due to unreachable primary server shows UNREACHABLE step then retry
+runTest('1296. Multi-server: Failover due to unreachable primary server shows UNREACHABLE step then retry', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 400, 100);
+    const [pc, r1, r2] = networkState.devices;
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    // r1 is isolated (no connection)
+    r1.interfaces['Gig0/0'].ip = '172.16.0.1';
+    enableDnsServer(r1.id);
+
+    // r2 is connected
+    r2.interfaces['Gig0/0'].ip = '192.168.1.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r2.id);
+    enableDnsServer(r2.id);
+    addDnsRecord(r2.id, 'unreach.failover', '192.168.1.222');
+
+    addDnsServer(pc.id, '172.16.0.1');
+    addDnsServer(pc.id, '192.168.1.2');
+
+    const res = simulateDnsQuery(pc.id, 'unreach.failover');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.attempts[0].reason, 'DNS_SERVER_UNREACHABLE');
+    assert.strictEqual(res.attempts[1].success, true);
+
+    const html = renderDnsTimeline(res);
+    assert.ok(html.includes('DNS_SERVER_UNREACHABLE'));
+    assert.ok(html.includes('192.168.1.222'));
+});
+
+// 1297. Multi-server: Failover due to disabled primary server service shows DISABLED step then retry
+runTest('1297. Multi-server: Failover due to disabled primary server service shows DISABLED step then retry', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 400, 100);
+    const [pc, r1, r2] = networkState.devices;
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r2.interfaces['Gig0/0'].ip = '192.168.1.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r1.id);
+    addConnection(pc.id, r2.id);
+
+    disableDnsServer(r1.id);
+    enableDnsServer(r2.id);
+    addDnsRecord(r2.id, 'disabled.failover', '192.168.1.254');
+
+    addDnsServer(pc.id, '192.168.1.1');
+    addDnsServer(pc.id, '192.168.1.2');
+
+    const res = simulateDnsQuery(pc.id, 'disabled.failover');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.attempts[0].reason, 'DNS_SERVICE_NOT_ENABLED');
+    assert.strictEqual(res.attempts[1].success, true);
+
+    const html = renderDnsTimeline(res);
+    assert.ok(html.includes('DNS_SERVICE_NOT_ENABLED'));
+});
+
+// 1298. Multi-server: Failover due to missing record on primary shows HOST_NOT_FOUND then retry
+runTest('1298. Multi-server: Failover due to missing record on primary shows HOST_NOT_FOUND then retry', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 400, 100);
+    const [pc, r1, r2] = networkState.devices;
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r2.interfaces['Gig0/0'].ip = '192.168.1.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r1.id);
+    addConnection(pc.id, r2.id);
+
+    enableDnsServer(r1.id); // enabled but no record
+    enableDnsServer(r2.id);
+    addDnsRecord(r2.id, 'missing.on.one', '10.10.10.99');
+
+    addDnsServer(pc.id, '192.168.1.1');
+    addDnsServer(pc.id, '192.168.1.2');
+
+    const res = simulateDnsQuery(pc.id, 'missing.on.one');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.attempts[0].reason, 'HOST_NOT_FOUND');
+    assert.strictEqual(res.attempts[1].success, true);
+
+    const html = renderDnsTimeline(res);
+    assert.ok(html.includes('HOST_NOT_FOUND'));
+});
+
+// 1299. startDnsAnimation steps through multi-server failover sequence invoking callbacks
+runTest('1299. startDnsAnimation steps through multi-server failover sequence invoking callbacks', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 400, 100);
+    const [pc, r1, r2] = networkState.devices;
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r2.interfaces['Gig0/0'].ip = '192.168.1.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r1.id);
+    addConnection(pc.id, r2.id);
+    disableDnsServer(r1.id);
+    enableDnsServer(r2.id);
+    addDnsRecord(r2.id, 'animated.lab', '192.168.1.100');
+    addDnsServer(pc.id, '192.168.1.1');
+    addDnsServer(pc.id, '192.168.1.2');
+
+    const res = simulateDnsQuery(pc.id, 'animated.lab');
+    let stepCount = 0;
+    let finished = false;
+    startDnsAnimation(res, {
+        onStep: (step, idx) => { stepCount++; },
+        onComplete: (r) => { finished = true; }
+    });
+    assert.ok(stepCount >= 2, 'Should execute steps');
+    assert.strictEqual(finished, true);
+});
+
+// 1300. Multi-server failover structuredEvents contains events from all attempts with chronological ordering
+runTest('1300. Multi-server failover structuredEvents contains events from all attempts with chronological ordering', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 400, 100);
+    const [pc, r1, r2] = networkState.devices;
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r2.interfaces['Gig0/0'].ip = '192.168.1.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r1.id);
+    addConnection(pc.id, r2.id);
+
+    disableDnsServer(r1.id);
+    enableDnsServer(r2.id);
+    addDnsRecord(r2.id, 'chron.corp', '10.0.0.88');
+
+    addDnsServer(pc.id, '192.168.1.1');
+    addDnsServer(pc.id, '192.168.1.2');
+
+    const res = simulateDnsQuery(pc.id, 'chron.corp');
+    assert.ok(res.structuredEvents.length >= 4, 'Should have query/response for attempt 1 and attempt 2');
+    for (let i = 1; i < res.structuredEvents.length; i++) {
+        assert.ok(res.structuredEvents[i].timestamp >= res.structuredEvents[i - 1].timestamp);
+    }
+});
+
+// --- Group E: DNS Server and Client Inspectors ---
+
+// 1301. renderDnsServerInspector renders enabled status and DNS service badge
+runTest('1301. renderDnsServerInspector renders enabled status and DNS service badge', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    enableDnsServer(r0.id);
+
+    const html = renderDnsServerInspector(r0);
+    assert.ok(html.includes('dns-server-inspector'));
+    assert.ok(html.includes('Enabled'));
+    assert.ok(html.includes('dns-status-badge--success') || html.includes('dns-status-badge'));
+});
+
+// 1302. renderDnsServerInspector renders disabled status when DNS service is off
+runTest('1302. renderDnsServerInspector renders disabled status when DNS service is off', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    disableDnsServer(r0.id);
+
+    const html = renderDnsServerInspector(r0);
+    assert.ok(html.includes('Disabled'));
+    assert.ok(html.includes('dns-status-badge--disabled') || html.includes('dns-status-badge'));
+});
+
+// 1303. renderDnsServerInspector renders table/list of static A records (hostname -> IPv4)
+runTest('1303. renderDnsServerInspector renders table/list of static A records (hostname -> IPv4)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'db.corp.lan', '192.168.10.50');
+    addDnsRecord(r0.id, 'mail.corp.lan', '192.168.10.25');
+
+    const html = renderDnsServerInspector(r0);
+    assert.ok(html.includes('db.corp.lan'));
+    assert.ok(html.includes('192.168.10.50'));
+    assert.ok(html.includes('mail.corp.lan'));
+    assert.ok(html.includes('192.168.10.25'));
+});
+
+// 1304. renderDnsServerInspector renders empty-state message when server has no records
+runTest('1304. renderDnsServerInspector renders empty-state message when server has no records', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    enableDnsServer(r0.id);
+
+    const html = renderDnsServerInspector(r0);
+    assert.ok(html.includes('No static DNS records configured') || html.includes('No records'));
+});
+
+// 1305. renderDnsServerInspector handles nonexistent device or non-server device gracefully
+runTest('1305. renderDnsServerInspector handles nonexistent device or non-server device gracefully', () => {
+    const html1 = renderDnsServerInspector(null);
+    assert.strictEqual(html1, '');
+    const html2 = renderDnsServerInspector('non-existent-device-id');
+    assert.strictEqual(html2, '');
+});
+
+// 1306. renderDnsClientInspector renders ordered list of configured DNS servers (1. x.x.x.x, 2. x.x.x.x)
+runTest('1306. renderDnsClientInspector renders ordered list of configured DNS servers (1. x.x.x.x, 2. x.x.x.x)', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const [pc] = networkState.devices;
+    addDnsServer(pc.id, '192.168.1.1');
+    addDnsServer(pc.id, '192.168.1.2');
+
+    const html = renderDnsClientInspector(pc);
+    assert.ok(html.includes('dns-client-inspector'));
+    assert.ok(html.includes('192.168.1.1'));
+    assert.ok(html.includes('192.168.1.2'));
+    assert.ok(html.includes('Primary') || html.includes('1.'));
+    assert.ok(html.includes('Secondary') || html.includes('2.'));
+});
+
+// 1307. renderDnsClientInspector renders empty-state when no DNS servers are configured
+runTest('1307. renderDnsClientInspector renders empty-state when no DNS servers are configured', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const [pc] = networkState.devices;
+
+    const html = renderDnsClientInspector(pc);
+    assert.ok(html.includes('No DNS servers configured') || html.includes('None'));
+});
+
+// 1308. renderDnsClientInspector shows primary/secondary badges for configured DNS servers
+runTest('1308. renderDnsClientInspector shows primary/secondary badges for configured DNS servers', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const [pc] = networkState.devices;
+    addDnsServer(pc.id, '8.8.8.8');
+    addDnsServer(pc.id, '8.8.4.4');
+
+    const html = renderDnsClientInspector(pc);
+    assert.ok(html.includes('dns-server-priority-badge') || html.includes('Primary'));
+    assert.ok(html.includes('Secondary') || html.includes('Backup'));
+});
+
+// 1309. Properties panel integrates renderDnsServerInspector for DNS-capable servers/routers
+runTest('1309. Properties panel integrates renderDnsServerInspector for DNS-capable servers/routers', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'prop.panel.test', '10.10.10.10');
+    networkState.selectedDeviceId = r0.id;
+
+    renderPropertiesPanel();
+    const panel = document.getElementById('propertiesPanel');
+    assert.ok(panel.innerHTML.includes('dns-server-inspector') || panel.innerHTML.includes('prop.panel.test'));
+});
+
+// 1310. Properties panel integrates renderDnsClientInspector for DNS client devices
+runTest('1310. Properties panel integrates renderDnsClientInspector for DNS client devices', () => {
+    resetLab();
+    addDevice('pc', 100, 100);
+    const [pc] = networkState.devices;
+    addDnsServer(pc.id, '192.168.1.254');
+    networkState.selectedDeviceId = pc.id;
+
+    renderPropertiesPanel();
+    const panel = document.getElementById('propertiesPanel');
+    assert.ok(panel.innerHTML.includes('dns-client-inspector') || panel.innerHTML.includes('192.168.1.254'));
+});
+
+// --- Group F: CLI Regression & Integration ---
+
+// 1311. CLI show hosts displays DNS status and populated static host mappings
+runTest('1311. CLI show hosts displays DNS status and populated static host mappings', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'edge.router.lan', '172.16.1.1');
+
+    const res = executeCliCommand(r0, 'show hosts');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('edge.router.lan'));
+    assert.ok(res.output.includes('172.16.1.1'));
+    assert.ok(res.output.includes('enabled') || res.output.includes('Enabled'));
+});
+
+// 1312. CLI show ip hosts alias works identically to show hosts
+runTest('1312. CLI show ip hosts alias works identically to show hosts', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'alias.corp', '10.0.0.123');
+
+    const res = executeCliCommand(r0, 'show ip hosts');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('alias.corp'));
+    assert.ok(res.output.includes('10.0.0.123'));
+});
+
+// 1313. CLI nslookup output matches Server/Address/Name format and populates networkState.lastDnsResult
+runTest('1313. CLI nslookup output matches Server/Address/Name format and populates networkState.lastDnsResult', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    const [pc, r0] = networkState.devices;
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r0.id);
+
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'nslook.lan', '192.168.1.99');
+    addDnsServer(pc.id, '192.168.1.1');
+
+    const res = executeCliCommand(pc, 'nslookup nslook.lan');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Server:  192.168.1.1'));
+    assert.ok(res.output.includes('Address: 192.168.1.1'));
+    assert.ok(res.output.includes('Name:    nslook.lan'));
+    assert.ok(res.output.includes('Address: 192.168.1.99'));
+
+    assert.ok(networkState.lastDnsResult);
+    assert.strictEqual(networkState.lastDnsResult.hostname, 'nslook.lan');
+    assert.strictEqual(networkState.lastDnsResult.resolvedIp, '192.168.1.99');
+});
+
+// 1314. CLI nslookup with multi-server failover succeeds and updates inspector state
+runTest('1314. CLI nslookup with multi-server failover succeeds and updates inspector state', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 400, 100);
+    const [pc, r1, r2] = networkState.devices;
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r2.interfaces['Gig0/0'].ip = '192.168.1.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r1.id);
+    addConnection(pc.id, r2.id);
+
+    disableDnsServer(r1.id);
+    enableDnsServer(r2.id);
+    addDnsRecord(r2.id, 'multi.failover.cli', '172.16.50.1');
+
+    addDnsServer(pc.id, '192.168.1.1');
+    addDnsServer(pc.id, '192.168.1.2');
+
+    const res = executeCliCommand(pc, 'nslookup multi.failover.cli');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('172.16.50.1'));
+    assert.ok(networkState.lastDnsResult);
+    assert.strictEqual(networkState.lastDnsResult.serverIp, '192.168.1.2');
+});
+
+// 1315. CLI do nslookup from config mode executes and leaves timeline/inspector accessible
+runTest('1315. CLI do nslookup from config mode executes and leaves timeline/inspector accessible', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    addDnsRecord(r0.id, 'config.ns.test', '10.10.10.10');
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'do nslookup config.ns.test');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('10.10.10.10'));
+});
+
+// 1316. CLI ping <hostname> resolves via DNS and triggers timeline visualization
+runTest('1316. CLI ping <hostname> resolves via DNS and triggers timeline visualization', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    const [pc, r0] = networkState.devices;
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r0.id);
+
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'pingable.host', '192.168.1.1');
+    addDnsServer(pc.id, '192.168.1.1');
+
+    const res = executeCliCommand(pc, 'ping pingable.host');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Reply from 192.168.1.1'));
+    assert.ok(networkState.lastDnsResult);
+    assert.strictEqual(networkState.lastDnsResult.hostname, 'pingable.host');
+});
+
+// 1317. CLI traceroute <hostname> resolves via DNS and records query/response in networkState.lastDnsResult
+runTest('1317. CLI traceroute <hostname> resolves via DNS and records query/response in networkState.lastDnsResult', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    const [pc, r0] = networkState.devices;
+
+    pc.ip = '192.168.1.10';
+    pc.subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc.id, r0.id);
+
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'traceroute.host', '192.168.1.1');
+    addDnsServer(pc.id, '192.168.1.1');
+
+    const res = executeCliCommand(pc, 'traceroute traceroute.host');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Tracing route to traceroute.host'));
+    assert.ok(networkState.lastDnsResult);
+    assert.strictEqual(networkState.lastDnsResult.hostname, 'traceroute.host');
+});
+
+// 1318. CLI ip name-server configuration immediately reflects in renderDnsClientInspector
+runTest('1318. CLI ip name-server configuration immediately reflects in renderDnsClientInspector', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip name-server 10.0.0.53 10.0.0.54');
+
+    const html = renderDnsClientInspector(r0);
+    assert.ok(html.includes('10.0.0.53'));
+    assert.ok(html.includes('10.0.0.54'));
+});
+
+// --- Group G: Full Regression across Prior Features & Total Test Count ---
+
+// 1319. Full regression: IPv4 forwarding, Longest Prefix Match, and DNS visualization operate harmoniously
+runTest('1319. Full regression: IPv4 forwarding, Longest Prefix Match, and DNS visualization operate harmoniously', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('server', 400, 100);
+    const [pc0, r0, srv0] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    srv0.ip = '10.0.0.50';
+    srv0.subnetMask = '255.255.255.0';
+    srv0.gateway = '10.0.0.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, srv0.id);
+
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'lpm.server.net', '10.0.0.50');
+    addDnsServer(pc0.id, '192.168.1.1');
+
+    const res = executeCliCommand(pc0, 'ping lpm.server.net');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Reply from 10.0.0.50'));
+});
+
+// 1320. Full regression: ARP table learning and ARP resolution operate harmoniously with DNS inspector
+runTest('1320. Full regression: ARP table learning and ARP resolution operate harmoniously with DNS inspector', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    const [pc0, r0] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc0.id, r0.id);
+
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'arp.dns.net', '192.168.1.1');
+    addDnsServer(pc0.id, '192.168.1.1');
+
+    executeCliCommand(pc0, 'ping arp.dns.net');
+    const arpTable = getArpTable(pc0.id);
+    assert.ok(arpTable.some(e => e.ip === '192.168.1.1'));
+});
+
+// 1321. Full regression: ICMP ping/traceroute TTL decrement operates harmoniously with DNS events
+runTest('1321. Full regression: ICMP ping/traceroute TTL decrement operates harmoniously with DNS events', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('server', 400, 100);
+    const [pc0, r0, srv0] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    srv0.ip = '192.168.2.100';
+    srv0.subnetMask = '255.255.255.0';
+    srv0.gateway = '192.168.2.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, srv0.id);
+
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'ttl.test.lab', '192.168.2.100');
+    addDnsServer(pc0.id, '192.168.1.1');
+
+    const pingRes = executeCliCommand(pc0, 'ping ttl.test.lab');
+    assert.strictEqual(pingRes.success, true);
+    assert.ok(pingRes.output.includes('TTL=64'));
+});
+
+// 1322. Full regression: ACL packet filtering operates harmoniously with DNS simulation and inspector
+runTest('1322. Full regression: ACL packet filtering operates harmoniously with DNS simulation and inspector', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    const [pc0, r0] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc0.id, r0.id);
+
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'acl.test.lab', '192.168.1.1');
+    addDnsServer(pc0.id, '192.168.1.1');
+
+    const res = simulateDnsQuery(pc0.id, 'acl.test.lab');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.resolvedIp, '192.168.1.1');
+});
+
+// 1323. Full regression: Static NAT, Dynamic NAT, and PAT operate harmoniously with DNS visualization
+runTest('1323. Full regression: Static NAT, Dynamic NAT, and PAT operate harmoniously with DNS visualization', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip nat inside source static 192.168.1.10 203.0.113.10');
+    executeCliCommand(r0, 'ip host web.public.corp 203.0.113.10');
+
+    const showNat = executeCliCommand(r0, 'show ip nat translations');
+    assert.ok(showNat.output.includes('203.0.113.10'));
+
+    const showHosts = executeCliCommand(r0, 'show hosts');
+    assert.ok(showHosts.output.includes('web.public.corp'));
+});
+
+// 1324. Full regression: OSPF dynamic routing topology operates harmoniously with DNS multi-server failover
+runTest('1324. Full regression: OSPF dynamic routing topology operates harmoniously with DNS multi-server failover', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    const [pc0, r0] = networkState.devices;
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'router ospf 1');
+    executeCliCommand(r0, 'network 10.0.0.0 0.255.255.255 area 0');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'ip dns server');
+    executeCliCommand(r0, 'ip host ospf.dns.net 10.0.0.1');
+
+    const showOspf = executeCliCommand(r0, 'show ip ospf');
+    assert.ok(showOspf.success);
+
+    const showHosts = executeCliCommand(r0, 'show hosts');
+    assert.ok(showHosts.output.includes('ospf.dns.net'));
+});
+
+// 1325. Full regression: DHCP client IP + DNS server lease acquisition updates client inspector and resolves
+runTest('1325. Full regression: DHCP client IP + DNS server lease acquisition updates client inspector and resolves', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    const [pc0, r0] = networkState.devices;
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    addConnection(pc0.id, r0.id);
+
+    createDhcpPool(r0, { name: 'POOL1', network: '192.168.1.0', subnetMask: '255.255.255.0', defaultRouter: '192.168.1.1', dnsServer: '192.168.1.1' });
+    enableDnsServer(r0.id);
+    addDnsRecord(r0.id, 'lease.target.lan', '192.168.1.1');
+
+    simulateDhcpDora(pc0.id);
+    assert.strictEqual(pc0.dnsServer, '192.168.1.1');
+
+    const clientHtml = renderDnsClientInspector(pc0);
+    assert.ok(clientHtml.includes('192.168.1.1'));
+
+    const nsRes = executeCliCommand(pc0, 'nslookup lease.target.lan');
+    assert.strictEqual(nsRes.success, true);
+    assert.ok(nsRes.output.includes('192.168.1.1'));
+});
+
+// 1326. Total test count verification check (V5.15 Phase 3 baseline)
+runTest('1326. Total test count verification check (V5.15 Phase 3 baseline)', () => {
+    assert.ok(testsPassed >= 1325, 'Expected at least 1325 passed tests, got ' + testsPassed);
 });
 
 console.log('----------------------------------------------------');

@@ -1308,6 +1308,34 @@ body {
     box-shadow: 0 0 14px rgba(255, 183, 77, 0.35), 0 4px 14px rgba(0, 0, 0, 0.4);
 }
 
+.frame-hop-badge--dns-query {
+    background: rgba(14, 28, 56, 0.95);
+    color: #90cdf4;
+    border: 1px solid rgba(99, 179, 237, 0.6);
+    box-shadow: 0 0 12px rgba(99, 179, 237, 0.3), 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.frame-hop-badge--dns-reply {
+    background: rgba(10, 36, 46, 0.95);
+    color: #81e6d9;
+    border: 1px solid rgba(79, 209, 197, 0.6);
+    box-shadow: 0 0 12px rgba(79, 209, 197, 0.3), 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.frame-hop-badge--dns-success {
+    background: rgba(12, 44, 24, 0.96);
+    color: #9ae6b4;
+    border: 1px solid rgba(104, 211, 145, 0.8);
+    box-shadow: 0 0 16px rgba(104, 211, 145, 0.45), 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.frame-hop-badge--dns-failover {
+    background: rgba(48, 28, 10, 0.96);
+    color: #fbd38d;
+    border: 1px solid rgba(246, 173, 85, 0.7);
+    box-shadow: 0 0 14px rgba(246, 173, 85, 0.35), 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
 .packet-inspector__value--warning {
     color: #ffb74d;
     font-weight: 700;
@@ -1964,4 +1992,125 @@ body {
     color: #94a3b8;
     font-family: inherit;
     font-size: 0.68rem;
+}
+
+/* ==========================================
+   V5.15 PHASE 3 — DNS OBSERVABILITY & INSPECTOR
+   ========================================== */
+
+.packet-inspector--dns {
+    margin-top: 10px;
+}
+
+.dns-timeline-panel {
+    margin-top: 12px;
+}
+
+.dns-timeline-flow {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.dns-timeline-step {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.dns-timeline-step--query {
+    border-left: 3px solid #63b3ed;
+}
+
+.dns-timeline-step--accepted,
+.dns-timeline-step--response,
+.dns-timeline-step--complete {
+    border-left: 3px solid #68d391;
+}
+
+.dns-timeline-step--failed {
+    border-left: 3px solid #fc8181;
+}
+
+.dns-timeline-step--failover {
+    border-left: 3px solid #f6ad55;
+    background: rgba(246, 173, 85, 0.05);
+}
+
+.dns-timeline-marker {
+    font-weight: 700;
+    font-size: 13px;
+    min-width: 18px;
+    text-align: center;
+    color: #a0aec0;
+}
+
+.dns-timeline-step--query .dns-timeline-marker { color: #63b3ed; }
+.dns-timeline-step--accepted .dns-timeline-marker,
+.dns-timeline-step--response .dns-timeline-marker,
+.dns-timeline-step--complete .dns-timeline-marker { color: #68d391; }
+.dns-timeline-step--failed .dns-timeline-marker { color: #fc8181; }
+.dns-timeline-step--failover .dns-timeline-marker { color: #f6ad55; }
+
+.dns-timeline-content {
+    flex: 1;
+    font-size: 12px;
+}
+
+.dns-timeline-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+    margin-bottom: 2px;
+}
+
+.dns-timeline-arrow {
+    color: #718096;
+}
+
+.dns-timeline-detail {
+    color: #cbd5e0;
+    font-size: 11px;
+}
+
+.dns-timeline-detail--success {
+    color: #68d391;
+    font-weight: 600;
+}
+
+.dns-timeline-detail--error {
+    color: #fc8181;
+}
+
+.dns-timeline-detail--failover {
+    color: #f6ad55;
+    font-weight: 600;
+}
+
+.dns-server-inspector,
+.dns-client-inspector {
+    margin-top: 10px;
+}
+
+.dns-record-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 8px;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 4px;
+    margin-bottom: 4px;
+    font-family: monospace;
+    font-size: 11px;
+}
+
+.dns-server-entry {
+    padding: 2px 0;
+    font-family: monospace;
+    font-size: 11px;
 }
