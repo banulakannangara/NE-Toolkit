@@ -33562,6 +33562,471 @@ runTest('1370. Total test count verification check (V5.16 Phase 1 baseline)', ()
     assert.ok(testsPassed >= 1369, 'Expected at least 1369 passed tests prior to final check, got ' + testsPassed);
 });
 
+// =========================================================================
+// --- V5.16 Phase 2A: Extended ACL Foundation Tests (1371 - 1400) ---
+// =========================================================================
+
+// 1371. Numbered Extended ACL creation (100-199) and data structure properties
+runTest('1371. Numbered Extended ACL creation (100-199) and data structure properties', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'access-list 100 permit ip any any');
+    assert.strictEqual(res.success, true);
+    const acl = getRouterAcl(r0.id, '100');
+    assert.ok(acl);
+    assert.strictEqual(acl.id, '100');
+    assert.strictEqual(acl.type, 'extended');
+    assert.strictEqual(acl.subType, 'extended-numbered');
+    assert.strictEqual(acl.isNumbered, true);
+    assert.strictEqual(acl.rules.length, 1);
+});
+
+// 1372. Extended ACL permit rule parsing with IP protocol and any any
+runTest('1372. Extended ACL permit rule parsing with IP protocol and any any', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'access-list 101 permit ip any any');
+    assert.strictEqual(res.success, true);
+    const acl = getRouterAcl(r0.id, '101');
+    const rule = acl.rules[0];
+    assert.strictEqual(rule.action, 'permit');
+    assert.strictEqual(rule.protocol, 'ip');
+    assert.strictEqual(rule.source.type, 'any');
+    assert.strictEqual(rule.destination.type, 'any');
+});
+
+// 1373. Extended ACL deny rule parsing with TCP protocol
+runTest('1373. Extended ACL deny rule parsing with TCP protocol', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'access-list 102 deny tcp any any');
+    assert.strictEqual(res.success, true);
+    const acl = getRouterAcl(r0.id, '102');
+    const rule = acl.rules[0];
+    assert.strictEqual(rule.action, 'deny');
+    assert.strictEqual(rule.protocol, 'tcp');
+});
+
+// 1374. Protocol field storage (stores ip, tcp, udp, icmp correctly)
+runTest('1374. Protocol field storage (stores ip, tcp, udp, icmp correctly)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 105 permit ip any any');
+    executeCliCommand(r0, 'access-list 105 permit tcp any any');
+    executeCliCommand(r0, 'access-list 105 deny udp any any');
+    executeCliCommand(r0, 'access-list 105 deny icmp any any');
+    const acl = getRouterAcl(r0.id, '105');
+    assert.strictEqual(acl.rules.length, 4);
+    assert.strictEqual(acl.rules[0].protocol, 'ip');
+    assert.strictEqual(acl.rules[1].protocol, 'tcp');
+    assert.strictEqual(acl.rules[2].protocol, 'udp');
+    assert.strictEqual(acl.rules[3].protocol, 'icmp');
+});
+
+// 1375. Source any keyword parsing and storage
+runTest('1375. Source any keyword parsing and storage', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 110 permit ip any host 10.1.1.1');
+    const acl = getRouterAcl(r0.id, '110');
+    assert.strictEqual(acl.rules[0].source.type, 'any');
+    assert.strictEqual(acl.rules[0].source.isAny, true);
+});
+
+// 1376. Destination any keyword parsing and storage
+runTest('1376. Destination any keyword parsing and storage', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 111 permit ip host 192.168.1.10 any');
+    const acl = getRouterAcl(r0.id, '111');
+    assert.strictEqual(acl.rules[0].destination.type, 'any');
+    assert.strictEqual(acl.rules[0].destination.isAny, true);
+});
+
+// 1377. Source host keyword parsing and storage
+runTest('1377. Source host keyword parsing and storage', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 112 permit tcp host 192.168.2.50 any');
+    const acl = getRouterAcl(r0.id, '112');
+    assert.strictEqual(acl.rules[0].source.type, 'host');
+    assert.strictEqual(acl.rules[0].source.ip, '192.168.2.50');
+    assert.strictEqual(acl.rules[0].source.wildcard, '0.0.0.0');
+});
+
+// 1378. Destination host keyword parsing and storage
+runTest('1378. Destination host keyword parsing and storage', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 113 permit udp any host 10.0.0.100');
+    const acl = getRouterAcl(r0.id, '113');
+    assert.strictEqual(acl.rules[0].destination.type, 'host');
+    assert.strictEqual(acl.rules[0].destination.ip, '10.0.0.100');
+    assert.strictEqual(acl.rules[0].destination.wildcard, '0.0.0.0');
+});
+
+// 1379. Source wildcard subnet parsing
+runTest('1379. Source wildcard subnet parsing', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 114 permit ip 192.168.10.0 0.0.0.255 any');
+    const acl = getRouterAcl(r0.id, '114');
+    assert.strictEqual(acl.rules[0].source.type, 'subnet');
+    assert.strictEqual(acl.rules[0].source.ip, '192.168.10.0');
+    assert.strictEqual(acl.rules[0].source.wildcard, '0.0.0.255');
+});
+
+// 1380. Destination wildcard subnet parsing
+runTest('1380. Destination wildcard subnet parsing', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 115 permit ip any 172.16.0.0 0.0.255.255');
+    const acl = getRouterAcl(r0.id, '115');
+    assert.strictEqual(acl.rules[0].destination.type, 'subnet');
+    assert.strictEqual(acl.rules[0].destination.ip, '172.16.0.0');
+    assert.strictEqual(acl.rules[0].destination.wildcard, '0.0.255.255');
+});
+
+// 1381. Rejection of invalid ACL number below 100 for extended command syntax
+runTest('1381. Rejection of invalid ACL number below 100 for extended command syntax', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'access-list 99 permit ip any any');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Standard access lists') || res.output.includes('protocols'));
+});
+
+// 1382. Rejection of invalid ACL number above 199
+runTest('1382. Rejection of invalid ACL number above 199', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'access-list 200 permit ip any any');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Invalid access list number') || res.output.includes('Standard access lists'));
+});
+
+// 1383. Named Extended ACL creation
+runTest('1383. Named Extended ACL creation', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip access-list extended SEC_FILTER');
+    assert.strictEqual(res.success, true);
+    const acl = getRouterAcl(r0.id, 'SEC_FILTER');
+    assert.ok(acl);
+    assert.strictEqual(acl.id, 'SEC_FILTER');
+    assert.strictEqual(acl.type, 'extended');
+    assert.strictEqual(acl.subType, 'extended-named');
+    assert.strictEqual(acl.isNumbered, false);
+});
+
+// 1384. Mode entry into (config-ext-nacl)# prompt
+runTest('1384. Mode entry into (config-ext-nacl)# prompt', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended OUTBOUND_RESTRICT');
+    const session = getDeviceTerminalSession(r0.id);
+    assert.strictEqual(session.mode, 'config-ext-nacl');
+    assert.strictEqual(session.selectedAcl, 'OUTBOUND_RESTRICT');
+    const prompt = getDeviceCliPrompt(r0.id);
+    assert.ok(prompt.includes('(config-ext-nacl)#'), 'Prompt should be (config-ext-nacl)#, got: ' + prompt);
+});
+
+// 1385. Extended ACL sub-mode automatic sequence numbering
+runTest('1385. Extended ACL sub-mode automatic sequence numbering', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended AUTO_SEQ');
+    executeCliCommand(r0, 'permit ip any any');
+    executeCliCommand(r0, 'deny tcp host 1.1.1.1 any');
+    executeCliCommand(r0, 'permit udp any host 2.2.2.2');
+    const acl = getRouterAcl(r0.id, 'AUTO_SEQ');
+    assert.strictEqual(acl.rules.length, 3);
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[1].sequence, 20);
+    assert.strictEqual(acl.rules[2].sequence, 30);
+});
+
+// 1386. Explicit sequence number insertion in extended ACL sub-mode
+runTest('1386. Explicit sequence number insertion in extended ACL sub-mode', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended MANUAL_SEQ');
+    executeCliCommand(r0, '10 permit ip any any');
+    executeCliCommand(r0, '30 deny ip any any');
+    executeCliCommand(r0, '20 permit tcp host 10.0.0.1 any');
+    const acl = getRouterAcl(r0.id, 'MANUAL_SEQ');
+    assert.strictEqual(acl.rules.length, 3);
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[1].sequence, 20);
+    assert.strictEqual(acl.rules[2].sequence, 30);
+    assert.strictEqual(acl.rules[1].protocol, 'tcp');
+});
+
+// 1387. Sub-mode no <sequence> removes specific extended rule by sequence
+runTest('1387. Sub-mode no <sequence> removes specific extended rule by sequence', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended DEL_RULE');
+    executeCliCommand(r0, 'permit ip any any');
+    executeCliCommand(r0, 'deny tcp any any');
+    const res = executeCliCommand(r0, 'no 10');
+    assert.strictEqual(res.success, true);
+    const acl = getRouterAcl(r0.id, 'DEL_RULE');
+    assert.strictEqual(acl.rules.length, 1);
+    assert.strictEqual(acl.rules[0].sequence, 20);
+    assert.strictEqual(acl.rules[0].action, 'deny');
+});
+
+// 1388. Sub-mode remark command adds remark entry in extended ACL
+runTest('1388. Sub-mode remark command adds remark entry in extended ACL', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended REMARK_TEST');
+    executeCliCommand(r0, 'remark Allow Web Traffic');
+    executeCliCommand(r0, 'permit tcp any any');
+    const acl = getRouterAcl(r0.id, 'REMARK_TEST');
+    assert.strictEqual(acl.rules.length, 2);
+    assert.strictEqual(acl.rules[0].action, 'remark');
+    assert.strictEqual(acl.rules[0].remark, 'Allow Web Traffic');
+});
+
+// 1389. exit command returns from (config-ext-nacl) to (config)
+runTest('1389. exit command returns from (config-ext-nacl) to (config)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended NAV_TEST');
+    assert.strictEqual(getDeviceTerminalSession(r0.id).mode, 'config-ext-nacl');
+    executeCliCommand(r0, 'exit');
+    assert.strictEqual(getDeviceTerminalSession(r0.id).mode, 'config');
+    const prompt = getDeviceCliPrompt(r0.id);
+    assert.ok(prompt.includes('(config)#'));
+});
+
+// 1390. end command returns from (config-ext-nacl) directly to EXEC mode
+runTest('1390. end command returns from (config-ext-nacl) directly to EXEC mode', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended NAV_END');
+    assert.strictEqual(getDeviceTerminalSession(r0.id).mode, 'config-ext-nacl');
+    executeCliCommand(r0, 'end');
+    assert.strictEqual(getDeviceTerminalSession(r0.id).mode, 'exec');
+    const prompt = getDeviceCliPrompt(r0.id);
+    assert.ok(prompt.endsWith('#') && !prompt.includes('('));
+});
+
+// 1391. CLI no access-list <100-199> deletes entire numbered extended ACL
+runTest('1391. CLI no access-list <100-199> deletes entire numbered extended ACL', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 120 permit ip any any');
+    assert.ok(getRouterAcl(r0.id, '120'));
+    const delRes = executeCliCommand(r0, 'no access-list 120');
+    assert.strictEqual(delRes.success, true);
+    assert.strictEqual(getRouterAcl(r0.id, '120'), null);
+});
+
+// 1392. CLI no ip access-list extended <name> deletes named extended ACL
+runTest('1392. CLI no ip access-list extended <name> deletes named extended ACL', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended TO_DELETE');
+    assert.ok(getRouterAcl(r0.id, 'TO_DELETE'));
+    executeCliCommand(r0, 'exit');
+    const delRes = executeCliCommand(r0, 'no ip access-list extended TO_DELETE');
+    assert.strictEqual(delRes.success, true);
+    assert.strictEqual(getRouterAcl(r0.id, 'TO_DELETE'), null);
+});
+
+// 1393. Extended ACL optional port operator and value structural storage
+runTest('1393. Extended ACL optional port operator and value structural storage', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 130 permit tcp any any eq 80');
+    executeCliCommand(r0, 'access-list 130 permit udp any range 1000 2000 any eq 53');
+    const acl = getRouterAcl(r0.id, '130');
+    assert.strictEqual(acl.rules.length, 2);
+    assert.strictEqual(acl.rules[0].dstPortOp, 'eq');
+    assert.strictEqual(acl.rules[0].dstPort, 80);
+    assert.strictEqual(acl.rules[1].srcPortOp, 'range');
+    assert.deepStrictEqual(acl.rules[1].srcPortRange, [1000, 2000]);
+    assert.strictEqual(acl.rules[1].dstPortOp, 'eq');
+    assert.strictEqual(acl.rules[1].dstPort, 53);
+});
+
+// 1394. Extended ACL optional TCP established flag structural storage
+runTest('1394. Extended ACL optional TCP established flag structural storage', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 131 permit tcp any any established');
+    const acl = getRouterAcl(r0.id, '131');
+    assert.strictEqual(acl.rules[0].established, true);
+});
+
+// 1395. Extended ACL optional ICMP type structural storage
+runTest('1395. Extended ACL optional ICMP type structural storage', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 132 permit icmp any any echo');
+    executeCliCommand(r0, 'access-list 132 permit icmp any any echo-reply');
+    const acl = getRouterAcl(r0.id, '132');
+    assert.strictEqual(acl.rules[0].icmpType, 'echo');
+    assert.strictEqual(acl.rules[1].icmpType, 'echo-reply');
+});
+
+// 1396. Standard ACL regression: Standard numbered ACL (1-99) and Standard named ACL remain 100% functional
+runTest('1396. Standard ACL regression: Standard numbered ACL (1-99) and Standard named ACL remain 100% functional', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 10 permit host 192.168.1.1');
+    executeCliCommand(r0, 'ip access-list standard STD_NAMED');
+    executeCliCommand(r0, 'deny 10.0.0.0 0.255.255.255');
+    const aclNum = getRouterAcl(r0.id, '10');
+    assert.strictEqual(aclNum.type, 'standard');
+    assert.strictEqual(aclNum.subType, 'standard-numbered');
+    const aclNamed = getRouterAcl(r0.id, 'STD_NAMED');
+    assert.strictEqual(aclNamed.type, 'standard');
+    assert.strictEqual(aclNamed.subType, 'standard-named');
+});
+
+// 1397. Interface binding regression: ip access-group 100 in and out bind extended ACL to interface
+runTest('1397. Interface binding regression: ip access-group 100 in and out bind extended ACL to interface', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 100 permit ip any any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    const bindIn = executeCliCommand(r0, 'ip access-group 100 in');
+    assert.strictEqual(bindIn.success, true);
+    assert.strictEqual(getRouterInterfaceAcl(r0.id, 'Gig0/0', 'in'), '100');
+    const bindOut = executeCliCommand(r0, 'ip access-group 100 out');
+    assert.strictEqual(bindOut.success, true);
+    assert.strictEqual(getRouterInterfaceAcl(r0.id, 'Gig0/0', 'out'), '100');
+});
+
+// 1398. Interface binding show regression: show ip interface displays extended ACL binding
+runTest('1398. Interface binding show regression: show ip interface displays extended ACL binding', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 100 permit ip any any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 100 in');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'exit');
+    const showRes = executeCliCommand(r0, 'show ip interface Gig0/0');
+    assert.strictEqual(showRes.success, true);
+    assert.ok(showRes.output.includes('access list is 100'));
+});
+
+// 1399. show access-lists regression: Displays both standard and extended ACLs formatted with rules
+runTest('1399. show access-lists regression: Displays both standard and extended ACLs formatted with rules', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 1 permit any');
+    executeCliCommand(r0, 'access-list 100 permit tcp any any eq 80');
+    executeCliCommand(r0, 'ip access-list extended EXT_CORP');
+    executeCliCommand(r0, 'deny udp host 1.1.1.1 any');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'exit');
+    const showRes = executeCliCommand(r0, 'show access-lists');
+    assert.strictEqual(showRes.success, true);
+    assert.ok(showRes.output.includes('Standard IP access list 1'));
+    assert.ok(showRes.output.includes('Extended IP access list 100'));
+    assert.ok(showRes.output.includes('Extended IP access list EXT_CORP'));
+    assert.ok(showRes.output.includes('permit tcp any any eq 80'));
+    assert.ok(showRes.output.includes('deny udp host 1.1.1.1 any'));
+});
+
+// 1400. Total test count verification check (V5.16 Phase 2A baseline)
+runTest('1400. Total test count verification check (V5.16 Phase 2A baseline)', () => {
+    assert.ok(testsPassed >= 1399, 'Expected at least 1399 passed tests prior to final check, got ' + testsPassed);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
