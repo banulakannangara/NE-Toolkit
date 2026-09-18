@@ -35206,6 +35206,556 @@ runTest('1452. Total test count verification check (V5.16 Phase 2B Sub-phase 3 b
     assert.ok(testsPassed >= 1451, 'Expected at least 1451 passed tests prior to final check, got ' + testsPassed);
 });
 
+// 1453. clear access-list counters resets all rule hits on a specific Extended ACL
+runTest('1453. clear access-list counters resets all rule hits on a specific Extended ACL', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 101 permit tcp any any eq 80');
+    executeCliCommand(r0, 'access-list 101 permit tcp any any eq 443');
+    executeCliCommand(r0, 'access-list 102 permit udp any any eq 53');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 101 in');
+
+    // Transmit packets to generate hit counts
+    simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 443 });
+
+    let showAcl101 = executeCliCommand(r0, 'show access-lists 101');
+    assert.ok(showAcl101.output.includes('permit tcp any any eq 80 (2 matches)'));
+    assert.ok(showAcl101.output.includes('permit tcp any any eq 443 (1 match)'));
+
+    // Clear counters on specific ACL 101
+    const clearRes = executeCliCommand(r0, 'clear access-list counters 101');
+    assert.strictEqual(clearRes.success, true);
+    assert.strictEqual(clearRes.output, '');
+
+    showAcl101 = executeCliCommand(r0, 'show access-lists 101');
+    assert.ok(showAcl101.output.includes('permit tcp any any eq 80 (0 matches)'));
+    assert.ok(showAcl101.output.includes('permit tcp any any eq 443 (0 matches)'));
+
+    // Also verify named extended ACL via clear ip access-list counters <name>
+    executeCliCommand(r0, 'ip access-list extended WEB-RULES');
+    executeCliCommand(r0, 'permit tcp any any eq 8080');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group WEB-RULES in');
+    simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 8080 });
+
+    let showNamed = executeCliCommand(r0, 'show ip access-list WEB-RULES');
+    assert.ok(showNamed.output.includes('(1 match)'));
+
+    const clearNamedRes = executeCliCommand(r0, 'clear ip access-list counters WEB-RULES');
+    assert.strictEqual(clearNamedRes.success, true);
+    showNamed = executeCliCommand(r0, 'show ip access-list WEB-RULES');
+    assert.ok(showNamed.output.includes('(0 matches)'));
+});
+
+// 1454. clear access-list counters without a target resets counters across all router ACLs
+runTest('1454. clear access-list counters without a target resets counters across all router ACLs', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 10 permit host 192.168.1.10');
+    executeCliCommand(r0, 'access-list 105 permit tcp any any eq 80');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 10 in');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip access-group 105 out');
+
+    simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+
+    let showAll = executeCliCommand(r0, 'show access-lists');
+    assert.ok(showAll.output.includes('Standard IP access list 10'));
+    assert.ok(showAll.output.includes('Extended IP access list 105'));
+    assert.ok(showAll.output.includes('permit host 192.168.1.10 (2 matches)'));
+    assert.ok(showAll.output.includes('permit tcp any any eq 80 (2 matches)'));
+
+    // Clear without target
+    const clearAll = executeCliCommand(r0, 'clear access-list counters');
+    assert.strictEqual(clearAll.success, true);
+    assert.strictEqual(clearAll.output, '');
+
+    showAll = executeCliCommand(r0, 'show access-lists');
+    assert.ok(showAll.output.includes('permit host 192.168.1.10 (0 matches)'));
+    assert.ok(showAll.output.includes('permit tcp any any eq 80 (0 matches)'));
+});
+
+// 1455. Clearing a nonexistent ACL returns % Access list <target> not found.
+runTest('1455. Clearing a nonexistent ACL returns % Access list <target> not found.', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+
+    const resNum = executeCliCommand(r0, 'clear access-list counters 999');
+    assert.strictEqual(resNum.success, false);
+    assert.strictEqual(resNum.output, '% Access list 999 not found.');
+
+    const resNamed = executeCliCommand(r0, 'clear ip access-list counters NONEXISTENT');
+    assert.strictEqual(resNamed.success, false);
+    assert.strictEqual(resNamed.output, '% Access list NONEXISTENT not found.');
+});
+
+// 1456. clear access-list counters is rejected on non-router devices
+runTest('1456. clear access-list counters is rejected on non-router devices', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('switch', 200, 100);
+    const [pc, sw] = networkState.devices;
+
+    const resPc = executeCliCommand(pc, 'clear access-list counters');
+    assert.strictEqual(resPc.success, false);
+    assert.ok(resPc.output.includes("'clear access-list' is a Cisco IOS router command."));
+
+    const resSw = executeCliCommand(sw, 'clear access-list counters');
+    assert.strictEqual(resSw.success, false);
+    assert.ok(resSw.output.includes("'clear access-list' is a Cisco IOS router command."));
+
+    const resSwIp = executeCliCommand(sw, 'clear ip access-list counters MY-ACL');
+    assert.strictEqual(resSwIp.success, false);
+    assert.ok(resSwIp.output.includes("'clear access-list' is a Cisco IOS router command."));
+});
+
+// 1457. do clear access-list counters works from supported configuration modes
+runTest('1457. do clear access-list counters works from supported configuration modes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 100 permit ip any any');
+
+    // From global config mode
+    const resDoGlobal = executeCliCommand(r0, 'do clear access-list counters');
+    assert.strictEqual(resDoGlobal.success, true);
+
+    // From interface configuration mode
+    executeCliCommand(r0, 'interface Gig0/0');
+    const resDoIf = executeCliCommand(r0, 'do clear access-list counters 100');
+    assert.strictEqual(resDoIf.success, true);
+
+    // From extended ACL sub-mode
+    executeCliCommand(r0, 'ip access-list extended EXT-DO-TEST');
+    executeCliCommand(r0, 'permit tcp any any eq 80');
+    const resDoSub = executeCliCommand(r0, 'do clear access-list counters EXT-DO-TEST');
+    assert.strictEqual(resDoSub.success, true);
+});
+
+// 1458. Extended ACL sub-mode help and ? display appropriate commands
+runTest('1458. Extended ACL sub-mode help and ? display appropriate commands', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended EXT-HELP-TEST');
+
+    const helpRes = executeCliCommand(r0, 'help');
+    assert.strictEqual(helpRes.success, true);
+    assert.ok(helpRes.output.includes('Commands available in Extended Access-list Configuration mode'));
+    assert.ok(helpRes.output.includes('permit <protocol> <source> <dest>'));
+    assert.ok(helpRes.output.includes('deny <protocol> <source> <dest>'));
+    assert.ok(helpRes.output.includes('remark <text>'));
+    assert.ok(helpRes.output.includes('no <sequence>'));
+
+    const qRes = executeCliCommand(r0, '?');
+    assert.strictEqual(qRes.success, true);
+    assert.ok(qRes.output.includes('Commands available in Extended Access-list Configuration mode'));
+
+    // Verify config mode help includes extended ACL commands
+    executeCliCommand(r0, 'exit');
+    const confHelp = executeCliCommand(r0, 'help');
+    assert.ok(confHelp.output.includes('access-list <100-199>'));
+    assert.ok(confHelp.output.includes('ip access-list extended <name>'));
+
+    // Verify interface mode help displays <1-199|name>
+    executeCliCommand(r0, 'interface Gig0/0');
+    const ifHelp = executeCliCommand(r0, 'help');
+    assert.ok(ifHelp.output.includes('ip access-group <1-199|name> <in|out>'));
+
+    // Verify EXEC mode help displays clear access-list counters
+    executeCliCommand(r0, 'end');
+    const execHelp = executeCliCommand(r0, 'help');
+    assert.ok(execHelp.output.includes('clear access-list counters'));
+
+    // Verify incomplete parameter messages
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    const incBind = executeCliCommand(r0, 'ip access-group');
+    assert.strictEqual(incBind.success, false);
+    assert.ok(incBind.output.includes('<1-199|name>'));
+    const incUnbind = executeCliCommand(r0, 'no ip access-group');
+    assert.strictEqual(incUnbind.success, false);
+    assert.ok(incUnbind.output.includes('<1-199|name>'));
+});
+
+// 1459. Inbound permit + outbound permit forwards and increments both ACL counters
+runTest('1459. Inbound permit + outbound permit forwards and increments both ACL counters', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 111 permit tcp 192.168.1.0 0.0.0.255 any eq 80');
+    executeCliCommand(r0, 'access-list 112 permit tcp any 192.168.2.0 0.0.0.255 eq 80');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 111 in');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip access-group 112 out');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(res.success, true);
+
+    const acls = getRouterAcls(r0.id);
+    assert.strictEqual(acls['111'].rules[0].hits, 1, 'Inbound ACL rule hit count must increment');
+    assert.strictEqual(acls['112'].rules[0].hits, 1, 'Outbound ACL rule hit count must increment');
+});
+
+// 1460. Inbound permit + outbound deny drops at egress and increments the relevant counters
+runTest('1460. Inbound permit + outbound deny drops at egress and increments the relevant counters', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 121 permit tcp 192.168.1.0 0.0.0.255 any eq 80');
+    executeCliCommand(r0, 'access-list 122 deny tcp any 192.168.2.0 0.0.0.255 eq 80');
+    executeCliCommand(r0, 'access-list 122 permit ip any any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 121 in');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip access-group 122 out');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.dropReason, 'ACL_DENIED');
+    assert.strictEqual(res.acl.direction, 'outbound');
+    assert.strictEqual(res.acl.interface, 'Gig0/1');
+
+    const acls = getRouterAcls(r0.id);
+    assert.strictEqual(acls['121'].rules[0].hits, 1, 'Inbound permit rule must have incremented');
+    assert.strictEqual(acls['122'].rules[0].hits, 1, 'Outbound deny rule must have incremented');
+    assert.strictEqual(acls['122'].rules[1].hits, 0, 'Outbound permit rule must not have matched');
+});
+
+// 1461. Inbound deny short-circuits processing and leaves the outbound ACL hit count unchanged
+runTest('1461. Inbound deny short-circuits processing and leaves the outbound ACL hit count unchanged', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 131 deny tcp any any eq 80');
+    executeCliCommand(r0, 'access-list 131 permit ip any any');
+    executeCliCommand(r0, 'access-list 132 permit tcp any any eq 80');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 131 in');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip access-group 132 out');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.dropReason, 'ACL_DENIED');
+    assert.strictEqual(res.acl.direction, 'inbound');
+
+    const acls = getRouterAcls(r0.id);
+    assert.strictEqual(acls['131'].rules[0].hits, 1, 'Inbound deny rule must record the hit');
+    assert.strictEqual(acls['132'].rules[0].hits, 0, 'Outbound ACL must never be evaluated or increment hits when ingress denies');
+});
+
+// 1462. Stateful TCP flow: outbound SYN permitted, return ACK permitted by established, unsolicited inbound SYN denied
+runTest('1462. Stateful TCP flow: outbound SYN permitted, return ACK permitted by established, unsolicited inbound SYN denied', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    // On outside interface Gig0/1: permit outbound HTTP requests, permit only established return traffic
+    executeCliCommand(r0, 'access-list 150 permit tcp 192.168.1.0 0.0.0.255 any eq 80');
+    executeCliCommand(r0, 'access-list 151 permit tcp any 192.168.1.0 0.0.0.255 established');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip access-group 150 out');
+    executeCliCommand(r0, 'ip access-group 151 in');
+
+    // 1. Inside client sends outbound TCP SYN to outside server -> permitted by outbound ACL 150
+    const outSyn = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80, flags: { syn: true } });
+    assert.strictEqual(outSyn.success, true);
+
+    // 2. Outside server sends return TCP packet with ACK flag -> permitted by inbound ACL 151 (established)
+    const retAck = simulateSendFrame(pc1, pc0, { protocol: 'tcp', sourcePort: 80, destinationPort: 49152, flags: { ack: true } });
+    assert.strictEqual(retAck.success, true);
+
+    // 3. Unsolicited inbound TCP SYN from outside server -> rejected by inbound ACL 151 through implicit deny
+    const unsoSyn = simulateSendFrame(pc1, pc0, { protocol: 'tcp', sourcePort: 80, destinationPort: 49152, flags: { syn: true } });
+    assert.strictEqual(unsoSyn.success, false);
+    assert.strictEqual(unsoSyn.dropReason, 'ACL_DENIED');
+    assert.strictEqual(unsoSyn.acl.isImplicitDeny, true);
+});
+
+// 1463. Mixed TCP/UDP/ICMP/IP ACL rules evaluate independently with correct first-match hit isolation
+runTest('1463. Mixed TCP/UDP/ICMP/IP ACL rules evaluate independently with correct first-match hit isolation', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 160 deny tcp any any eq 23');
+    executeCliCommand(r0, 'access-list 160 permit tcp any any eq 80');
+    executeCliCommand(r0, 'access-list 160 permit udp any any eq 53');
+    executeCliCommand(r0, 'access-list 160 permit icmp any any echo');
+    executeCliCommand(r0, 'access-list 160 permit ip 192.168.1.0 0.0.0.255 any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 160 in');
+
+    // Rule 1: deny tcp 23
+    const resTelnet = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 23 });
+    assert.strictEqual(resTelnet.success, false);
+    assert.strictEqual(resTelnet.dropReason, 'ACL_DENIED');
+
+    // Rule 2: permit tcp 80
+    const resHttp = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resHttp.success, true);
+
+    // Rule 3: permit udp 53
+    const resDns = simulateSendFrame(pc0, pc1, { protocol: 'udp', destinationPort: 53 });
+    assert.strictEqual(resDns.success, true);
+
+    // Rule 4: permit icmp echo
+    const resIcmp = simulateSendFrame(pc0, pc1, { icmp: true, icmpType: 'echo' });
+    assert.strictEqual(resIcmp.success, true);
+
+    // Rule 5: permit ip fallback (e.g. udp 123 ntp)
+    const resNtp = simulateSendFrame(pc0, pc1, { protocol: 'udp', destinationPort: 123 });
+    assert.strictEqual(resNtp.success, true);
+
+    // Verify exact hit isolation: each rule must have exactly 1 hit
+    const acl = getRouterAcl(r0.id, '160');
+    assert.strictEqual(acl.rules.length, 5);
+    assert.strictEqual(acl.rules[0].hits, 1, 'Rule 10 (deny tcp 23) must have 1 hit');
+    assert.strictEqual(acl.rules[1].hits, 1, 'Rule 20 (permit tcp 80) must have 1 hit');
+    assert.strictEqual(acl.rules[2].hits, 1, 'Rule 30 (permit udp 53) must have 1 hit');
+    assert.strictEqual(acl.rules[3].hits, 1, 'Rule 40 (permit icmp echo) must have 1 hit');
+    assert.strictEqual(acl.rules[4].hits, 1, 'Rule 50 (permit ip fallback) must have 1 hit');
+});
+
+// 1464. no <sequence> removes an Extended ACL rule and immediately changes forwarding behavior
+runTest('1464. no <sequence> removes an Extended ACL rule and immediately changes forwarding behavior', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended FILTER-LIFECYCLE');
+    executeCliCommand(r0, '10 deny tcp any any eq 80');
+    executeCliCommand(r0, '20 permit ip any any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group FILTER-LIFECYCLE in');
+
+    // Initially denied by sequence 10
+    const resDenied = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resDenied.success, false);
+    assert.strictEqual(resDenied.dropReason, 'ACL_DENIED');
+
+    // Remove sequence 10
+    executeCliCommand(r0, 'ip access-list extended FILTER-LIFECYCLE');
+    const delRes = executeCliCommand(r0, 'no 10');
+    assert.strictEqual(delRes.success, true);
+
+    // Forwarding changes immediately: sequence 20 permits the traffic
+    const resPermitted = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resPermitted.success, true);
+});
+
+// 1465. Deleting a bound Extended ACL restores normal forwarding without runtime errors
+runTest('1465. Deleting a bound Extended ACL restores normal forwarding without runtime errors', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 170 deny ip any any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 170 in');
+
+    // Traffic denied by ACL 170
+    const resDenied = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resDenied.success, false);
+    assert.strictEqual(resDenied.dropReason, 'ACL_DENIED');
+
+    // Delete the numbered extended ACL while still bound to interface
+    const delRes = executeCliCommand(r0, 'no access-list 170');
+    assert.strictEqual(delRes.success, true);
+
+    // Forwarding returns to normal unconstrained state without errors
+    const resForward = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resForward.success, true);
+});
+
+// 1466. Total test count verification check (V5.16 Phase 2B Sub-phase 4 baseline)
+runTest('1466. Total test count verification check (V5.16 Phase 2B Sub-phase 4 baseline)', () => {
+    assert.ok(testsPassed >= 1465, 'Expected at least 1465 passed tests prior to final check, got ' + testsPassed);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

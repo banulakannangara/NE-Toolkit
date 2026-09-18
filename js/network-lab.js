@@ -8727,23 +8727,63 @@ function deleteRouterAcl(routerId, aclId) {
 
     const runtime = getRouterRuntime(router.id);
     const key = String(aclId).trim();
+    let actualKey = key;
     if (!runtime.acls || !runtime.acls[key]) {
-        return { success: false, reason: `ACL ${key} does not exist on router ${router.name}.` };
+        const foundKey = Object.keys(runtime.acls || {}).find(k => k.toLowerCase() === key.toLowerCase() || String(runtime.acls[k]?.name || '').toLowerCase() === key.toLowerCase());
+        if (foundKey) {
+            actualKey = foundKey;
+        } else {
+            return { success: false, reason: `ACL ${key} does not exist on router ${router.name}.` };
+        }
     }
 
-    delete runtime.acls[key];
+    delete runtime.acls[actualKey];
 
     if (runtime.interfaceAcls) {
         Object.keys(runtime.interfaceAcls).forEach((ifName) => {
             const ifAcl = runtime.interfaceAcls[ifName];
-            if (ifAcl.in === key) delete ifAcl.in;
-            if (ifAcl.out === key) delete ifAcl.out;
+            if (ifAcl.in === actualKey || ifAcl.in === key) delete ifAcl.in;
+            if (ifAcl.out === actualKey || ifAcl.out === key) delete ifAcl.out;
             if (Object.keys(ifAcl).length === 0) {
                 delete runtime.interfaceAcls[ifName];
             }
         });
     }
 
+    return { success: true };
+}
+
+function clearRouterAclCounters(routerId, targetAclId = null) {
+    const router = typeof routerId === 'object' && routerId ? routerId : getDeviceById(routerId);
+    if (!router || router.type !== 'router') {
+        return { success: false, reason: "% 'clear access-list' is a Cisco IOS router command." };
+    }
+
+    const acls = getRouterAcls(router.id);
+    if (!acls || Object.keys(acls).length === 0) {
+        if (targetAclId) {
+            return { success: false, reason: `% Access list ${targetAclId} not found.` };
+        }
+        return { success: true };
+    }
+
+    if (targetAclId !== null && targetAclId !== undefined && String(targetAclId).trim() !== '') {
+        const key = String(targetAclId).trim();
+        const acl = Object.values(acls).find(a => String(a.id) === key || String(a.name) === key || String(a.id).toLowerCase() === key.toLowerCase() || String(a.name).toLowerCase() === key.toLowerCase());
+        if (!acl) {
+            return { success: false, reason: `% Access list ${targetAclId} not found.` };
+        }
+        if (Array.isArray(acl.rules)) {
+            acl.rules.forEach(r => { r.hits = 0; });
+        }
+        return { success: true };
+    }
+
+    Object.values(acls).forEach(acl => {
+        if (Array.isArray(acl.rules)) {
+            acl.rules.forEach(r => { r.hits = 0; });
+        }
+    });
     return { success: true };
 }
 
@@ -13612,7 +13652,7 @@ function formatCliRouterAcls(router, targetAclId = null) {
 
     if (targetAclId) {
         const key = String(targetAclId).trim();
-        aclList = aclList.filter(a => String(a.id) === key || String(a.name) === key);
+        aclList = aclList.filter(a => String(a.id) === key || String(a.name) === key || String(a.id).toLowerCase() === key.toLowerCase() || String(a.name).toLowerCase() === key.toLowerCase());
     }
 
     if (!aclList || aclList.length === 0) {
@@ -14823,8 +14863,8 @@ function executeCliCommand(deviceId, rawInput) {
   encapsulation dot1q <vlan-id> - Configure IEEE 802.1Q encapsulation for this subinterface
   ip address <IP> <mask/prefix> - Set IPv4 address and subnet mask on this subinterface
   no ip address                 - Remove IPv4 address from this subinterface
-  ip access-group <name|1-99> <in|out> - Apply access list to this subinterface
-  no ip access-group <name|1-99> <in|out> - Remove access list from this subinterface
+  ip access-group <1-199|name> <in|out> - Apply access list to this subinterface
+  no ip access-group <1-199|name> <in|out> - Remove access list from this subinterface
   ip nat <inside|outside>       - Enable NAT inside or outside on this subinterface
   no ip nat <inside|outside>    - Remove NAT role from this subinterface
   shutdown                      - Administratively disable this subinterface
@@ -14838,8 +14878,8 @@ function executeCliCommand(deviceId, rawInput) {
                 helpText = `Commands available in Interface Configuration mode on ${dev.name}:
   ip address <IP> <mask/prefix> - Set IPv4 address and subnet mask on this interface
   no ip address                 - Remove IPv4 address from this interface
-  ip access-group <name|1-99> <in|out> - Apply access list to this interface
-  no ip access-group <name|1-99> <in|out> - Remove access list from this interface
+  ip access-group <1-199|name> <in|out> - Apply access list to this interface
+  no ip access-group <1-199|name> <in|out> - Remove access list from this interface
   ip ospf cost <1-65535>        - Set OSPF interface metric cost
   ip ospf priority <0-255>      - Set OSPF router priority
   ip ospf hello-interval <sec>  - Set OSPF hello interval
@@ -14867,15 +14907,31 @@ function executeCliCommand(deviceId, rawInput) {
   end                          - Return to Privileged EXEC mode
   do <command>                 - Execute an operational command
   help, ?                      - Show available commands`;
+            } else if (session.mode === 'config-ext-nacl') {
+                helpText = `Commands available in Extended Access-list Configuration mode on ${dev.name}:
+  permit <protocol> <source> <dest> [operator] [options] - Specify packets to forward
+  deny <protocol> <source> <dest> [operator] [options]   - Specify packets to reject
+  remark <text>                - Access list entry comment
+  <seq> permit ...             - Specify rule with explicit sequence number
+  <seq> deny ...               - Specify rule with explicit sequence number
+  <seq> remark <text>          - Specify remark with explicit sequence number
+  no <sequence>                - Delete an access list rule by sequence number
+  exit                         - Return to Global Configuration mode
+  end                          - Return to Privileged EXEC mode
+  do <command>                 - Execute an operational command
+  help, ?                      - Show available commands`;
             } else if (session.mode === 'config') {
                 helpText = `Commands available in Global Configuration mode on ${dev.name}:
   hostname <name>               - Set device system name
   interface <name>              - Enter interface configuration mode (alias: int)
   access-list <1-99> <permit|deny> <source> [wildcard] - Configure standard numbered access list
-  access-list <1-99> remark <text> - Set comment on numbered access list
-  no access-list <1-99>         - Delete numbered access list
+  access-list <100-199> <permit|deny> <protocol> <src> <dest> [options] - Configure extended numbered access list
+  access-list <1-199> remark <text> - Set comment on numbered access list
+  no access-list <1-199>        - Delete numbered access list
   ip access-list standard <name> - Configure standard named access list
   no ip access-list standard <name> - Delete standard named access list
+  ip access-list extended <name> - Configure extended named access list
+  no ip access-list extended <name> - Delete extended named access list
   ip route <net> <mask> <next-hop> [ad] [metric] - Configure a static route
   no ip route <net> <mask> [next-hop]            - Delete a static route
   router ospf <process-id>      - Configure OSPF routing process (enters router config mode)
@@ -14939,6 +14995,7 @@ function executeCliCommand(deviceId, rawInput) {
   show ip nat translations - Display active NAT and PAT translation table
   show ip nat statistics - Display NAT configuration and translation statistics
   clear ip nat translation - Clear active Dynamic and PAT translations (*, inside-local, or inside-global)
+  clear access-list counters - Clear access list hit counters (alias: clear access-list counters <id|name>)
   show hosts             - Display DNS status and static host mappings
   show arp               - Display router ARP table and interface bindings
   show access-lists      - Display configured Access Control Lists (ACLs) and hit counts
@@ -15052,8 +15109,148 @@ function executeCliCommand(deviceId, rawInput) {
             };
         }
 
-        // clear ip nat translation ...
+        // clear access-list counters [id|name]
+        const sub1 = tokens[1];
+        if (sub1 === 'access-list' || sub1 === 'access-lists' || sub1 === 'acl' || sub1 === 'acls') {
+            if (!isRouter) {
+                return {
+                    success: false,
+                    output: `% 'clear access-list' is a Cisco IOS router command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+
+            let targetAcl = null;
+            if (tokens[2] === 'counters' || tokens[2] === 'counter') {
+                targetAcl = rawTokens[3] || tokens[3] || null;
+                if (tokens.length > 4) {
+                    return {
+                        success: false,
+                        output: '% Too many parameters: clear access-list counters [id|name]',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+            } else if (tokens[2]) {
+                return {
+                    success: false,
+                    output: `% Unrecognized clear command: "${command}". Available: "clear access-list counters [id|name]".`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            } else {
+                return {
+                    success: false,
+                    output: '% Incomplete command: clear access-list counters [id|name]',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+
+            const res = clearRouterAclCounters(dev.id, targetAcl);
+            if (!res.success) {
+                return {
+                    success: false,
+                    output: res.reason,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
+        // clear ip ...
         if (tokens[1] === 'ip') {
+            // clear ip access-list counters [name]
+            if (tokens[2] === 'access-list' || tokens[2] === 'access-lists' || tokens[2] === 'acl' || tokens[2] === 'acls') {
+                if (!isRouter) {
+                    return {
+                        success: false,
+                        output: `% 'clear access-list' is a Cisco IOS router command.`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+
+                let targetAcl = null;
+                if (tokens[3] === 'counters' || tokens[3] === 'counter') {
+                    targetAcl = rawTokens[4] || tokens[4] || null;
+                    if (tokens.length > 5) {
+                        return {
+                            success: false,
+                            output: '% Too many parameters: clear ip access-list counters [name]',
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                } else if (tokens[3]) {
+                    return {
+                        success: false,
+                        output: `% Unrecognized clear command: "${command}". Available: "clear ip access-list counters [name]".`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                } else {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: clear ip access-list counters [name]',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+
+                const res = clearRouterAclCounters(dev.id, targetAcl);
+                if (!res.success) {
+                    return {
+                        success: false,
+                        output: res.reason,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+
+            // clear ip nat translation ...
             if (tokens[2] === 'nat') {
                 if (!isRouter) {
                     return {
@@ -17229,7 +17426,7 @@ function executeCliCommand(deviceId, rawInput) {
             if (dir !== 'in' && dir !== 'out') {
                 return {
                     success: false,
-                    output: '% Incomplete command: no ip access-group <1-99|name> <in|out>',
+                    output: '% Incomplete command: no ip access-group <1-199|name> <in|out>',
                     clear: false,
                     status: 'error',
                     command,
@@ -18959,7 +19156,7 @@ function executeCliCommand(deviceId, rawInput) {
             if (!aclKey || (dir !== 'in' && dir !== 'out')) {
                 return {
                     success: false,
-                    output: '% Incomplete command: ip access-group <1-99|name> <in|out>',
+                    output: '% Incomplete command: ip access-group <1-199|name> <in|out>',
                     clear: false,
                     status: 'error',
                     command,
