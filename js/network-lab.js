@@ -13616,7 +13616,7 @@ function formatCliRouterAcls(router, targetAclId = null) {
     }
 
     if (!aclList || aclList.length === 0) {
-        return 'No access lists configured.';
+        return targetAclId ? `% Access list ${targetAclId} not found.` : 'No access lists configured.';
     }
 
     const lines = [];
@@ -20975,9 +20975,19 @@ function executeCliCommand(deviceId, rawInput) {
                     device: dev
                 };
             }
+            let targetAclId = null;
+            if (sub1 === 'ip') {
+                if (tokens[3] === 'standard' || tokens[3] === 'extended') {
+                    targetAclId = tokens[4] || null;
+                } else {
+                    targetAclId = tokens[3] || null;
+                }
+            } else {
+                targetAclId = tokens[2] || null;
+            }
             return {
                 success: true,
-                output: formatCliRouterAcls(dev),
+                output: formatCliRouterAcls(dev, targetAclId),
                 clear: false,
                 status: 'success',
                 command,
@@ -23304,7 +23314,7 @@ function getDeviceL3Endpoint(device, targetIp) {
 /**
  * Checks reachability of a target IP from a source device using the simulated topology.
  */
-function checkIpReachability(sourceDev, targetIp) {
+function checkIpReachability(sourceDev, targetIp, options = {}) {
     const targetMatch = findDeviceByIp(targetIp);
     if (!targetMatch || !targetMatch.device) {
         return { reachable: false, reason: 'DNS_SERVER_NOT_FOUND' };
@@ -23344,7 +23354,13 @@ function checkIpReachability(sourceDev, targetIp) {
         } else {
             destEndpoint = targetMatch.device;
         }
-        const simResult = simulateSendFrame(srcEndpoint, destEndpoint, { icmp: false });
+        const simResult = simulateSendFrame(srcEndpoint, destEndpoint, {
+            icmp: false,
+            protocol: options?.protocol || 'UDP',
+            destinationPort: options?.destinationPort ?? 53,
+            sourcePort: options?.sourcePort ?? 53000,
+            ...options
+        });
         return {
             reachable: Boolean(simResult.success),
             simResult,
@@ -23441,7 +23457,7 @@ function simulateDnsQuery(clientDeviceOrId, hostname, options = {}) {
             recordType: 'A'
         });
 
-        const reachCheck = checkIpReachability(clientDev, serverIp);
+        const reachCheck = checkIpReachability(clientDev, serverIp, options);
         const serverDev = reachCheck?.targetMatch?.device || null;
         if (serverDev) {
             queryPacket.destinationDeviceId = serverDev.id;

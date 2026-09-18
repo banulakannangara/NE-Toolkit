@@ -34678,6 +34678,534 @@ runTest('1440. Total test count verification check (V5.16 Phase 2B Sub-phase 2 b
     assert.ok(testsPassed >= 1439, 'Expected at least 1439 passed tests prior to final check, got ' + testsPassed);
 });
 
+// =========================================================================
+// --- V5.16 Phase 2B Sub-phase 3: Extended ACL System Integration & Regressions (1441 - 1452) ---
+// =========================================================================
+
+// 1441. Static NAT compatibility: Inbound Extended ACL filters traffic before Static NAT translation
+runTest('1441. Static NAT compatibility: Inbound Extended ACL filters traffic before Static NAT translation', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    pc1.ip = '203.0.113.50';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip nat inside');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip nat outside');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'ip nat inside source static 192.168.1.10 203.0.113.10');
+
+    // Inbound Extended ACL on inside interface Gig0/0: permit HTTP (port 80) only from inside local 192.168.1.10
+    executeCliCommand(r0, 'access-list 100 permit tcp host 192.168.1.10 any eq 80');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 100 in');
+
+    // PC0 sends TCP port 80 to PC1: Inbound ACL permits, Static NAT translates source 192.168.1.10 -> 203.0.113.10
+    const resPermit = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resPermit.success, true);
+    assert.strictEqual(resPermit.packet.sourceIp, '203.0.113.10');
+    assert.strictEqual(resPermit.packet.nat?.translated, true);
+    assert.strictEqual(resPermit.packet.nat?.direction, 'inside-to-outside');
+
+    // PC0 sends TCP port 8080 to PC1: Inbound ACL denies (implicit deny), Static NAT is bypassed
+    const resDeny = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 8080 });
+    assert.strictEqual(resDeny.success, false);
+    assert.strictEqual(resDeny.dropReason, 'ACL_DENIED');
+});
+
+// 1442. PAT (NAT Overload) compatibility: Outbound Extended ACL filters inside local traffic before PAT translation
+runTest('1442. PAT (NAT Overload) compatibility: Outbound Extended ACL filters inside local traffic before PAT translation', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    pc1.ip = '203.0.113.50';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip nat inside');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip nat outside');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'access-list 1 permit 192.168.1.0 0.0.0.255');
+    executeCliCommand(r0, 'ip nat inside source list 1 interface Gig0/1 overload');
+
+    // Outbound Extended ACL on Gig0/1: permit HTTP (port 80), deny Telnet (port 23)
+    executeCliCommand(r0, 'access-list 101 permit tcp 192.168.1.0 0.0.0.255 any eq 80');
+    executeCliCommand(r0, 'access-list 101 deny tcp any any eq 23');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip access-group 101 out');
+
+    // PC0 sends TCP 80 to Server PC1: permitted by outbound ACL, then PAT applied
+    const resPermit = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80, sourcePort: 50000 });
+    assert.strictEqual(resPermit.success, true);
+    assert.strictEqual(resPermit.packet.sourceIp, '203.0.113.1');
+    assert.strictEqual(resPermit.packet.nat?.type, 'pat');
+
+    const natState = getRouterNatState(r0.id);
+    const patCountBefore = natState.patTranslations ? natState.patTranslations.length : 0;
+    assert.strictEqual(patCountBefore, 1);
+
+    // PC0 sends TCP 23 to Server PC1: denied by outbound ACL on inside local IP, dropped before PAT allocation
+    const resDeny = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 23, sourcePort: 50001 });
+    assert.strictEqual(resDeny.success, false);
+    assert.strictEqual(resDeny.dropReason, 'ACL_DENIED');
+
+    // Ensure no new PAT translation was created for denied packet
+    const patCountAfter = natState.patTranslations ? natState.patTranslations.length : 0;
+    assert.strictEqual(patCountAfter, patCountBefore);
+});
+
+// 1443. Dynamic NAT pool address preservation when Outbound Extended ACL denies traffic
+runTest('1443. Dynamic NAT pool address preservation when Outbound Extended ACL denies traffic', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '203.0.113.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    pc1.ip = '203.0.113.50';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '203.0.113.1';
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip nat inside');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip nat outside');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'ip nat pool POOL1 203.0.113.100 203.0.113.101 netmask 255.255.255.0');
+    executeCliCommand(r0, 'access-list 2 permit 192.168.1.0 0.0.0.255');
+    executeCliCommand(r0, 'ip nat inside source list 2 pool POOL1');
+
+    // Outbound Extended ACL: only permits UDP 53, denies all else
+    executeCliCommand(r0, 'access-list 102 permit udp any any eq 53');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip access-group 102 out');
+
+    // PC0 sends TCP 80: denied by outbound ACL, drops before Dynamic NAT translation
+    const resDeny = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resDeny.success, false);
+    assert.strictEqual(resDeny.dropReason, 'ACL_DENIED');
+
+    const natState = getRouterNatState(r0.id);
+    const activeDyn = natState.translations ? natState.translations.filter(t => t.state === 'active').length : 0;
+    assert.strictEqual(activeDyn, 0, 'Dynamic NAT pool address must not be allocated when ACL denies packet');
+});
+
+// 1444. OSPF dynamic routing compatibility: Multi-hop transit traffic enforced by intermediate router Extended ACL
+runTest('1444. OSPF dynamic routing compatibility: Multi-hop transit traffic enforced by intermediate router Extended ACL', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('router', 350, 100);
+    addDevice('router', 500, 100);
+    addDevice('pc', 650, 100);
+    const [pc0, r0, r1, r2, pc2] = networkState.devices;
+
+    pc0.ip = '192.168.0.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.0.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.0.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r1.interfaces['Gig0/0'].ip = '10.0.0.2';
+    r1.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r1.interfaces['Gig0/1'].ip = '10.0.1.1';
+    r1.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    r2.interfaces['Gig0/0'].ip = '10.0.1.2';
+    r2.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r2.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r2.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    pc2.ip = '192.168.2.10';
+    pc2.subnetMask = '255.255.255.0';
+    pc2.gateway = '192.168.2.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, r1.id);
+    addConnection(r1.id, r2.id);
+    addConnection(r2.id, pc2.id);
+
+    // Configure OSPF on R0, R1, R2
+    [r0, r1, r2].forEach((r) => {
+        executeCliCommand(r, 'enable');
+        executeCliCommand(r, 'conf t');
+        executeCliCommand(r, 'router ospf 1');
+        executeCliCommand(r, 'network 0.0.0.0 255.255.255.255 area 0');
+    });
+
+    updateOspfAdjacencies();
+
+    // Intermediate router R1 configures Extended ACL on transit egress Gig0/1:
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'access-list 104 permit tcp any any eq 443');
+    executeCliCommand(r1, 'access-list 104 deny tcp any any eq 80');
+    executeCliCommand(r1, 'interface Gig0/1');
+    executeCliCommand(r1, 'ip access-group 104 out');
+
+    // PC0 sends TCP 443 to PC2: passes through R0 -> R1 -> R2 -> PC2
+    const resPermit = simulateSendFrame(pc0, pc2, { protocol: 'tcp', destinationPort: 443 });
+    assert.strictEqual(resPermit.success, true);
+
+    // PC0 sends TCP 80 to PC2: dropped at intermediate router R1
+    const resDeny = simulateSendFrame(pc0, pc2, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resDeny.success, false);
+    assert.strictEqual(resDeny.dropReason, 'ACL_DENIED');
+    assert.ok(resDeny.reason.includes('router Router1'));
+});
+
+// 1445. DNS simulation compatibility: DNS query permitted by Extended ACL matching UDP port 53 (domain)
+runTest('1445. DNS simulation compatibility: DNS query permitted by Extended ACL matching UDP port 53 (domain)', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('server', 350, 100);
+    const [pc0, r0, srv0] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    srv0.ip = '192.168.2.100';
+    srv0.subnetMask = '255.255.255.0';
+    srv0.gateway = '192.168.2.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, srv0.id);
+
+    enableDnsServer(srv0.id);
+    addDnsRecord(srv0.id, 'portal.corp.lan', '10.0.0.99');
+    addDnsServer(pc0.id, '192.168.2.100');
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 105 permit udp any any eq domain');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 105 in');
+
+    const res = simulateDnsQuery(pc0.id, 'portal.corp.lan');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.resolvedIp, '10.0.0.99');
+
+    const aclObj = getRouterAcl(r0.id, '105');
+    assert.ok(aclObj.rules[0].hits > 0, 'DNS query packet must increment ACL 105 rule 1 hit counter');
+});
+
+// 1446. DNS simulation compatibility: DNS query blocked by Extended ACL deny rule
+runTest('1446. DNS simulation compatibility: DNS query blocked by Extended ACL deny rule', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('server', 350, 100);
+    const [pc0, r0, srv0] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    srv0.ip = '192.168.2.100';
+    srv0.subnetMask = '255.255.255.0';
+    srv0.gateway = '192.168.2.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, srv0.id);
+
+    enableDnsServer(srv0.id);
+    addDnsRecord(srv0.id, 'portal.corp.lan', '10.0.0.99');
+    addDnsServer(pc0.id, '192.168.2.100');
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 106 deny udp any any eq 53');
+    executeCliCommand(r0, 'access-list 106 permit ip any any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 106 in');
+
+    const res = simulateDnsQuery(pc0.id, 'portal.corp.lan');
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.reason, 'DNS_SERVER_UNREACHABLE');
+
+    const aclObj = getRouterAcl(r0.id, '106');
+    assert.ok(aclObj.rules[0].hits > 0, 'Blocked DNS query packet must increment ACL 106 deny rule hit counter');
+});
+
+// 1447. ROAS (Router-on-a-Stick) inter-VLAN subinterface Extended ACL enforcement
+runTest('1447. ROAS (Router-on-a-Stick) inter-VLAN subinterface Extended ACL enforcement', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 250, 100);
+    addDevice('pc', 400, 50);
+    addDevice('pc', 400, 150);
+    const [r0, sw0, pc10, pc20] = networkState.devices;
+
+    // Switch VLANs and port configurations
+    executeCliCommand(sw0, 'enable');
+    executeCliCommand(sw0, 'conf t');
+    executeCliCommand(sw0, 'vlan 10');
+    executeCliCommand(sw0, 'vlan 20');
+    executeCliCommand(sw0, 'interface Fa0/1');
+    executeCliCommand(sw0, 'switchport mode trunk');
+    executeCliCommand(sw0, 'interface Fa0/2');
+    executeCliCommand(sw0, 'switchport mode access');
+    executeCliCommand(sw0, 'switchport access vlan 10');
+    executeCliCommand(sw0, 'interface Fa0/3');
+    executeCliCommand(sw0, 'switchport mode access');
+    executeCliCommand(sw0, 'switchport access vlan 20');
+
+    // Router ROAS subinterfaces
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'interface Gig0/0.10');
+    executeCliCommand(r0, 'encapsulation dot1q 10');
+    executeCliCommand(r0, 'ip address 192.168.10.1 255.255.255.0');
+    executeCliCommand(r0, 'interface Gig0/0.20');
+    executeCliCommand(r0, 'encapsulation dot1q 20');
+    executeCliCommand(r0, 'ip address 192.168.20.1 255.255.255.0');
+
+    pc10.ip = '192.168.10.10';
+    pc10.subnetMask = '255.255.255.0';
+    pc10.gateway = '192.168.10.1';
+
+    pc20.ip = '192.168.20.10';
+    pc20.subnetMask = '255.255.255.0';
+    pc20.gateway = '192.168.20.1';
+
+    addConnection(r0.id, sw0.id);
+    addConnection(sw0.id, pc10.id);
+    addConnection(sw0.id, pc20.id);
+
+    // Apply inbound Extended ACL on Gig0/0.10: permit established TCP and ICMP echo, deny non-established
+    executeCliCommand(r0, 'access-list 110 permit tcp 192.168.10.0 0.0.0.255 192.168.20.0 0.0.0.255 established');
+    executeCliCommand(r0, 'access-list 110 permit icmp any any echo');
+    executeCliCommand(r0, 'interface Gig0/0.10');
+    executeCliCommand(r0, 'ip access-group 110 in');
+
+    // 1. Established TCP packet with flags.ack: permitted across VLANs
+    const resEst = simulateSendFrame(pc10, pc20, { protocol: 'tcp', destinationPort: 80, flags: { ack: true } });
+    assert.strictEqual(resEst.success, true);
+
+    // 2. Non-established TCP packet with flags.syn: denied by subinterface inbound ACL
+    const resNonEst = simulateSendFrame(pc10, pc20, { protocol: 'tcp', destinationPort: 80, flags: { syn: true } });
+    assert.strictEqual(resNonEst.success, false);
+    assert.strictEqual(resNonEst.dropReason, 'ACL_DENIED');
+
+    // 3. ICMP echo request: permitted
+    const resIcmp = simulateSendFrame(pc10, pc20, { icmp: true });
+    assert.strictEqual(resIcmp.success, true);
+});
+
+// 1448. Multi-hop Extended ACL drop generates ICMP Type 3 Code 13 error along return path
+runTest('1448. Multi-hop Extended ACL drop generates ICMP Type 3 Code 13 error along return path', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 115 deny tcp any any eq 22');
+    executeCliCommand(r0, 'access-list 115 permit ip any any');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip access-group 115 out');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 22 });
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.dropReason, 'ACL_DENIED');
+    assert.ok(res.icmpErrorPacket, 'ICMP error packet must be generated on ACL drop');
+    assert.strictEqual(res.icmpErrorPacket.icmp.type, 3);
+    assert.strictEqual(res.icmpErrorPacket.icmp.code, 13);
+    assert.strictEqual(res.icmpErrorPacket.icmp.codeName, 'ADMINISTRATIVELY_PROHIBITED');
+    assert.strictEqual(res.icmpErrorPacket.icmp.isError, true);
+    assert.strictEqual(res.icmpErrorPacket.icmp.acl.aclId, '115');
+    assert.strictEqual(res.icmpErrorPacket.icmp.acl.action, 'deny');
+    assert.strictEqual(res.icmpErrorPacket.destinationIp, '192.168.1.10');
+});
+
+// 1449. CLI show access-lists <id> targeted display with live hit counts
+runTest('1449. CLI show access-lists <id> targeted display with live hit counts', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 10 permit host 192.168.1.10');
+    executeCliCommand(r0, 'access-list 120 permit tcp any any eq 80');
+    executeCliCommand(r0, 'access-list 120 permit tcp any any eq 443');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 120 in');
+
+    // Transmit 3 HTTP packets (port 80) and 2 HTTPS packets (port 443)
+    simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 443 });
+    simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 443 });
+
+    // Targeted show command for 120
+    const showRes = executeCliCommand(r0, 'show access-lists 120');
+    assert.strictEqual(showRes.success, true);
+    assert.ok(showRes.output.includes('Extended IP access list 120'));
+    assert.ok(showRes.output.includes('permit tcp any any eq 80 (3 matches)'));
+    assert.ok(showRes.output.includes('permit tcp any any eq 443 (2 matches)'));
+    assert.ok(!showRes.output.includes('Standard IP access list 10'), 'Targeted show must not display ACL 10');
+
+    // show ip access-list 120 syntax check
+    const showIpRes = executeCliCommand(r0, 'show ip access-list 120');
+    assert.strictEqual(showIpRes.success, true);
+    assert.ok(showIpRes.output.includes('Extended IP access list 120'));
+});
+
+// 1450. CLI show access-lists <nonexistent> displays error message
+runTest('1450. CLI show access-lists <nonexistent> displays error message', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+
+    const resNum = executeCliCommand(r0, 'show access-lists 999');
+    assert.strictEqual(resNum.success, true);
+    assert.strictEqual(resNum.output, '% Access list 999 not found.');
+
+    const resNamed = executeCliCommand(r0, 'show ip access-list NONEXISTENT');
+    assert.strictEqual(resNamed.success, true);
+    assert.strictEqual(resNamed.output, '% Access list nonexistent not found.');
+});
+
+// 1451. Standard ACL isolation regression across complex multi-feature topology
+runTest('1451. Standard ACL isolation regression across complex multi-feature topology', () => {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    // Standard ACL 10 on Gig0/0 inbound
+    executeCliCommand(r0, 'access-list 10 permit host 192.168.1.10');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 10 in');
+
+    // Extended ACL 130 on Gig0/1 outbound
+    executeCliCommand(r0, 'access-list 130 permit udp any any eq 53');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip access-group 130 out');
+
+    // Standard ACL permits source 192.168.1.10 regardless of protocol; Extended ACL permits UDP 53
+    const resUdp53 = simulateSendFrame(pc0, pc1, { protocol: 'udp', destinationPort: 53 });
+    assert.strictEqual(resUdp53.success, true);
+
+    const showAll = executeCliCommand(r0, 'show access-lists');
+    assert.ok(showAll.output.includes('Standard IP access list 10'));
+    assert.ok(showAll.output.includes('Extended IP access list 130'));
+});
+
+// 1452. Total test count verification check (V5.16 Phase 2B Sub-phase 3 baseline)
+runTest('1452. Total test count verification check (V5.16 Phase 2B Sub-phase 3 baseline)', () => {
+    assert.ok(testsPassed >= 1451, 'Expected at least 1451 passed tests prior to final check, got ' + testsPassed);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
