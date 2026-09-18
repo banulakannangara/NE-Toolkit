@@ -8551,6 +8551,73 @@ function isIpMatchWithWildcard(testIp, targetIp, wildcard) {
     return (testNum & matchMask) === (targetNum & matchMask);
 }
 
+function resolvePortNumber(val) {
+    if (val === null || val === undefined) return null;
+    if (typeof val === 'number') return isNaN(val) ? null : val;
+    const s = String(val).toLowerCase().trim();
+    const portLookup = {
+        'echo': 7, 'ftp-data': 20, 'ftp': 21, 'ssh': 22, 'telnet': 23, 'smtp': 25,
+        'domain': 53, 'dns': 53, 'bootps': 67, 'bootpc': 68, 'tftp': 69, 'http': 80,
+        'www': 80, 'pop3': 110, 'ntp': 123, 'snmp': 161, 'snmptrap': 162, 'bgp': 179,
+        'https': 443
+    };
+    if (portLookup[s] !== undefined) return portLookup[s];
+    const n = parseInt(s, 10);
+    return isNaN(n) ? null : n;
+}
+
+function isPortMatch(packetPort, operator, rulePort, ruleRange) {
+    if (!operator) {
+        return true;
+    }
+    const op = String(operator).toLowerCase().trim();
+    const pktP = resolvePortNumber(packetPort);
+    if (pktP === null) {
+        return false;
+    }
+
+    if (op === 'range') {
+        let rMin = null;
+        let rMax = null;
+        if (Array.isArray(ruleRange) && ruleRange.length >= 2) {
+            rMin = resolvePortNumber(ruleRange[0]);
+            rMax = resolvePortNumber(ruleRange[1]);
+        } else if (rulePort) {
+            const parts = String(rulePort).split(/[-_\s]+/);
+            if (parts.length >= 2) {
+                rMin = resolvePortNumber(parts[0]);
+                rMax = resolvePortNumber(parts[1]);
+            }
+        }
+        if (rMin === null || rMax === null) {
+            return false;
+        }
+        const minP = Math.min(rMin, rMax);
+        const maxP = Math.max(rMin, rMax);
+        return pktP >= minP && pktP <= maxP;
+    }
+
+    const targetP = resolvePortNumber(rulePort);
+    if (targetP === null) {
+        return false;
+    }
+
+    if (op === 'eq') {
+        return pktP === targetP;
+    }
+    if (op === 'neq') {
+        return pktP !== targetP;
+    }
+    if (op === 'lt') {
+        return pktP < targetP;
+    }
+    if (op === 'gt') {
+        return pktP > targetP;
+    }
+
+    return false;
+}
+
 function getRouterAcls(routerId) {
     const runtime = getRouterRuntime(routerId);
     return runtime.acls || {};
@@ -8873,14 +8940,27 @@ function evaluatePacketAcl(acl, packet) {
 
     const pktSrcIp = packet?.sourceIp || packet?.packet?.sourceIp;
     const pktDstIp = packet?.destinationIp || packet?.packet?.destinationIp;
-    const pktProto = String(packet?.protocol || packet?.packet?.protocol || (packet?.icmp ? 'ICMP' : 'IP')).toLowerCase();
+    const rawProto = packet?.protocol || packet?.packet?.protocol;
+    let pktProto = rawProto ? String(rawProto).toLowerCase().trim() : null;
+    if (!pktProto) {
+        if (packet?.icmp || packet?.packet?.icmp) {
+            pktProto = 'icmp';
+        } else {
+            pktProto = 'ip';
+        }
+    }
+    const pktSrcPort = packet?.sourcePort ?? packet?.srcPort ?? packet?.packet?.sourcePort ?? packet?.packet?.srcPort;
+    const pktDstPort = packet?.destinationPort ?? packet?.dstPort ?? packet?.packet?.destinationPort ?? packet?.packet?.dstPort;
 
     const sortedRules = [...activeRules].sort((a, b) => a.sequence - b.sequence);
 
     for (const rule of sortedRules) {
-        if (acl.type === 'extended' && rule.protocol && rule.protocol !== 'ip') {
-            if (rule.protocol !== pktProto) {
-                continue;
+        if (acl.type === 'extended') {
+            const ruleProto = String(rule.protocol || 'ip').toLowerCase().trim();
+            if (ruleProto !== 'ip') {
+                if (ruleProto !== pktProto) {
+                    continue;
+                }
             }
         }
 
@@ -8890,9 +8970,31 @@ function evaluatePacketAcl(acl, packet) {
             }
         }
 
-        if (acl.type === 'extended' && rule.destination && !rule.destination?.isAny) {
-            if (!isIpMatchWithWildcard(pktDstIp, rule.destination.ip, rule.destination.wildcard)) {
-                continue;
+        if (acl.type === 'extended') {
+            if (rule.destination && !rule.destination?.isAny) {
+                if (!isIpMatchWithWildcard(pktDstIp, rule.destination.ip, rule.destination.wildcard)) {
+                    continue;
+                }
+            }
+
+            if (rule.srcPortOp) {
+                if (pktProto === 'tcp' || pktProto === 'udp') {
+                    if (!isPortMatch(pktSrcPort, rule.srcPortOp, rule.srcPort, rule.srcPortRange)) {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
+
+            if (rule.dstPortOp) {
+                if (pktProto === 'tcp' || pktProto === 'udp') {
+                    if (!isPortMatch(pktDstPort, rule.dstPortOp, rule.dstPort, rule.dstPortRange)) {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
             }
         }
 
@@ -12054,16 +12156,28 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
         ttl: initialTtl
     };
 
-    if (typeof options?.sourcePort === 'number' || typeof options?.srcPort === 'number') {
-        packetPayload.sourcePort = options.sourcePort ?? options.srcPort;
-        packetPayload.srcPort = packetPayload.sourcePort;
+    const rawSrcPort = options?.sourcePort ?? options?.srcPort;
+    if (rawSrcPort !== undefined && rawSrcPort !== null) {
+        const p = typeof rawSrcPort === 'number' ? rawSrcPort : parseInt(rawSrcPort, 10);
+        if (!isNaN(p)) {
+            packetPayload.sourcePort = p;
+            packetPayload.srcPort = p;
+        }
     }
-    if (typeof options?.destinationPort === 'number' || typeof options?.dstPort === 'number') {
-        packetPayload.destinationPort = options.destinationPort ?? options.dstPort;
-        packetPayload.dstPort = packetPayload.destinationPort;
+    const rawDstPort = options?.destinationPort ?? options?.dstPort;
+    if (rawDstPort !== undefined && rawDstPort !== null) {
+        const p = typeof rawDstPort === 'number' ? rawDstPort : parseInt(rawDstPort, 10);
+        if (!isNaN(p)) {
+            packetPayload.destinationPort = p;
+            packetPayload.dstPort = p;
+        }
     }
     if (options?.protocol) {
         packetPayload.protocol = String(options.protocol).toUpperCase();
+    } else if (packetPayload.destinationPort !== undefined || packetPayload.sourcePort !== undefined) {
+        if (!isIcmp) {
+            packetPayload.protocol = 'TCP';
+        }
     }
 
     if (isIcmp) {

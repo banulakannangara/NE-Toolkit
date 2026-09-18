@@ -34027,6 +34027,393 @@ runTest('1400. Total test count verification check (V5.16 Phase 2A baseline)', (
     assert.ok(testsPassed >= 1399, 'Expected at least 1399 passed tests prior to final check, got ' + testsPassed);
 });
 
+// --- Group F: V5.16 Phase 2B Sub-phase 1: Core Extended IPv4 ACL Matching Engine (1401 - 1423) ---
+
+function setupAclLab() {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+    addConnection('PC0', 'Router0');
+    addConnection('Router0', 'PC1');
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    return { pc0, r0, pc1 };
+}
+
+// 1401. TCP protocol permit
+runTest('1401. TCP protocol permit', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 100 permit tcp any any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 100 in');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(res.success, true);
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules[0].hits, 1);
+});
+
+// 1402. TCP rule rejects UDP through implicit deny
+runTest('1402. TCP rule rejects UDP through implicit deny', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 100 permit tcp any any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 100 in');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'udp', destinationPort: 53 });
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.action, 'DROP');
+    assert.strictEqual(res.dropReason, 'ACL_DENIED');
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules[0].hits, 0);
+});
+
+// 1403. UDP protocol permit
+runTest('1403. UDP protocol permit', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 101 permit udp any any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 101 in');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'udp', destinationPort: 53 });
+    assert.strictEqual(res.success, true);
+    const acl = getRouterAcl(r0.id, '101');
+    assert.strictEqual(acl.rules[0].hits, 1);
+});
+
+// 1404. ICMP protocol permit
+runTest('1404. ICMP protocol permit', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 102 permit icmp any any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 102 in');
+
+    const res = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(res.success, true);
+    const acl = getRouterAcl(r0.id, '102');
+    assert.strictEqual(acl.rules[0].hits, 1);
+});
+
+// 1405. ip protocol permits TCP
+runTest('1405. ip protocol permits TCP', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 103 permit ip any any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 103 in');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(res.success, true);
+    const acl = getRouterAcl(r0.id, '103');
+    assert.strictEqual(acl.rules[0].hits, 1);
+});
+
+// 1406. ip protocol permits UDP
+runTest('1406. ip protocol permits UDP', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 103 permit ip any any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 103 in');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'udp', destinationPort: 53 });
+    assert.strictEqual(res.success, true);
+    const acl = getRouterAcl(r0.id, '103');
+    assert.strictEqual(acl.rules[0].hits, 1);
+});
+
+// 1407. ip protocol permits ICMP
+runTest('1407. ip protocol permits ICMP', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 103 permit ip any any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 103 in');
+
+    const res = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(res.success, true);
+    const acl = getRouterAcl(r0.id, '103');
+    assert.strictEqual(acl.rules[0].hits, 1);
+});
+
+// 1408. Source host matching
+runTest('1408. Source host matching', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 110 permit ip host 192.168.1.10 any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 110 in');
+
+    const resPermit = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(resPermit.success, true);
+
+    pc0.ip = '192.168.1.20';
+    const resDeny = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(resDeny.success, false);
+    assert.strictEqual(resDeny.dropReason, 'ACL_DENIED');
+});
+
+// 1409. Destination host matching
+runTest('1409. Destination host matching', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 111 permit ip any host 192.168.2.10');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 111 in');
+
+    const resPermit = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(resPermit.success, true);
+
+    pc1.ip = '192.168.2.20';
+    const resDeny = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(resDeny.success, false);
+    assert.strictEqual(resDeny.dropReason, 'ACL_DENIED');
+});
+
+// 1410. Source wildcard subnet matching
+runTest('1410. Source wildcard subnet matching', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 112 permit ip 192.168.1.0 0.0.0.255 any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 112 in');
+
+    pc0.ip = '192.168.1.77';
+    const resPermit = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(resPermit.success, true);
+
+    pc0.ip = '192.168.3.77';
+    pc0.gateway = '192.168.3.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.3.1';
+    const resDeny = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(resDeny.success, false);
+    assert.strictEqual(resDeny.dropReason, 'ACL_DENIED');
+});
+
+// 1411. Destination wildcard subnet matching
+runTest('1411. Destination wildcard subnet matching', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 113 permit ip any 192.168.2.0 0.0.0.255');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 113 in');
+
+    pc1.ip = '192.168.2.50';
+    const resPermit = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(resPermit.success, true);
+
+    pc1.ip = '192.168.4.50';
+    pc1.gateway = '192.168.4.1';
+    r0.interfaces['Gig0/1'].ip = '192.168.4.1';
+    const resDeny = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(resDeny.success, false);
+    assert.strictEqual(resDeny.dropReason, 'ACL_DENIED');
+});
+
+// 1412. Destination mismatch causes implicit deny
+runTest('1412. Destination mismatch causes implicit deny', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 114 permit ip 192.168.1.0 0.0.0.255 host 192.168.2.99');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 114 in');
+
+    const res = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.action, 'DROP');
+    assert.strictEqual(res.dropReason, 'ACL_DENIED');
+});
+
+// 1413. eq destination port
+runTest('1413. eq destination port', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 120 permit tcp any any eq 80');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 120 in');
+
+    const resPermit = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resPermit.success, true);
+
+    const resDeny = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 443 });
+    assert.strictEqual(resDeny.success, false);
+    assert.strictEqual(resDeny.dropReason, 'ACL_DENIED');
+});
+
+// 1414. neq destination port
+runTest('1414. neq destination port', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 121 permit tcp any any neq 22');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 121 in');
+
+    const resPermit = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resPermit.success, true);
+
+    const resDeny = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 22 });
+    assert.strictEqual(resDeny.success, false);
+    assert.strictEqual(resDeny.dropReason, 'ACL_DENIED');
+});
+
+// 1415. gt destination port
+runTest('1415. gt destination port', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 122 permit udp any any gt 1024');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 122 in');
+
+    const resPermit = simulateSendFrame(pc0, pc1, { protocol: 'udp', destinationPort: 5000 });
+    assert.strictEqual(resPermit.success, true);
+
+    const resDeny = simulateSendFrame(pc0, pc1, { protocol: 'udp', destinationPort: 53 });
+    assert.strictEqual(resDeny.success, false);
+    assert.strictEqual(resDeny.dropReason, 'ACL_DENIED');
+});
+
+// 1416. lt destination port
+runTest('1416. lt destination port', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 123 permit tcp any any lt 1024');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 123 in');
+
+    const resPermit = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resPermit.success, true);
+
+    const resDeny = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 8080 });
+    assert.strictEqual(resDeny.success, false);
+    assert.strictEqual(resDeny.dropReason, 'ACL_DENIED');
+});
+
+// 1417. range destination port
+runTest('1417. range destination port', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 124 permit tcp any any range 80 443');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 124 in');
+
+    const res80 = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(res80.success, true);
+
+    const res443 = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 443 });
+    assert.strictEqual(res443.success, true);
+
+    const res25 = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 25 });
+    assert.strictEqual(res25.success, false);
+    assert.strictEqual(res25.dropReason, 'ACL_DENIED');
+
+    const res8080 = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 8080 });
+    assert.strictEqual(res8080.success, false);
+    assert.strictEqual(res8080.dropReason, 'ACL_DENIED');
+});
+
+// 1418. Source port matching
+runTest('1418. Source port matching', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 125 permit tcp any eq 12345 any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 125 in');
+
+    const resPermit = simulateSendFrame(pc0, pc1, { protocol: 'tcp', sourcePort: 12345, destinationPort: 80 });
+    assert.strictEqual(resPermit.success, true);
+
+    const resDeny = simulateSendFrame(pc0, pc1, { protocol: 'tcp', sourcePort: 54321, destinationPort: 80 });
+    assert.strictEqual(resDeny.success, false);
+    assert.strictEqual(resDeny.dropReason, 'ACL_DENIED');
+});
+
+// 1419. First-match rule ordering and hit counter
+runTest('1419. First-match rule ordering and hit counter', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 130 deny tcp host 192.168.1.10 any eq 80');
+    executeCliCommand(r0, 'access-list 130 permit tcp any any eq 80');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 130 in');
+
+    const res1 = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(res1.success, false);
+    assert.strictEqual(res1.dropReason, 'ACL_DENIED');
+    const acl = getRouterAcl(r0.id, '130');
+    assert.strictEqual(acl.rules[0].hits, 1);
+    assert.strictEqual(acl.rules[1].hits, 0);
+
+    pc0.ip = '192.168.1.20';
+    const res2 = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(res2.success, true);
+    assert.strictEqual(acl.rules[0].hits, 1);
+    assert.strictEqual(acl.rules[1].hits, 1);
+});
+
+// 1420. Inbound/outbound interface enforcement (physical and ROAS subinterface)
+runTest('1420. Inbound/outbound interface enforcement (physical and ROAS subinterface)', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'ip access-list extended OUT_FILTER');
+    executeCliCommand(r0, 'deny tcp any any eq 80');
+    executeCliCommand(r0, 'permit ip any any');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip access-group OUT_FILTER out');
+
+    // Outbound deny matches on egress interface Gig0/1
+    const resOutDeny = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resOutDeny.success, false);
+    assert.strictEqual(resOutDeny.dropReason, 'ACL_DENIED');
+
+    // Non-port-80 outbound permit matches rule 20
+    const resOutPermit = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 443 });
+    assert.strictEqual(resOutPermit.success, true);
+
+    // ROAS subinterface test
+    executeCliCommand(r0, 'interface Gig0/0.10');
+    executeCliCommand(r0, 'encapsulation dot1q 10');
+    executeCliCommand(r0, 'ip access-group OUT_FILTER in');
+    assert.strictEqual(getRouterInterfaceAcl(r0.id, 'Gig0/0.10', 'in'), 'OUT_FILTER');
+});
+
+// 1421. Standard ACL regression: standard numbered (1-99) and named ACLs remain unchanged
+runTest('1421. Standard ACL regression: standard numbered (1-99) and named ACLs remain unchanged', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 10 deny host 192.168.1.10');
+    executeCliCommand(r0, 'access-list 10 permit any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 10 in');
+
+    const resDeny = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resDeny.success, false);
+    assert.strictEqual(resDeny.dropReason, 'ACL_DENIED');
+
+    pc0.ip = '192.168.1.20';
+    const resPermit = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resPermit.success, true);
+});
+
+// 1422. Pure helper test for isPortMatch
+runTest('1422. Pure helper test for isPortMatch', () => {
+    assert.strictEqual(isPortMatch(80, null, null), true);
+    assert.strictEqual(isPortMatch(80, 'eq', 80), true);
+    assert.strictEqual(isPortMatch(80, 'eq', 443), false);
+    assert.strictEqual(isPortMatch(80, 'eq', 'http'), true);
+    assert.strictEqual(isPortMatch(80, 'neq', 22), true);
+    assert.strictEqual(isPortMatch(22, 'neq', 22), false);
+    assert.strictEqual(isPortMatch(5000, 'gt', 1024), true);
+    assert.strictEqual(isPortMatch(53, 'gt', 1024), false);
+    assert.strictEqual(isPortMatch(80, 'lt', 1024), true);
+    assert.strictEqual(isPortMatch(8080, 'lt', 1024), false);
+    assert.strictEqual(isPortMatch(80, 'range', '80-443', [80, 443]), true);
+    assert.strictEqual(isPortMatch(443, 'range', '80-443', [80, 443]), true);
+    assert.strictEqual(isPortMatch(200, 'range', '80-443', [80, 443]), true);
+    assert.strictEqual(isPortMatch(25, 'range', '80-443', [80, 443]), false);
+    assert.strictEqual(isPortMatch(null, 'eq', 80), false);
+});
+
+// 1423. Total test count verification check (V5.16 Phase 2B Sub-phase 1 baseline)
+runTest('1423. Total test count verification check (V5.16 Phase 2B Sub-phase 1 baseline)', () => {
+    assert.ok(testsPassed >= 1422, 'Expected at least 1422 passed tests prior to final check, got ' + testsPassed);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
