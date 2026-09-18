@@ -34414,6 +34414,270 @@ runTest('1423. Total test count verification check (V5.16 Phase 2B Sub-phase 1 b
     assert.ok(testsPassed >= 1422, 'Expected at least 1422 passed tests prior to final check, got ' + testsPassed);
 });
 
+// --- Group G: V5.16 Phase 2B Sub-phase 2: TCP Established Flag & ICMP Type Filtering (1424 - 1440) ---
+
+// 1424. TCP established permit for packet with established: true
+runTest('1424. TCP established permit for packet with established: true', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 135 permit tcp any any established');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 135 in');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80, established: true });
+    assert.strictEqual(res.success, true);
+    const acl = getRouterAcl(r0.id, '135');
+    assert.strictEqual(acl.rules[0].hits, 1);
+});
+
+// 1425. TCP established rejects non-established TCP packet (implicit deny)
+runTest('1425. TCP established rejects non-established TCP packet (implicit deny)', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 135 permit tcp any any established');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 135 in');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.action, 'DROP');
+    assert.strictEqual(res.dropReason, 'ACL_DENIED');
+    const acl = getRouterAcl(r0.id, '135');
+    assert.strictEqual(acl.rules[0].hits, 0);
+});
+
+// 1426. TCP established rejects packet with protocol UDP
+runTest('1426. TCP established rejects packet with protocol UDP', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 135 permit tcp any any established');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 135 in');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'udp', destinationPort: 53, established: true });
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.dropReason, 'ACL_DENIED');
+});
+
+// 1427. TCP established matches ACK flag in options.flags
+runTest('1427. TCP established matches ACK flag in options.flags', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 135 permit tcp any any established');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 135 in');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80, flags: { ack: true } });
+    assert.strictEqual(res.success, true);
+});
+
+// 1428. TCP established matches RST flag in options.flags
+runTest('1428. TCP established matches RST flag in options.flags', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 135 permit tcp any any established');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 135 in');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80, flags: { rst: true } });
+    assert.strictEqual(res.success, true);
+});
+
+// 1429. ICMP echo rule permits ECHO_REQUEST packet
+runTest('1429. ICMP echo rule permits ECHO_REQUEST packet', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 140 permit icmp any any echo');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 140 in');
+
+    const res = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(res.success, true);
+    const acl = getRouterAcl(r0.id, '140');
+    assert.strictEqual(acl.rules[0].hits, 1);
+});
+
+// 1430. ICMP echo rule rejects ECHO_REPLY packet through implicit deny
+runTest('1430. ICMP echo rule rejects ECHO_REPLY packet through implicit deny', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 140 permit icmp any any echo');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 140 in');
+
+    const res = simulateSendFrame(pc0, pc1, { icmp: true, icmpType: 'ECHO_REPLY' });
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.action, 'DROP');
+    assert.strictEqual(res.dropReason, 'ACL_DENIED');
+});
+
+// 1431. ICMP echo-reply rule permits ECHO_REPLY packet
+runTest('1431. ICMP echo-reply rule permits ECHO_REPLY packet', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 141 permit icmp any any echo-reply');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 141 in');
+
+    const res = simulateSendFrame(pc0, pc1, { icmp: true, icmpType: 'echo-reply' });
+    assert.strictEqual(res.success, true);
+    const acl = getRouterAcl(r0.id, '141');
+    assert.strictEqual(acl.rules[0].hits, 1);
+});
+
+// 1432. ICMP echo-reply rule rejects ECHO_REQUEST packet
+runTest('1432. ICMP echo-reply rule rejects ECHO_REQUEST packet', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 141 permit icmp any any echo-reply');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 141 in');
+
+    const res = simulateSendFrame(pc0, pc1, { icmp: true, icmpType: 'echo' });
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.dropReason, 'ACL_DENIED');
+});
+
+// 1433. ICMP unreachable rule permits destination-unreachable packet
+runTest('1433. ICMP unreachable rule permits destination-unreachable packet', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 142 permit icmp any any unreachable');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 142 in');
+
+    const resPermit = simulateSendFrame(pc0, pc1, { icmp: true, icmpType: 'unreachable' });
+    assert.strictEqual(resPermit.success, true);
+
+    const resDeny = simulateSendFrame(pc0, pc1, { icmp: true, icmpType: 'echo' });
+    assert.strictEqual(resDeny.success, false);
+    assert.strictEqual(resDeny.dropReason, 'ACL_DENIED');
+});
+
+// 1434. ICMP rule rejects non-ICMP packets (TCP/UDP)
+runTest('1434. ICMP rule rejects non-ICMP packets (TCP/UDP)', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 143 permit icmp any any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 143 in');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.dropReason, 'ACL_DENIED');
+});
+
+// 1435. Combined extended ACL with established, echo, and port rules
+runTest('1435. Combined extended ACL with established, echo, and port rules', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 150 permit tcp any any established');
+    executeCliCommand(r0, 'access-list 150 permit icmp any any echo');
+    executeCliCommand(r0, 'access-list 150 permit udp any any eq 53');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 150 in');
+
+    // TCP established passes
+    const resEst = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80, established: true });
+    assert.strictEqual(resEst.success, true);
+
+    // Non-established TCP drops
+    const resNonEst = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resNonEst.success, false);
+    assert.strictEqual(resNonEst.dropReason, 'ACL_DENIED');
+
+    // ICMP echo passes
+    const resEcho = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(resEcho.success, true);
+
+    // ICMP echo-reply drops
+    const resReply = simulateSendFrame(pc0, pc1, { icmp: true, icmpType: 'echo-reply' });
+    assert.strictEqual(resReply.success, false);
+    assert.strictEqual(resReply.dropReason, 'ACL_DENIED');
+
+    // UDP 53 passes
+    const resUdp53 = simulateSendFrame(pc0, pc1, { protocol: 'udp', destinationPort: 53 });
+    assert.strictEqual(resUdp53.success, true);
+
+    // UDP 80 drops
+    const resUdp80 = simulateSendFrame(pc0, pc1, { protocol: 'udp', destinationPort: 80 });
+    assert.strictEqual(resUdp80.success, false);
+    assert.strictEqual(resUdp80.dropReason, 'ACL_DENIED');
+});
+
+// 1436. First-match ordering with established / ICMP rules
+runTest('1436. First-match ordering with established / ICMP rules', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 151 deny tcp any any established');
+    executeCliCommand(r0, 'access-list 151 permit tcp any any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 151 in');
+
+    // Established TCP drops on rule 10
+    const resEst = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80, established: true });
+    assert.strictEqual(resEst.success, false);
+    assert.strictEqual(resEst.dropReason, 'ACL_DENIED');
+    const acl = getRouterAcl(r0.id, '151');
+    assert.strictEqual(acl.rules[0].hits, 1);
+    assert.strictEqual(acl.rules[1].hits, 0);
+
+    // Non-established TCP permits on rule 20
+    const resNonEst = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resNonEst.success, true);
+    assert.strictEqual(acl.rules[0].hits, 1);
+    assert.strictEqual(acl.rules[1].hits, 1);
+});
+
+// 1437. Inbound and outbound interface enforcement with established and ICMP
+runTest('1437. Inbound and outbound interface enforcement with established and ICMP', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'ip access-list extended OUT_CTRL');
+    executeCliCommand(r0, 'deny icmp any any echo');
+    executeCliCommand(r0, 'permit ip any any');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip access-group OUT_CTRL out');
+
+    // ICMP echo drops outbound on Gig0/1
+    const resEcho = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(resEcho.success, false);
+    assert.strictEqual(resEcho.dropReason, 'ACL_DENIED');
+
+    // TCP passes outbound
+    const resTcp = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resTcp.success, true);
+});
+
+// 1438. Standard ACL regression: standard numbered (1-99) and named ACLs ignore established / icmp flags and remain functional
+runTest('1438. Standard ACL regression: standard numbered (1-99) and named ACLs ignore established / icmp flags and remain functional', () => {
+    const { pc0, r0, pc1 } = setupAclLab();
+    executeCliCommand(r0, 'access-list 1 permit 192.168.1.0 0.0.0.255');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 1 in');
+
+    // Permits packet based purely on source IP, regardless of established or protocol
+    const resEst = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80, established: true });
+    assert.strictEqual(resEst.success, true);
+
+    const resNonEst = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resNonEst.success, true);
+
+    const resIcmp = simulateSendFrame(pc0, pc1, { icmp: true });
+    assert.strictEqual(resIcmp.success, true);
+});
+
+// 1439. Pure helper test for isIcmpTypeMatch
+runTest('1439. Pure helper test for isIcmpTypeMatch', () => {
+    assert.strictEqual(isIcmpTypeMatch(null, null), true);
+    assert.strictEqual(isIcmpTypeMatch({ type: 'ECHO_REQUEST' }, null), true);
+    assert.strictEqual(isIcmpTypeMatch(null, 'echo'), false);
+    assert.strictEqual(isIcmpTypeMatch({ type: 'ECHO_REQUEST' }, 'echo'), true);
+    assert.strictEqual(isIcmpTypeMatch({ type: 8 }, 'echo'), true);
+    assert.strictEqual(isIcmpTypeMatch({ type: 'echo' }, 'echo'), true);
+    assert.strictEqual(isIcmpTypeMatch({ type: 'ECHO_REPLY' }, 'echo-reply'), true);
+    assert.strictEqual(isIcmpTypeMatch({ type: 0 }, 'echo-reply'), true);
+    assert.strictEqual(isIcmpTypeMatch({ type: 'echo-reply' }, 'echo-reply'), true);
+    assert.strictEqual(isIcmpTypeMatch({ type: 3 }, 'unreachable'), true);
+    assert.strictEqual(isIcmpTypeMatch({ type: 'DESTINATION_UNREACHABLE' }, 'unreachable'), true);
+    assert.strictEqual(isIcmpTypeMatch({ type: 11 }, 'time-exceeded'), true);
+    assert.strictEqual(isIcmpTypeMatch({ type: 'TIME_EXCEEDED' }, 'time-exceeded'), true);
+    assert.strictEqual(isIcmpTypeMatch({ type: 'ECHO_REQUEST' }, 'echo-reply'), false);
+    assert.strictEqual(isIcmpTypeMatch({ type: 'ECHO_REPLY' }, 'echo'), false);
+});
+
+// 1440. Total test count verification check (V5.16 Phase 2B Sub-phase 2 baseline)
+runTest('1440. Total test count verification check (V5.16 Phase 2B Sub-phase 2 baseline)', () => {
+    assert.ok(testsPassed >= 1439, 'Expected at least 1439 passed tests prior to final check, got ' + testsPassed);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

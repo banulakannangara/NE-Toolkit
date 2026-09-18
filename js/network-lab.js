@@ -8618,6 +8618,36 @@ function isPortMatch(packetPort, operator, rulePort, ruleRange) {
     return false;
 }
 
+function isIcmpTypeMatch(packetIcmp, ruleIcmpType) {
+    if (!ruleIcmpType) {
+        return true;
+    }
+    if (!packetIcmp) {
+        return false;
+    }
+    const rType = String(ruleIcmpType).toLowerCase().trim();
+    const rawPktType = typeof packetIcmp === 'object' ? (packetIcmp.type ?? packetIcmp.typeName) : packetIcmp;
+    if (rawPktType === null || rawPktType === undefined) {
+        return false;
+    }
+    const pTypeStr = String(rawPktType).toLowerCase().trim();
+
+    if (rType === 'echo' || rType === '8' || rType === 'echo-request' || rType === 'echo_request') {
+        return pTypeStr === '8' || pTypeStr === 'echo' || pTypeStr === 'echo_request' || pTypeStr === 'echo-request';
+    }
+    if (rType === 'echo-reply' || rType === '0' || rType === 'echo_reply' || rType === 'echoreply') {
+        return pTypeStr === '0' || pTypeStr === 'echo-reply' || pTypeStr === 'echo_reply' || pTypeStr === 'echoreply';
+    }
+    if (rType === 'unreachable' || rType === '3' || rType === 'destination-unreachable' || rType === 'destination_unreachable') {
+        return pTypeStr === '3' || pTypeStr === 'unreachable' || pTypeStr === 'destination_unreachable' || pTypeStr === 'destination-unreachable';
+    }
+    if (rType === 'time-exceeded' || rType === '11' || rType === 'time_exceeded') {
+        return pTypeStr === '11' || pTypeStr === 'time-exceeded' || pTypeStr === 'time_exceeded';
+    }
+
+    return pTypeStr === rType;
+}
+
 function getRouterAcls(routerId) {
     const runtime = getRouterRuntime(routerId);
     return runtime.acls || {};
@@ -8951,6 +8981,18 @@ function evaluatePacketAcl(acl, packet) {
     }
     const pktSrcPort = packet?.sourcePort ?? packet?.srcPort ?? packet?.packet?.sourcePort ?? packet?.packet?.srcPort;
     const pktDstPort = packet?.destinationPort ?? packet?.dstPort ?? packet?.packet?.destinationPort ?? packet?.packet?.dstPort;
+    const pktEstablished = Boolean(
+        packet?.established ||
+        packet?.packet?.established ||
+        packet?.tcpEstablished ||
+        packet?.packet?.tcpEstablished ||
+        packet?.flags?.ack ||
+        packet?.flags?.rst ||
+        packet?.packet?.flags?.ack ||
+        packet?.packet?.flags?.rst ||
+        (Array.isArray(packet?.tcpFlags) && (packet.tcpFlags.includes('ACK') || packet.tcpFlags.includes('RST') || packet.tcpFlags.includes('ack') || packet.tcpFlags.includes('rst')))
+    );
+    const pktIcmp = packet?.icmp || packet?.packet?.icmp || (packet?.icmpType ? { type: packet.icmpType } : null);
 
     const sortedRules = [...activeRules].sort((a, b) => a.sequence - b.sequence);
 
@@ -8993,6 +9035,18 @@ function evaluatePacketAcl(acl, packet) {
                         continue;
                     }
                 } else {
+                    continue;
+                }
+            }
+
+            if (rule.established) {
+                if (pktProto !== 'tcp' || !pktEstablished) {
+                    continue;
+                }
+            }
+
+            if (rule.icmpType) {
+                if (pktProto !== 'icmp' || !isIcmpTypeMatch(pktIcmp, rule.icmpType)) {
                     continue;
                 }
             }
@@ -12147,7 +12201,7 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
 
     const initialDestMac = arpResult.targetMac;
     const initialTtl = typeof options?.initialTtl === 'number' ? options.initialTtl : 64;
-    const isIcmp = Boolean(options?.icmp);
+    const isIcmp = Boolean(options?.icmp || (options?.protocol && String(options.protocol).toLowerCase() === 'icmp') || options?.icmpType);
     const icmpConfig = typeof options?.icmp === 'object' ? options.icmp : {};
 
     const packetPayload = {
@@ -12180,10 +12234,20 @@ function simulateSendFrame(sourceDevice, destinationDevice, options = {}) {
         }
     }
 
+    if (options?.established || options?.tcpEstablished || options?.packet?.established) {
+        packetPayload.established = true;
+    }
+    if (options?.flags && typeof options.flags === 'object') {
+        packetPayload.flags = { ...options.flags };
+        if (options.flags.ack || options.flags.rst) {
+            packetPayload.established = true;
+        }
+    }
+
     if (isIcmp) {
         packetPayload.protocol = 'ICMP';
         packetPayload.icmp = {
-            type: icmpConfig.type || 'ECHO_REQUEST',
+            type: options?.icmpType || icmpConfig.type || 'ECHO_REQUEST',
             code: typeof icmpConfig.code === 'number' ? icmpConfig.code : 0,
             identifier: typeof icmpConfig.identifier === 'number' ? icmpConfig.identifier : 1,
             sequence: typeof icmpConfig.sequence === 'number' ? icmpConfig.sequence : 1
