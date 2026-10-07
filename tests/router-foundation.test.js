@@ -36381,6 +36381,298 @@ runTest('1486. log and log-input do not alter packet forwarding decisions', () =
     assert.strictEqual(resLog.action, resLogInput.action);
 });
 
+// 1487. show logging on fresh router outputs "No ACL security log messages."
+runTest('1487. show logging on fresh router outputs "No ACL security log messages."', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    const res = executeCliCommand(r0, 'show logging');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.output, 'No ACL security log messages.');
+
+    const resAlias = executeCliCommand(r0, 'show log');
+    assert.strictEqual(resAlias.success, true);
+    assert.strictEqual(resAlias.output, 'No ACL security log messages.');
+});
+
+// 1488. Inbound permit with log appends to router aclLog and is visible in show logging
+runTest('1488. Inbound permit with log appends to router aclLog and is visible in show logging', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 101 permit tcp any any eq 80 log');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 101 in');
+    executeCliCommand(r0, 'end');
+
+    simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80, sourcePort: 1024 });
+
+    const runtime = getRouterRuntime(r0.id);
+    assert.strictEqual(runtime.aclLog.length, 1);
+    assert.ok(runtime.aclLog[0].includes('%SEC-6-IPACCESSLOGP: list 101 permitted tcp 192.168.1.10(1024) -> 192.168.2.10(80), 1 packet'));
+
+    const showRes = executeCliCommand(r0, 'show logging');
+    assert.strictEqual(showRes.success, true);
+    assert.strictEqual(showRes.output, runtime.aclLog[0]);
+});
+
+// 1489. Inbound deny with log appends to router aclLog and is visible in show logging
+runTest('1489. Inbound deny with log appends to router aclLog and is visible in show logging', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 102 deny udp any any eq 53 log');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 102 in');
+    executeCliCommand(r0, 'end');
+
+    simulateSendFrame(pc0, pc1, { protocol: 'udp', destinationPort: 53, sourcePort: 5353 });
+
+    const runtime = getRouterRuntime(r0.id);
+    assert.strictEqual(runtime.aclLog.length, 1);
+    assert.ok(runtime.aclLog[0].includes('%SEC-6-IPACCESSLOGP: list 102 denied udp 192.168.1.10(5353) -> 192.168.2.10(53), 1 packet'));
+
+    const showRes = executeCliCommand(r0, 'show logging');
+    assert.strictEqual(showRes.success, true);
+    assert.strictEqual(showRes.output, runtime.aclLog[0]);
+});
+
+// 1490. Outbound permit with log appends to router aclLog and is visible in show logging
+runTest('1490. Outbound permit with log appends to router aclLog and is visible in show logging', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 103 permit tcp any any eq 443 log');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip access-group 103 out');
+    executeCliCommand(r0, 'end');
+
+    simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 443, sourcePort: 2000 });
+
+    const runtime = getRouterRuntime(r0.id);
+    assert.strictEqual(runtime.aclLog.length, 1);
+    assert.ok(runtime.aclLog[0].includes('%SEC-6-IPACCESSLOGP: list 103 permitted tcp 192.168.1.10(2000) -> 192.168.2.10(443), 1 packet'));
+
+    const showRes = executeCliCommand(r0, 'show logging');
+    assert.strictEqual(showRes.success, true);
+    assert.strictEqual(showRes.output, runtime.aclLog[0]);
+});
+
+// 1491. Outbound deny with log appends to router aclLog and is visible in show logging
+runTest('1491. Outbound deny with log appends to router aclLog and is visible in show logging', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 104 deny icmp any any log-input');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip access-group 104 out');
+    executeCliCommand(r0, 'end');
+
+    simulateSendFrame(pc0, pc1, { protocol: 'icmp', icmp: true, icmpType: 8, icmpCode: 0 });
+
+    const runtime = getRouterRuntime(r0.id);
+    assert.strictEqual(runtime.aclLog.length, 1);
+    assert.ok(runtime.aclLog[0].includes('%SEC-6-IPACCESSLOGDP: list 104 denied icmp 192.168.1.10 (Gig0/0) -> 192.168.2.10 (8/0), 1 packet'));
+
+    const showRes = executeCliCommand(r0, 'show logging');
+    assert.strictEqual(showRes.success, true);
+    assert.strictEqual(showRes.output, runtime.aclLog[0]);
+});
+
+// 1492. Matching rule WITHOUT log does NOT append to router aclLog
+runTest('1492. Matching rule WITHOUT log does NOT append to router aclLog', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 105 permit tcp any any eq 80');
+    executeCliCommand(r0, 'access-list 105 deny ip any any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 105 in');
+    executeCliCommand(r0, 'end');
+
+    simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+
+    const runtime = getRouterRuntime(r0.id);
+    assert.strictEqual(runtime.aclLog.length, 0);
+
+    const showRes = executeCliCommand(r0, 'show logging');
+    assert.strictEqual(showRes.output, 'No ACL security log messages.');
+});
+
+// 1493. Implicit deny does NOT append to router aclLog
+runTest('1493. Implicit deny does NOT append to router aclLog', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 106 permit tcp any any eq 80 log');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 106 in');
+    executeCliCommand(r0, 'end');
+
+    simulateSendFrame(pc0, pc1, { protocol: 'udp', destinationPort: 53 });
+
+    const runtime = getRouterRuntime(r0.id);
+    assert.strictEqual(runtime.aclLog.length, 0);
+
+    const showRes = executeCliCommand(r0, 'show logging');
+    assert.strictEqual(showRes.output, 'No ACL security log messages.');
+});
+
+// 1494. clear logging empties runtime.aclLog and outputs "Clear logging buffer [confirm]"
+runTest('1494. clear logging empties runtime.aclLog and outputs "Clear logging buffer [confirm]"', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 107 permit tcp any any eq 80 log');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 107 in');
+    executeCliCommand(r0, 'end');
+
+    simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+
+    const runtime = getRouterRuntime(r0.id);
+    assert.strictEqual(runtime.aclLog.length, 1);
+
+    const clearRes = executeCliCommand(r0, 'clear logging');
+    assert.strictEqual(clearRes.success, true);
+    assert.strictEqual(clearRes.output, 'Clear logging buffer [confirm]');
+    assert.strictEqual(runtime.aclLog.length, 0);
+});
+
+// 1495. Subsequent show logging after clear logging outputs "No ACL security log messages."
+runTest('1495. Subsequent show logging after clear logging outputs "No ACL security log messages."', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 108 permit tcp any any eq 80 log');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 108 in');
+    executeCliCommand(r0, 'end');
+
+    simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+
+    executeCliCommand(r0, 'clear logging');
+
+    const showRes = executeCliCommand(r0, 'show logging');
+    assert.strictEqual(showRes.success, true);
+    assert.strictEqual(showRes.output, 'No ACL security log messages.');
+});
+
+// 1496. do show logging and do clear logging work from config mode
+runTest('1496. do show logging and do clear logging work from config mode', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 109 permit tcp any any eq 80 log');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 109 in');
+
+    simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+
+    // In config-if mode
+    const doShowRes = executeCliCommand(r0, 'do show logging');
+    assert.strictEqual(doShowRes.success, true);
+    assert.ok(doShowRes.output.includes('list 109 permitted tcp'));
+
+    const doClearRes = executeCliCommand(r0, 'do clear logging');
+    assert.strictEqual(doClearRes.success, true);
+    assert.strictEqual(doClearRes.output, 'Clear logging buffer [confirm]');
+
+    const doShowRes2 = executeCliCommand(r0, 'do show logging');
+    assert.strictEqual(doShowRes2.success, true);
+    assert.strictEqual(doShowRes2.output, 'No ACL security log messages.');
+});
+
+// 1497. Ring buffer caps at 100 entries with FIFO eviction
+runTest('1497. Ring buffer caps at 100 entries with FIFO eviction', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    const runtime = getRouterRuntime(r0.id);
+
+    for (let i = 1; i <= 105; i++) {
+        appendRouterAclLog(runtime, 'Log message ' + i);
+    }
+
+    assert.strictEqual(runtime.aclLog.length, 100);
+    assert.strictEqual(runtime.aclLog[0], 'Log message 6', 'First 5 entries should have been evicted (FIFO)');
+    assert.strictEqual(runtime.aclLog[99], 'Log message 105', 'Latest entry should be message 105');
+
+    executeCliCommand(r0, 'enable');
+    const showRes = executeCliCommand(r0, 'show logging');
+    const lines = showRes.output.split('\\n');
+    assert.strictEqual(lines.length, 100);
+    assert.strictEqual(lines[0], 'Log message 6');
+    assert.strictEqual(lines[99], 'Log message 105');
+});
+
+// 1498. Router isolation: R0 logging does not pollute R1 logging
+runTest('1498. Router isolation: R0 logging does not pollute R1 logging', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const r0 = networkState.devices[0];
+    const r1 = networkState.devices[1];
+
+    const r0Runtime = getRouterRuntime(r0.id);
+    const r1Runtime = getRouterRuntime(r1.id);
+
+    appendRouterAclLog(r0Runtime, 'R0-ONLY-LOG-ENTRY');
+
+    assert.strictEqual(r0Runtime.aclLog.length, 1);
+    assert.strictEqual(r1Runtime.aclLog.length, 0);
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r1, 'enable');
+
+    const showR0 = executeCliCommand(r0, 'show logging');
+    const showR1 = executeCliCommand(r1, 'show logging');
+
+    assert.strictEqual(showR0.output, 'R0-ONLY-LOG-ENTRY');
+    assert.strictEqual(showR1.output, 'No ACL security log messages.');
+
+    executeCliCommand(r0, 'clear logging');
+    assert.strictEqual(r0Runtime.aclLog.length, 0);
+    assert.strictEqual(r1Runtime.aclLog.length, 0);
+});
+
+// 1499. clear logging on non-router returns error; invalid syntax handles gracefully
+runTest('1499. clear logging on non-router returns error; invalid syntax handles gracefully', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 200, 100);
+    addDevice('router', 300, 100);
+
+    const sw = networkState.devices[0];
+    const pc = networkState.devices[1];
+    const router = networkState.devices[2];
+
+    executeCliCommand(sw, 'enable');
+    const swClear = executeCliCommand(sw, 'clear logging');
+    assert.strictEqual(swClear.success, false);
+    assert.ok(swClear.output.includes("is a Cisco IOS router command"));
+
+    const swShow = executeCliCommand(sw, 'show logging');
+    assert.strictEqual(swShow.success, false);
+    assert.ok(swShow.output.includes("is a Cisco IOS router command"));
+
+    const pcClear = executeCliCommand(pc, 'clear logging');
+    assert.strictEqual(pcClear.success, false);
+
+    const pcShow = executeCliCommand(pc, 'show logging');
+    assert.strictEqual(pcShow.success, false);
+
+    executeCliCommand(router, 'enable');
+    const tooManyClear = executeCliCommand(router, 'clear logging extra');
+    assert.strictEqual(tooManyClear.success, false);
+    assert.ok(tooManyClear.output.includes('Too many parameters'));
+
+    const tooManyShow = executeCliCommand(router, 'show logging extra');
+    assert.strictEqual(tooManyShow.success, false);
+    assert.ok(tooManyShow.output.includes('Too many parameters'));
+});
+
 
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);

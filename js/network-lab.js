@@ -460,6 +460,7 @@ function addDevice(type, x, y) {
                 interfaces: {}
             }
         };
+        getRouterRuntime(device.id);
     } else if (type === 'switch') {
         const swMac = generateMacAddress(networkState.devices);
         device = {
@@ -7280,6 +7281,7 @@ function getRouterRuntime(routerId) {
             staticRoutes: [],
             acls: {},
             interfaceAcls: {},
+            aclLog: [],
             nat: {
                 insideInterfaces: [],
                 outsideInterfaces: [],
@@ -7303,6 +7305,9 @@ function getRouterRuntime(routerId) {
     }
     if (!networkState.routerRuntime[routerId].interfaceAcls || typeof networkState.routerRuntime[routerId].interfaceAcls !== 'object') {
         networkState.routerRuntime[routerId].interfaceAcls = {};
+    }
+    if (!Array.isArray(networkState.routerRuntime[routerId].aclLog)) {
+        networkState.routerRuntime[routerId].aclLog = [];
     }
     if (!networkState.routerRuntime[routerId].nat || typeof networkState.routerRuntime[routerId].nat !== 'object') {
         networkState.routerRuntime[routerId].nat = {
@@ -7340,6 +7345,19 @@ function getRouterRuntime(routerId) {
         }
     }
     return networkState.routerRuntime[routerId];
+}
+
+const MAX_ACL_LOG_ENTRIES = 100;
+
+function appendRouterAclLog(runtime, message) {
+    if (!runtime) return;
+    if (!Array.isArray(runtime.aclLog)) {
+        runtime.aclLog = [];
+    }
+    runtime.aclLog.push(message);
+    if (runtime.aclLog.length > MAX_ACL_LOG_ENTRIES) {
+        runtime.aclLog.shift();
+    }
 }
 
 function getRouterNatState(deviceOrId) {
@@ -10919,6 +10937,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                         aclDecision.log = inAclResult.rule.log;
                         aclDecision.logMessage = secLog;
                         frame.events.push(secLog);
+                        appendRouterAclLog(getRouterRuntime(toDevice.id), secLog);
                     }
 
                     const icmpError = createIcmpErrorPacket(3, 13, frame.packet, toDevice, {
@@ -10976,6 +10995,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                         inAclDecision.log = inAclResult.rule.log;
                         inAclDecision.logMessage = secLog;
                         frame.events.push(secLog);
+                        appendRouterAclLog(getRouterRuntime(toDevice.id), secLog);
                     }
                     hopActions.push({
                         deviceId: toDevice.id,
@@ -11204,6 +11224,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                         aclDecision.log = outAclResult.rule.log;
                         aclDecision.logMessage = secLog;
                         frame.events.push(secLog);
+                        appendRouterAclLog(getRouterRuntime(toDevice.id), secLog);
                     }
 
                     const icmpError = createIcmpErrorPacket(3, 13, frame.packet, toDevice, {
@@ -11263,6 +11284,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                         outAclDecision.log = outAclResult.rule.log;
                         outAclDecision.logMessage = secLog;
                         frame.events.push(secLog);
+                        appendRouterAclLog(getRouterRuntime(toDevice.id), secLog);
                     }
                     hopActions.push({
                         deviceId: toDevice.id,
@@ -15181,9 +15203,11 @@ function executeCliCommand(deviceId, rawInput) {
   show ip nat statistics - Display NAT configuration and translation statistics
   clear ip nat translation - Clear active Dynamic and PAT translations (*, inside-local, or inside-global)
   clear access-list counters - Clear access list hit counters (alias: clear access-list counters <id|name>)
+  clear logging              - Clear security and ACL logging buffer
   show hosts             - Display DNS status and static host mappings
   show arp               - Display router ARP table and interface bindings
   show access-lists      - Display configured Access Control Lists (ACLs) and hit counts
+  show logging           - Display security and ACL logging buffer
   route                  - Display current routing table
   ifconfig               - Display interface configuration
   ping <IP>              - Send ICMP Echo requests to test IPv4 reachability
@@ -15364,6 +15388,40 @@ function executeCliCommand(deviceId, rawInput) {
             };
         }
 
+        // clear logging
+        if (sub1 === 'logging' || sub1 === 'log') {
+            if (!isRouter) {
+                return {
+                    success: false,
+                    output: `% 'clear logging' is a Cisco IOS router command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (tokens.length > 2) {
+                return {
+                    success: false,
+                    output: '% Too many parameters: clear logging',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const runtime = getRouterRuntime(dev.id);
+            runtime.aclLog = [];
+            return {
+                success: true,
+                output: 'Clear logging buffer [confirm]',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
         // clear ip ...
         if (tokens[1] === 'ip') {
             // clear ip access-list counters [name]
@@ -15527,7 +15585,7 @@ function executeCliCommand(deviceId, rawInput) {
 
         return {
             success: false,
-            output: `% Unrecognized clear command: "${command}".`,
+            output: `% Unrecognized clear command: "${command}". Available: "clear access-list counters [id|name]", "clear ip access-list counters [name]", "clear ip nat translation *", "clear logging".`,
             clear: false,
             status: 'error',
             command,
@@ -21377,11 +21435,46 @@ function executeCliCommand(deviceId, rawInput) {
             };
         }
 
+        // show logging / show log
+        if (sub1 === 'logging' || sub1 === 'log') {
+            if (!isRouter) {
+                return {
+                    success: false,
+                    output: `% 'show logging' is a Cisco IOS router command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (tokens.length > 2) {
+                return {
+                    success: false,
+                    output: '% Too many parameters: show logging',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const runtime = getRouterRuntime(dev.id);
+            const logs = Array.isArray(runtime.aclLog) ? runtime.aclLog : [];
+            const output = logs.length > 0 ? logs.join('\n') : 'No ACL security log messages.';
+            return {
+                success: true,
+                output,
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+
         // Other show commands
         if (isRouter) {
             return {
                 success: false,
-                output: `% Unrecognized show command: "${command}". Available: "show ip route", "show interfaces", "show arp", "show access-lists", "show ip interface brief", "show ip nat translations", "show ip nat statistics".`,
+                output: `% Unrecognized show command: "${command}". Available: "show ip route", "show interfaces", "show arp", "show access-lists", "show logging", "show ip interface brief", "show ip nat translations", "show ip nat statistics".`,
                 clear: false,
                 status: 'error',
                 command,
