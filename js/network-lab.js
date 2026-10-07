@@ -8410,9 +8410,17 @@ function parseAclExtendedTokens(tokens, startIndex) {
 
     let icmpType = null;
     let established = false;
+    let log = null;
     while (idx < tokens.length) {
         const extraToken = String(tokens[idx] || '').toLowerCase().trim();
-        if (extraToken === 'established') {
+        if (log) {
+            // log / log-input must be the final trailing option
+            return { success: false, error: `% Too many parameters or unrecognized option: "${tokens[idx]}".` };
+        }
+        if (extraToken === 'log' || extraToken === 'log-input') {
+            log = extraToken;
+            idx++;
+        } else if (extraToken === 'established') {
             established = true;
             idx++;
         } else if (protocol === 'icmp') {
@@ -8441,7 +8449,8 @@ function parseAclExtendedTokens(tokens, startIndex) {
         dstPort,
         dstPortRange,
         icmpType,
-        established
+        established,
+        log
     };
 }
 
@@ -8646,6 +8655,122 @@ function isIcmpTypeMatch(packetIcmp, ruleIcmpType) {
     }
 
     return pTypeStr === rType;
+}
+
+/**
+ * Pure helper to generate Cisco-like Extended ACL security log messages.
+ * Formats:
+ *   TCP/UDP:  [%s] %SEC-6-IPACCESSLOGP: list %s %s %s %s(%d) -> %s(%d), %s
+ *   ICMP:     [%s] %SEC-6-IPACCESSLOGDP: list %s %s %s %s -> %s (%d/%d), %s
+ *   IP/other: [%s] %SEC-6-IPACCESSLOGNP: list %s %s %s %s -> %s, %s
+ */
+function formatAclSecurityLog(firstArg, aclIdArg, actionArg, ruleArg, packetArg, ingressInterfaceArg, packetCountArg) {
+    let rName = 'Router';
+    let aclKey = '';
+    let act = 'permit';
+    let rle = null;
+    let pkt = {};
+    let ingressInterface = null;
+    let packetCount = 1;
+
+    if (typeof firstArg === 'object' && firstArg !== null && !(firstArg instanceof String)) {
+        rName = firstArg.routerName || (firstArg.router && firstArg.router.name) || 'Router';
+        aclKey = String(firstArg.aclId ?? firstArg.aclName ?? firstArg.acl ?? '').trim();
+        act = String(firstArg.action || (firstArg.rule && firstArg.rule.action) || 'permit').toLowerCase().trim();
+        rle = firstArg.rule || {};
+        pkt = firstArg.packet || firstArg.frame?.packet || {};
+        ingressInterface = firstArg.ingressInterface || firstArg.ingressIface || firstArg.interface || null;
+        packetCount = firstArg.packetCount || firstArg.packets || firstArg.count || 1;
+    } else {
+        rName = String(firstArg || 'Router').trim();
+        aclKey = String(aclIdArg || '').trim();
+        act = String(actionArg || 'permit').toLowerCase().trim();
+        rle = ruleArg || {};
+        pkt = packetArg || {};
+        ingressInterface = ingressInterfaceArg || null;
+        packetCount = packetCountArg || 1;
+    }
+
+    const actionText = act === 'permit' ? 'permitted' : 'denied';
+
+    let proto = 'ip';
+    if (rle && rle.protocol) {
+        proto = String(rle.protocol).toLowerCase().trim();
+    } else if (pkt && (pkt.protocol || (pkt.icmp ? 'icmp' : null))) {
+        proto = String(pkt.protocol || (pkt.icmp ? 'icmp' : 'ip')).toLowerCase().trim();
+    }
+
+    let mnemonic = 'IPACCESSLOGNP';
+    if (proto === 'tcp' || proto === 'udp') {
+        mnemonic = 'IPACCESSLOGP';
+    } else if (proto === 'icmp') {
+        mnemonic = 'IPACCESSLOGDP';
+    }
+
+    const srcIp = pkt.sourceIp || pkt.packet?.sourceIp || pkt.src || '0.0.0.0';
+    const dstIp = pkt.destinationIp || pkt.packet?.destinationIp || pkt.dst || '0.0.0.0';
+
+    const srcPort = pkt.sourcePort ?? pkt.srcPort ?? pkt.packet?.sourcePort ?? pkt.packet?.srcPort ?? null;
+    const dstPort = pkt.destinationPort ?? pkt.dstPort ?? pkt.packet?.destinationPort ?? pkt.packet?.dstPort ?? null;
+
+    let srcPart = (proto === 'tcp' || proto === 'udp') && srcPort !== null && srcPort !== undefined
+        ? `${srcIp}(${srcPort})`
+        : srcIp;
+
+    const isLogInput = rle.log === 'log-input' || Boolean(typeof firstArg === 'object' && firstArg?.isLogInput);
+    if (isLogInput && ingressInterface) {
+        srcPart += ` (${ingressInterface})`;
+    }
+
+    let dstPart = dstIp;
+    if (proto === 'tcp' || proto === 'udp') {
+        dstPart = dstPort !== null && dstPort !== undefined ? `${dstIp}(${dstPort})` : dstIp;
+    } else if (proto === 'icmp') {
+        let iType = null;
+        let iCode = null;
+        if (pkt.icmp && typeof pkt.icmp === 'object') {
+            iType = pkt.icmp.type ?? pkt.icmp.typeName ?? null;
+            iCode = pkt.icmp.code ?? null;
+        }
+        if (iType === null && pkt.icmpType !== undefined && pkt.icmpType !== null) {
+            iType = pkt.icmpType;
+        }
+        if (iCode === null && pkt.icmpCode !== undefined && pkt.icmpCode !== null) {
+            iCode = pkt.icmpCode;
+        }
+        if (iType === null && rle.icmpType) {
+            iType = rle.icmpType;
+        }
+
+        if (iType !== null) {
+            let tNum = null;
+            let cNum = iCode !== null && iCode !== undefined ? parseInt(iCode, 10) : 0;
+            if (isNaN(cNum)) cNum = 0;
+            const sType = String(iType).toLowerCase().trim();
+            if (sType === 'echo' || sType === 'echo-request' || sType === 'echo_request' || sType === '8') {
+                tNum = 8;
+            } else if (sType === 'echo-reply' || sType === 'echo_reply' || sType === 'echoreply' || sType === '0') {
+                tNum = 0;
+            } else if (sType === 'unreachable' || sType === 'destination-unreachable' || sType === 'destination_unreachable' || sType === '3') {
+                tNum = 3;
+            } else if (sType === 'time-exceeded' || sType === 'time_exceeded' || sType === '11') {
+                tNum = 11;
+            } else if (!isNaN(parseInt(sType, 10))) {
+                tNum = parseInt(sType, 10);
+            }
+
+            if (tNum !== null) {
+                dstPart += ` (${tNum}/${cNum})`;
+            } else {
+                dstPart += ` (${sType}/${cNum})`;
+            }
+        }
+    }
+
+    const count = Number.isInteger(packetCount) && packetCount > 0 ? packetCount : 1;
+    const pktText = count === 1 ? '1 packet' : `${count} packets`;
+
+    return `[${rName}] %SEC-6-${mnemonic}: list ${aclKey} ${actionText} ${proto} ${srcPart} -> ${dstPart}, ${pktText}`;
 }
 
 function getRouterAcls(routerId) {
@@ -8897,6 +9022,7 @@ function addRouterAclRule(routerId, aclId, ruleData) {
         dstPortRange: ruleData.dstPortRange || null,
         icmpType: ruleData.icmpType !== undefined ? ruleData.icmpType : null,
         established: Boolean(ruleData.established),
+        log: (ruleData.log === 'log' || ruleData.log === 'log-input') ? ruleData.log : null,
         remark: ruleData.remark ?? null,
         isHost,
         isAny,
@@ -13699,6 +13825,9 @@ function formatCliRouterAcls(router, targetAclId = null) {
                 if (rule.established) {
                     ruleDesc += ' established';
                 }
+                if (rule.log) {
+                    ruleDesc += ` ${rule.log}`;
+                }
             } else {
                 const src = rule.source?.isAny ? 'any' : rule.source?.isHost ? `host ${rule.source.ip}` : `${rule.source?.ip} ${rule.source?.wildcard || ''}`.trim();
                 ruleDesc = `${action} ${src}`;
@@ -14909,8 +15038,8 @@ function executeCliCommand(deviceId, rawInput) {
   help, ?                      - Show available commands`;
             } else if (session.mode === 'config-ext-nacl') {
                 helpText = `Commands available in Extended Access-list Configuration mode on ${dev.name}:
-  permit <protocol> <source> <dest> [operator] [options] - Specify packets to forward
-  deny <protocol> <source> <dest> [operator] [options]   - Specify packets to reject
+  permit <protocol> <source> <dest> [operator] [options] [log | log-input] - Specify packets to forward
+  deny <protocol> <source> <dest> [operator] [options] [log | log-input]   - Specify packets to reject
   remark <text>                - Access list entry comment
   <seq> permit ...             - Specify rule with explicit sequence number
   <seq> deny ...               - Specify rule with explicit sequence number
@@ -14925,7 +15054,7 @@ function executeCliCommand(deviceId, rawInput) {
   hostname <name>               - Set device system name
   interface <name>              - Enter interface configuration mode (alias: int)
   access-list <1-99> <permit|deny> <source> [wildcard] - Configure standard numbered access list
-  access-list <100-199> <permit|deny> <protocol> <src> <dest> [options] - Configure extended numbered access list
+  access-list <100-199> <permit|deny> <protocol> <src> <dest> [options] [log | log-input] - Configure extended numbered access list
   access-list <1-199> remark <text> - Set comment on numbered access list
   no access-list <1-199>        - Delete numbered access list
   ip access-list standard <name> - Configure standard named access list

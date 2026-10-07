@@ -35767,6 +35767,337 @@ runTest('1466. Total test count verification check (V5.16 Phase 2B Sub-phase 4 b
     assert.ok(testsPassed >= 1465, 'Expected at least 1465 passed tests prior to final check, got ' + testsPassed);
 });
 
+// 1467. Numbered Extended ACL with log keyword stores rule.log and formats in show access-lists
+runTest('1467. Numbered Extended ACL with log keyword stores rule.log and formats in show access-lists', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 101 permit tcp any any eq 80 log');
+    executeCliCommand(r0, 'access-list 101 deny ip any any');
+
+    const acl = getRouterAcl(r0.id, '101');
+    assert.ok(acl);
+    assert.strictEqual(acl.rules.length, 2);
+    assert.strictEqual(acl.rules[0].log, 'log');
+    assert.strictEqual(acl.rules[1].log, null);
+
+    const showRes = executeCliCommand(r0, 'show access-lists 101');
+    assert.ok(showRes.output.includes('permit tcp any any eq 80 log (0 matches)'));
+    assert.ok(showRes.output.includes('deny ip any any (0 matches)'));
+    assert.ok(!showRes.output.includes('deny ip any any log'));
+});
+
+// 1468. Named Extended ACL with log-input supports automatic and explicit sequence numbering
+runTest('1468. Named Extended ACL with log-input supports automatic and explicit sequence numbering', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended LOG-TEST');
+    // Automatic sequence
+    executeCliCommand(r0, 'permit tcp any any eq 443 log-input');
+    // Explicit sequence
+    executeCliCommand(r0, '25 deny udp any any eq 53 log-input');
+    executeCliCommand(r0, '30 permit ip any any');
+
+    const acl = getRouterAcl(r0.id, 'LOG-TEST');
+    assert.ok(acl);
+    assert.strictEqual(acl.rules.length, 3);
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[0].log, 'log-input');
+    assert.strictEqual(acl.rules[1].sequence, 25);
+    assert.strictEqual(acl.rules[1].log, 'log-input');
+    assert.strictEqual(acl.rules[2].sequence, 30);
+    assert.strictEqual(acl.rules[2].log, null);
+
+    const showRes = executeCliCommand(r0, 'show access-lists LOG-TEST');
+    assert.ok(showRes.output.includes('10 permit tcp any any eq 443 log-input (0 matches)'));
+    assert.ok(showRes.output.includes('25 deny udp any any eq 53 log-input (0 matches)'));
+    assert.ok(showRes.output.includes('30 permit ip any any (0 matches)'));
+});
+
+// 1469. Rejection of extraneous tokens after log and duplicate logging options
+runTest('1469. Rejection of extraneous tokens after log and duplicate logging options', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+
+    // Reject tokens after log
+    const resExtra = executeCliCommand(r0, 'access-list 105 permit tcp any any eq 80 log extra');
+    assert.strictEqual(resExtra.success, false);
+    assert.ok(resExtra.output.includes('% Too many parameters or unrecognized option: "extra".'));
+
+    // Reject log log-input
+    const resDup = executeCliCommand(r0, 'access-list 105 permit tcp any any eq 80 log log-input');
+    assert.strictEqual(resDup.success, false);
+    assert.ok(resDup.output.includes('% Too many parameters or unrecognized option: "log-input".'));
+
+    // In named submode as well
+    executeCliCommand(r0, 'ip access-list extended NAMED-ERR');
+    const resSubExtra = executeCliCommand(r0, 'permit tcp any any eq 80 log-input invalid');
+    assert.strictEqual(resSubExtra.success, false);
+    assert.ok(resSubExtra.output.includes('% Too many parameters or unrecognized option: "invalid".'));
+});
+
+// 1470. ICMP parser regression for echo log and plain log trailing options
+runTest('1470. ICMP parser regression for echo log and plain log trailing options', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const [r0] = networkState.devices;
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+
+    // permit icmp any any echo log -> icmpType === 'echo', log === 'log'
+    executeCliCommand(r0, 'access-list 110 permit icmp any any echo log');
+    // permit icmp any any log -> icmpType === null, log === 'log'
+    executeCliCommand(r0, 'access-list 110 permit icmp any any log');
+    // permit icmp any any echo-reply log-input -> icmpType === 'echo-reply', log === 'log-input'
+    executeCliCommand(r0, 'access-list 110 permit icmp any any echo-reply log-input');
+
+    const acl = getRouterAcl(r0.id, '110');
+    assert.ok(acl);
+    assert.strictEqual(acl.rules.length, 3);
+
+    assert.strictEqual(acl.rules[0].protocol, 'icmp');
+    assert.strictEqual(acl.rules[0].icmpType, 'echo');
+    assert.strictEqual(acl.rules[0].log, 'log');
+
+    assert.strictEqual(acl.rules[1].protocol, 'icmp');
+    assert.strictEqual(acl.rules[1].icmpType, null);
+    assert.strictEqual(acl.rules[1].log, 'log');
+
+    assert.strictEqual(acl.rules[2].protocol, 'icmp');
+    assert.strictEqual(acl.rules[2].icmpType, 'echo-reply');
+    assert.strictEqual(acl.rules[2].log, 'log-input');
+
+    const showRes = executeCliCommand(r0, 'show access-lists 110');
+    assert.ok(showRes.output.includes('permit icmp any any echo log (0 matches)'));
+    assert.ok(showRes.output.includes('permit icmp any any log (0 matches)'));
+    assert.ok(showRes.output.includes('permit icmp any any echo-reply log-input (0 matches)'));
+});
+
+// 1471. Security log formatter: TCP permit and deny formatting with ports
+runTest('1471. Security log formatter: TCP permit and deny formatting with ports', () => {
+    // Permit
+    const permitLog = formatAclSecurityLog({
+        routerName: 'Router0',
+        aclId: 101,
+        action: 'permit',
+        rule: { log: 'log' },
+        packet: {
+            protocol: 'tcp',
+            sourceIp: '192.168.1.10',
+            destinationIp: '10.0.0.1',
+            sourcePort: 1025,
+            destinationPort: 80
+        }
+    });
+    assert.strictEqual(
+        permitLog,
+        '[Router0] %SEC-6-IPACCESSLOGP: list 101 permitted tcp 192.168.1.10(1025) -> 10.0.0.1(80), 1 packet'
+    );
+
+    // Deny
+    const denyLog = formatAclSecurityLog({
+        routerName: 'Router0',
+        aclId: 101,
+        action: 'deny',
+        rule: { log: 'log' },
+        packet: {
+            protocol: 'tcp',
+            sourceIp: '192.168.1.10',
+            destinationIp: '10.0.0.1',
+            sourcePort: 1025,
+            destinationPort: 80
+        }
+    });
+    assert.strictEqual(
+        denyLog,
+        '[Router0] %SEC-6-IPACCESSLOGP: list 101 denied tcp 192.168.1.10(1025) -> 10.0.0.1(80), 1 packet'
+    );
+});
+
+// 1472. Security log formatter: UDP protocol formatting and packet count
+runTest('1472. Security log formatter: UDP protocol formatting and packet count', () => {
+    const udpLogSingle = formatAclSecurityLog({
+        routerName: 'R1',
+        aclId: '102',
+        action: 'permit',
+        rule: { log: 'log' },
+        packet: {
+            protocol: 'udp',
+            sourceIp: '172.16.0.5',
+            destinationIp: '10.0.0.1',
+            sourcePort: 5353,
+            destinationPort: 53
+        }
+    });
+    assert.strictEqual(
+        udpLogSingle,
+        '[R1] %SEC-6-IPACCESSLOGP: list 102 permitted udp 172.16.0.5(5353) -> 10.0.0.1(53), 1 packet'
+    );
+
+    // Multi-packet count
+    const udpLogMulti = formatAclSecurityLog({
+        routerName: 'R1',
+        aclId: '102',
+        action: 'deny',
+        rule: { log: 'log' },
+        packet: {
+            protocol: 'udp',
+            sourceIp: '172.16.0.5',
+            destinationIp: '10.0.0.1',
+            sourcePort: 5353,
+            destinationPort: 53
+        },
+        packetCount: 4
+    });
+    assert.strictEqual(
+        udpLogMulti,
+        '[R1] %SEC-6-IPACCESSLOGP: list 102 denied udp 172.16.0.5(5353) -> 10.0.0.1(53), 4 packets'
+    );
+});
+
+// 1473. Security log formatter: ICMP protocol formatting with type and code
+runTest('1473. Security log formatter: ICMP protocol formatting with type and code', () => {
+    // Numeric type 8 code 0
+    const icmpLogNum = formatAclSecurityLog({
+        routerName: 'EdgeRouter',
+        aclId: 103,
+        action: 'permit',
+        rule: { log: 'log' },
+        packet: {
+            protocol: 'icmp',
+            sourceIp: '192.168.1.1',
+            destinationIp: '192.168.1.2',
+            icmp: { type: 8, code: 0 }
+        }
+    });
+    assert.strictEqual(
+        icmpLogNum,
+        '[EdgeRouter] %SEC-6-IPACCESSLOGDP: list 103 permitted icmp 192.168.1.1 -> 192.168.1.2 (8/0), 1 packet'
+    );
+
+    // String type echo
+    const icmpLogStr = formatAclSecurityLog({
+        routerName: 'EdgeRouter',
+        aclId: 103,
+        action: 'permit',
+        rule: { log: 'log' },
+        packet: {
+            protocol: 'icmp',
+            sourceIp: '192.168.1.1',
+            destinationIp: '192.168.1.2',
+            icmpType: 'echo'
+        }
+    });
+    assert.strictEqual(
+        icmpLogStr,
+        '[EdgeRouter] %SEC-6-IPACCESSLOGDP: list 103 permitted icmp 192.168.1.1 -> 192.168.1.2 (8/0), 1 packet'
+    );
+
+    // Destination unreachable Type 3 Code 13
+    const icmpLogUnreach = formatAclSecurityLog({
+        routerName: 'EdgeRouter',
+        aclId: 103,
+        action: 'deny',
+        rule: { log: 'log' },
+        packet: {
+            protocol: 'icmp',
+            sourceIp: '10.0.0.1',
+            destinationIp: '192.168.1.1',
+            icmp: { type: 3, code: 13 }
+        }
+    });
+    assert.strictEqual(
+        icmpLogUnreach,
+        '[EdgeRouter] %SEC-6-IPACCESSLOGDP: list 103 denied icmp 10.0.0.1 -> 192.168.1.1 (3/13), 1 packet'
+    );
+});
+
+// 1474. Security log formatter: IP protocol and non-port traffic
+runTest('1474. Security log formatter: IP protocol and non-port traffic', () => {
+    const ipLog = formatAclSecurityLog({
+        routerName: 'CoreRouter',
+        aclId: 104,
+        action: 'permit',
+        rule: { log: 'log' },
+        packet: {
+            protocol: 'ip',
+            sourceIp: '10.1.1.1',
+            destinationIp: '10.2.2.2'
+        }
+    });
+    assert.strictEqual(
+        ipLog,
+        '[CoreRouter] %SEC-6-IPACCESSLOGNP: list 104 permitted ip 10.1.1.1 -> 10.2.2.2, 1 packet'
+    );
+});
+
+// 1475. Security log formatter: Named Extended ACL and log-input ingress interface
+runTest('1475. Security log formatter: Named Extended ACL and log-input ingress interface', () => {
+    // log-input includes ingress interface
+    const namedLogInput = formatAclSecurityLog({
+        routerName: 'R0',
+        aclId: 'SEC-FILTER',
+        action: 'permit',
+        rule: { log: 'log-input' },
+        ingressInterface: 'GigabitEthernet0/0',
+        packet: {
+            protocol: 'tcp',
+            sourceIp: '192.168.1.50',
+            destinationIp: '172.16.1.1',
+            sourcePort: 4567,
+            destinationPort: 443
+        }
+    });
+    assert.strictEqual(
+        namedLogInput,
+        '[R0] %SEC-6-IPACCESSLOGP: list SEC-FILTER permitted tcp 192.168.1.50(4567) (GigabitEthernet0/0) -> 172.16.1.1(443), 1 packet'
+    );
+
+    // Ordinary log (not log-input) ignores ingressInterface parameter
+    const ordinaryLog = formatAclSecurityLog({
+        routerName: 'R0',
+        aclId: 'SEC-FILTER',
+        action: 'deny',
+        rule: { log: 'log' },
+        ingressInterface: 'GigabitEthernet0/0',
+        packet: {
+            protocol: 'tcp',
+            sourceIp: '192.168.1.50',
+            destinationIp: '172.16.1.1',
+            sourcePort: 4567,
+            destinationPort: 443
+        }
+    });
+    assert.strictEqual(
+        ordinaryLog,
+        '[R0] %SEC-6-IPACCESSLOGP: list SEC-FILTER denied tcp 192.168.1.50(4567) -> 172.16.1.1(443), 1 packet'
+    );
+
+    // Positional call pattern compatibility
+    const positionalLog = formatAclSecurityLog(
+        'R0',
+        'SEC-FILTER',
+        'permit',
+        { log: 'log-input' },
+        { protocol: 'ip', sourceIp: '10.0.0.5', destinationIp: '10.0.0.6' },
+        'FastEthernet0/1',
+        1
+    );
+    assert.strictEqual(
+        positionalLog,
+        '[R0] %SEC-6-IPACCESSLOGNP: list SEC-FILTER permitted ip 10.0.0.5 (FastEthernet0/1) -> 10.0.0.6, 1 packet'
+    );
+});
+
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
