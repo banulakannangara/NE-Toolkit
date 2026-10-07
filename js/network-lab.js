@@ -10907,6 +10907,20 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                         reason: inAclResult.reason
                     };
 
+                    if (!inAclResult.isImplicitDeny && inAclResult.rule && (inAclResult.rule.log === 'log' || inAclResult.rule.log === 'log-input')) {
+                        const secLog = formatAclSecurityLog({
+                            routerName: toDevice.name,
+                            aclId: inAclResult.aclId,
+                            action: 'deny',
+                            rule: inAclResult.rule,
+                            packet: frame.packet,
+                            ingressInterface: activeIngressIfaceName
+                        });
+                        aclDecision.log = inAclResult.rule.log;
+                        aclDecision.logMessage = secLog;
+                        frame.events.push(secLog);
+                    }
+
                     const icmpError = createIcmpErrorPacket(3, 13, frame.packet, toDevice, {
                         ingressInterface: activeIngressIfaceName,
                         reason: 'administratively-prohibited',
@@ -10937,6 +10951,32 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     };
                 } else if (inAclResult.matched && inAclResult.action === 'permit') {
                     frame.events.push(`Router ${toDevice.name} permitted packet on ${activeIngressIfaceName} (inbound ACL ${inAclResult.aclId} rule ${inAclResult.rule?.sequence})`);
+                    const inAclDecision = {
+                        aclId: inAclResult.aclId,
+                        aclName: inAclResult.aclId,
+                        direction: 'inbound',
+                        interface: activeIngressIfaceName,
+                        action: 'permit',
+                        sequence: inAclResult.rule?.sequence ?? null,
+                        isImplicitDeny: false,
+                        sourceIp: frame.packet?.sourceIp || null,
+                        destinationIp: frame.packet?.destinationIp || null,
+                        protocol: frame.packet?.protocol || (frame.packet?.icmp ? 'ICMP' : 'IP'),
+                        reason: inAclResult.reason
+                    };
+                    if (inAclResult.rule && (inAclResult.rule.log === 'log' || inAclResult.rule.log === 'log-input')) {
+                        const secLog = formatAclSecurityLog({
+                            routerName: toDevice.name,
+                            aclId: inAclResult.aclId,
+                            action: 'permit',
+                            rule: inAclResult.rule,
+                            packet: frame.packet,
+                            ingressInterface: activeIngressIfaceName
+                        });
+                        inAclDecision.log = inAclResult.rule.log;
+                        inAclDecision.logMessage = secLog;
+                        frame.events.push(secLog);
+                    }
                     hopActions.push({
                         deviceId: toDevice.id,
                         deviceName: toDevice.name,
@@ -10944,19 +10984,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                         action: 'ACL_EVALUATE',
                         reason: 'acl-permit',
                         ingressInterface: activeIngressIfaceName,
-                        acl: {
-                            aclId: inAclResult.aclId,
-                            aclName: inAclResult.aclId,
-                            direction: 'inbound',
-                            interface: activeIngressIfaceName,
-                            action: 'permit',
-                            sequence: inAclResult.rule?.sequence ?? null,
-                            isImplicitDeny: false,
-                            sourceIp: frame.packet?.sourceIp || null,
-                            destinationIp: frame.packet?.destinationIp || null,
-                            protocol: frame.packet?.protocol || (frame.packet?.icmp ? 'ICMP' : 'IP'),
-                            reason: inAclResult.reason
-                        }
+                        acl: inAclDecision
                     });
                 }
             }
@@ -11164,6 +11192,20 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                         reason: outAclResult.reason
                     };
 
+                    if (!outAclResult.isImplicitDeny && outAclResult.rule && (outAclResult.rule.log === 'log' || outAclResult.rule.log === 'log-input')) {
+                        const secLog = formatAclSecurityLog({
+                            routerName: toDevice.name,
+                            aclId: outAclResult.aclId,
+                            action: 'deny',
+                            rule: outAclResult.rule,
+                            packet: frame.packet,
+                            ingressInterface: activeIngressIfaceName || null
+                        });
+                        aclDecision.log = outAclResult.rule.log;
+                        aclDecision.logMessage = secLog;
+                        frame.events.push(secLog);
+                    }
+
                     const icmpError = createIcmpErrorPacket(3, 13, frame.packet, toDevice, {
                         ingressInterface: activeIngressIfaceName,
                         egressInterface: egressPort,
@@ -11196,6 +11238,32 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                     };
                 } else if (outAclResult.matched && outAclResult.action === 'permit') {
                     frame.events.push(`Router ${toDevice.name} permitted packet on ${egressPort} (outbound ACL ${outAclResult.aclId} rule ${outAclResult.rule?.sequence})`);
+                    const outAclDecision = {
+                        aclId: outAclResult.aclId,
+                        aclName: outAclResult.aclId,
+                        direction: 'outbound',
+                        interface: egressPort,
+                        action: 'permit',
+                        sequence: outAclResult.rule?.sequence ?? null,
+                        isImplicitDeny: false,
+                        sourceIp: frame.packet?.sourceIp || null,
+                        destinationIp: frame.packet?.destinationIp || null,
+                        protocol: frame.packet?.protocol || (frame.packet?.icmp ? 'ICMP' : 'IP'),
+                        reason: outAclResult.reason
+                    };
+                    if (outAclResult.rule && (outAclResult.rule.log === 'log' || outAclResult.rule.log === 'log-input')) {
+                        const secLog = formatAclSecurityLog({
+                            routerName: toDevice.name,
+                            aclId: outAclResult.aclId,
+                            action: 'permit',
+                            rule: outAclResult.rule,
+                            packet: frame.packet,
+                            ingressInterface: activeIngressIfaceName || null
+                        });
+                        outAclDecision.log = outAclResult.rule.log;
+                        outAclDecision.logMessage = secLog;
+                        frame.events.push(secLog);
+                    }
                     hopActions.push({
                         deviceId: toDevice.id,
                         deviceName: toDevice.name,
@@ -11203,19 +11271,7 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                         action: 'ACL_EVALUATE',
                         reason: 'acl-permit',
                         egressInterface: egressPort,
-                        acl: {
-                            aclId: outAclResult.aclId,
-                            aclName: outAclResult.aclId,
-                            direction: 'outbound',
-                            interface: egressPort,
-                            action: 'permit',
-                            sequence: outAclResult.rule?.sequence ?? null,
-                            isImplicitDeny: false,
-                            sourceIp: frame.packet?.sourceIp || null,
-                            destinationIp: frame.packet?.destinationIp || null,
-                            protocol: frame.packet?.protocol || (frame.packet?.icmp ? 'ICMP' : 'IP'),
-                            reason: outAclResult.reason
-                        }
+                        acl: outAclDecision
                     });
                 }
             }

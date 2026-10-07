@@ -36098,6 +36098,290 @@ runTest('1475. Security log formatter: Named Extended ACL and log-input ingress 
 });
 
 
+// Helper for tests 1476-1486
+function setupAclPipelineTopology() {
+    resetLab();
+    addDevice('pc', 50, 100);
+    addDevice('router', 200, 100);
+    addDevice('pc', 350, 100);
+    const [pc0, r0, pc1] = networkState.devices;
+
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc0.gateway = '192.168.1.1';
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '192.168.2.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.2.10';
+    pc1.subnetMask = '255.255.255.0';
+    pc1.gateway = '192.168.2.1';
+
+    addConnection(pc0.id, r0.id);
+    addConnection(r0.id, pc1.id);
+    return { pc0, r0, pc1 };
+}
+
+// 1476. Numbered Extended ACL + log permit: real transmission forwards and logs %SEC-6 event
+runTest('1476. Numbered Extended ACL + log permit: real transmission forwards and logs %SEC-6 event', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 101 permit tcp any any eq 80 log');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 101 in');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80, sourcePort: 12345 });
+    assert.strictEqual(res.success, true);
+
+    const acls = getRouterAcls(r0.id);
+    assert.strictEqual(acls['101'].rules[0].hits, 1, 'Hit counter must increment');
+
+    const secLogs = res.events.filter(e => e.includes('%SEC-6-IPACCESSLOGP:'));
+    assert.strictEqual(secLogs.length, 1);
+    assert.ok(secLogs[0].includes('list 101 permitted tcp 192.168.1.10(12345) -> 192.168.2.10(80), 1 packet'));
+
+    const aclHop = res.hopActions.find(h => h.acl && h.acl.aclId === '101');
+    assert.ok(aclHop, 'Hop action must contain acl decision');
+    assert.strictEqual(aclHop.acl.log, 'log');
+    assert.strictEqual(aclHop.acl.logMessage, secLogs[0]);
+});
+
+// 1477. Numbered Extended ACL + log deny: packet denied, hit increments, exactly one log generated
+runTest('1477. Numbered Extended ACL + log deny: packet denied, hit increments, exactly one log generated', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 101 deny tcp any any eq 80 log');
+    executeCliCommand(r0, 'access-list 101 permit ip any any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 101 in');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80, sourcePort: 12345 });
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.dropReason, 'ACL_DENIED');
+
+    const acls = getRouterAcls(r0.id);
+    assert.strictEqual(acls['101'].rules[0].hits, 1, 'Deny rule hit count must increment');
+    assert.strictEqual(acls['101'].rules[1].hits, 0, 'Permit rule must not be evaluated');
+
+    const secLogs = res.events.filter(e => e.includes('%SEC-6-IPACCESSLOGP:'));
+    assert.strictEqual(secLogs.length, 1);
+    assert.ok(secLogs[0].includes('list 101 denied tcp 192.168.1.10(12345) -> 192.168.2.10(80), 1 packet'));
+
+    assert.strictEqual(res.acl.log, 'log');
+    assert.strictEqual(res.acl.logMessage, secLogs[0]);
+});
+
+// 1478. Named Extended ACL + log-input: log contains actual ingress interface
+runTest('1478. Named Extended ACL + log-input: log contains actual ingress interface', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended LOG-IN-TEST');
+    executeCliCommand(r0, 'permit tcp any any eq 443 log-input');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group LOG-IN-TEST in');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 443, sourcePort: 4567 });
+    assert.strictEqual(res.success, true);
+
+    const secLogs = res.events.filter(e => e.includes('%SEC-6-IPACCESSLOGP:'));
+    assert.strictEqual(secLogs.length, 1);
+    assert.ok(secLogs[0].includes('list LOG-IN-TEST permitted tcp 192.168.1.10(4567) (Gig0/0) -> 192.168.2.10(443), 1 packet'));
+
+    const aclHop = res.hopActions.find(h => h.acl && h.acl.aclId === 'LOG-IN-TEST');
+    assert.ok(aclHop);
+    assert.strictEqual(aclHop.acl.log, 'log-input');
+    assert.strictEqual(aclHop.acl.logMessage, secLogs[0]);
+});
+
+// 1479. Outbound Extended ACL + log: real packet reaches egress ACL and generates log
+runTest('1479. Outbound Extended ACL + log: real packet reaches egress ACL and generates log', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 102 permit tcp any any eq 80 log');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip access-group 102 out');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80, sourcePort: 1000 });
+    assert.strictEqual(res.success, true);
+
+    const acls = getRouterAcls(r0.id);
+    assert.strictEqual(acls['102'].rules[0].hits, 1);
+
+    const secLogs = res.events.filter(e => e.includes('%SEC-6-IPACCESSLOGP:'));
+    assert.strictEqual(secLogs.length, 1);
+    assert.ok(secLogs[0].includes('list 102 permitted tcp 192.168.1.10(1000) -> 192.168.2.10(80), 1 packet'));
+
+    const aclHop = res.hopActions.find(h => h.acl && h.acl.direction === 'outbound');
+    assert.ok(aclHop);
+    assert.strictEqual(aclHop.acl.log, 'log');
+    assert.strictEqual(aclHop.acl.logMessage, secLogs[0]);
+});
+
+// 1480. ICMP Extended ACL + log: real ICMP transmission generates %SEC-6-IPACCESSLOGDP
+runTest('1480. ICMP Extended ACL + log: real ICMP transmission generates %SEC-6-IPACCESSLOGDP', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 103 permit icmp any any echo log');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 103 in');
+
+    const res = simulateSendFrame(pc0, pc1, { icmp: true, icmpType: 'ECHO_REQUEST' });
+    assert.strictEqual(res.success, true);
+
+    const secLogs = res.events.filter(e => e.includes('%SEC-6-IPACCESSLOGDP:'));
+    assert.strictEqual(secLogs.length, 1);
+    assert.ok(secLogs[0].includes('list 103 permitted icmp 192.168.1.10 -> 192.168.2.10 (8/0), 1 packet'));
+});
+
+// 1481. UDP Extended ACL + log: generates %SEC-6-IPACCESSLOGP with UDP ports
+runTest('1481. UDP Extended ACL + log: generates %SEC-6-IPACCESSLOGP with UDP ports', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 104 permit udp any any eq 53 log');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 104 in');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'udp', destinationPort: 53, sourcePort: 53000 });
+    assert.strictEqual(res.success, true);
+
+    const secLogs = res.events.filter(e => e.includes('%SEC-6-IPACCESSLOGP:'));
+    assert.strictEqual(secLogs.length, 1);
+    assert.ok(secLogs[0].includes('list 104 permitted udp 192.168.1.10(53000) -> 192.168.2.10(53), 1 packet'));
+});
+
+// 1482. IP Extended ACL + log: generates %SEC-6-IPACCESSLOGNP for generic IP traffic
+runTest('1482. IP Extended ACL + log: generates %SEC-6-IPACCESSLOGNP for generic IP traffic', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 105 permit ip any any log');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 105 in');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'ip' });
+    assert.strictEqual(res.success, true);
+
+    const secLogs = res.events.filter(e => e.includes('%SEC-6-IPACCESSLOGNP:'));
+    assert.strictEqual(secLogs.length, 1);
+    assert.ok(secLogs[0].includes('list 105 permitted ip 192.168.1.10 -> 192.168.2.10, 1 packet'));
+});
+
+// 1483. Logging isolation: no log for standard rule, no log for implicit deny, no log for shadowed ACE
+runTest('1483. Logging isolation: no log for standard rule, no log for implicit deny, no log for shadowed ACE', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+
+    // Case A: Rule without log generates no %SEC-6 log
+    executeCliCommand(r0, 'access-list 106 permit tcp any any eq 80');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 106 in');
+    const resA = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resA.success, true);
+    assert.strictEqual(resA.events.filter(e => e.includes('%SEC-6-')).length, 0);
+
+    // Case B: Implicit deny generates no %SEC-6 log
+    executeCliCommand(r0, 'access-list 107 permit tcp any any eq 80 log');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 107 in');
+    const resB = simulateSendFrame(pc0, pc1, { protocol: 'udp', destinationPort: 53 });
+    assert.strictEqual(resB.success, false);
+    assert.strictEqual(resB.dropReason, 'ACL_DENIED');
+    assert.strictEqual(resB.events.filter(e => e.includes('%SEC-6-')).length, 0);
+
+    // Case C: Earlier match without log shadows later match with log
+    executeCliCommand(r0, 'access-list 108 permit tcp any any eq 80');
+    executeCliCommand(r0, 'access-list 108 permit tcp any any eq 80 log');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 108 in');
+    const resC = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(resC.success, true);
+    assert.strictEqual(resC.events.filter(e => e.includes('%SEC-6-')).length, 0);
+});
+
+// 1484. Inbound deny short-circuits outbound logging
+runTest('1484. Inbound deny short-circuits outbound logging', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 110 deny tcp any any eq 80 log');
+    executeCliCommand(r0, 'access-list 111 permit tcp any any eq 80 log');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 110 in');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip access-group 111 out');
+
+    const res = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.dropReason, 'ACL_DENIED');
+
+    const acls = getRouterAcls(r0.id);
+    assert.strictEqual(acls['110'].rules[0].hits, 1, 'Inbound ACL must hit');
+    assert.strictEqual(acls['111'].rules[0].hits, 0, 'Outbound ACL must not hit');
+
+    const secLogs = res.events.filter(e => e.includes('%SEC-6-'));
+    assert.strictEqual(secLogs.length, 1, 'Exactly one security log must be generated');
+    assert.ok(secLogs[0].includes('list 110 denied tcp'));
+});
+
+// 1485. Hit counters with logging remain accurate across repeated transmissions
+runTest('1485. Hit counters with logging remain accurate across repeated transmissions', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 112 permit tcp any any eq 80 log');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 112 in');
+
+    for (let i = 0; i < 3; i++) {
+        const res = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+        assert.strictEqual(res.success, true);
+    }
+
+    const acls = getRouterAcls(r0.id);
+    assert.strictEqual(acls['112'].rules[0].hits, 3, 'Rule hit count must match transmission count');
+});
+
+// 1486. log and log-input do not alter packet forwarding decisions
+runTest('1486. log and log-input do not alter packet forwarding decisions', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+
+    // 1. Plain rule
+    executeCliCommand(r0, 'access-list 115 permit tcp any any eq 80');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 115 in');
+    const resPlain = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+
+    // 2. Rule with log
+    executeCliCommand(r0, 'access-list 116 permit tcp any any eq 80 log');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 116 in');
+    const resLog = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+
+    // 3. Rule with log-input
+    executeCliCommand(r0, 'access-list 117 permit tcp any any eq 80 log-input');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 117 in');
+    const resLogInput = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+
+    assert.strictEqual(resPlain.success, true);
+    assert.strictEqual(resLog.success, true);
+    assert.strictEqual(resLogInput.success, true);
+    assert.deepStrictEqual(resPlain.path, resLog.path);
+    assert.deepStrictEqual(resLog.path, resLogInput.path);
+    assert.strictEqual(resPlain.action, resLog.action);
+    assert.strictEqual(resLog.action, resLogInput.action);
+});
+
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
