@@ -16813,7 +16813,7 @@ function executeCliCommand(deviceId, rawInput) {
         if (!aclNumStr) {
             return {
                 success: false,
-                output: '% Incomplete command: access-list <1-99> <permit|deny|remark> ...',
+                output: '% Incomplete command: access-list <1-199> <permit|deny|remark> ...',
                 clear: false,
                 status: 'error',
                 command,
@@ -19129,7 +19129,7 @@ function executeCliCommand(deviceId, rawInput) {
             };
         }
 
-        // ip access-group <1-99|name> <in|out>
+        // ip access-group <1-199|name> <in|out>
         if (tokens[1] === 'access-group') {
             if (!isRouter && !isSwitch) {
                 return {

@@ -35269,6 +35269,17 @@ runTest('1453. clear access-list counters resets all rule hits on a specific Ext
     assert.strictEqual(clearNamedRes.success, true);
     showNamed = executeCliCommand(r0, 'show ip access-list WEB-RULES');
     assert.ok(showNamed.output.includes('(0 matches)'));
+
+    // Verify case-insensitive named ACL counter clearing with lowercase target
+    simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 8080 });
+    showNamed = executeCliCommand(r0, 'show ip access-list WEB-RULES');
+    assert.ok(showNamed.output.includes('(1 match)'));
+
+    const clearLowerRes = executeCliCommand(r0, 'clear access-list counters web-rules');
+    assert.strictEqual(clearLowerRes.success, true);
+    assert.strictEqual(clearLowerRes.output, '');
+    showNamed = executeCliCommand(r0, 'show ip access-list WEB-RULES');
+    assert.ok(showNamed.output.includes('(0 matches)'));
 });
 
 // 1454. clear access-list counters without a target resets counters across all router ACLs
