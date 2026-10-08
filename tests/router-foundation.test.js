@@ -36673,6 +36673,692 @@ runTest('1499. clear logging on non-router returns error; invalid syntax handles
     assert.ok(tooManyShow.output.includes('Too many parameters'));
 });
 
+// 1500. Basic numbered Extended ACL resequencing
+runTest('1500. Basic numbered Extended ACL resequencing', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 100 permit ip any any');
+    executeCliCommand(r0, 'access-list 100 deny tcp any any eq 80');
+    executeCliCommand(r0, 'access-list 100 permit icmp any any');
+
+    const acl = getRouterAcl(r0.id, '100');
+    // Artificially space them to 30, 70, 120 to verify resequencing
+    acl.rules[0].sequence = 30;
+    acl.rules[1].sequence = 70;
+    acl.rules[2].sequence = 120;
+
+    const res = resequenceRouterAcl(r0.id, '100', 10, 10);
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.resequencedCount, 3);
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[1].sequence, 20);
+    assert.strictEqual(acl.rules[2].sequence, 30);
+    assert.strictEqual(acl.rules[0].action, 'permit');
+    assert.strictEqual(acl.rules[1].action, 'deny');
+    assert.strictEqual(acl.rules[2].action, 'permit');
+});
+
+// 1501. Named Extended ACL resequencing
+runTest('1501. Named Extended ACL resequencing', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended EXT_TEST');
+    executeCliCommand(r0, '50 permit tcp any any eq 443');
+    executeCliCommand(r0, '150 deny udp any any eq 53');
+    executeCliCommand(r0, '250 permit ip any any');
+
+    const acl = getRouterAcl(r0.id, 'EXT_TEST');
+    assert.strictEqual(acl.rules[0].sequence, 50);
+    assert.strictEqual(acl.rules[1].sequence, 150);
+    assert.strictEqual(acl.rules[2].sequence, 250);
+
+    // Case-insensitive lookup check
+    const res = resequenceRouterAcl(r0.id, 'ext_test', 10, 10);
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.resequencedCount, 3);
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[1].sequence, 20);
+    assert.strictEqual(acl.rules[2].sequence, 30);
+});
+
+// 1502. Custom starting sequence
+runTest('1502. Custom starting sequence', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 100 permit ip any any');
+    executeCliCommand(r0, 'access-list 100 deny tcp any any eq 80');
+    executeCliCommand(r0, 'access-list 100 permit icmp any any');
+
+    const res = resequenceRouterAcl(r0.id, '100', 100, 10);
+    assert.strictEqual(res.success, true);
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules[0].sequence, 100);
+    assert.strictEqual(acl.rules[1].sequence, 110);
+    assert.strictEqual(acl.rules[2].sequence, 120);
+});
+
+// 1503. Custom increment
+runTest('1503. Custom increment', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 100 permit ip any any');
+    executeCliCommand(r0, 'access-list 100 deny tcp any any eq 80');
+    executeCliCommand(r0, 'access-list 100 permit icmp any any');
+
+    const res = resequenceRouterAcl(r0.id, '100', 10, 20);
+    assert.strictEqual(res.success, true);
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[1].sequence, 30);
+    assert.strictEqual(acl.rules[2].sequence, 50);
+});
+
+// 1504. Irregular sequence gaps collapse correctly
+runTest('1504. Irregular sequence gaps collapse correctly', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended GAPPY');
+    executeCliCommand(r0, '5 permit ip any any');
+    executeCliCommand(r0, '23 deny tcp any any eq 22');
+    executeCliCommand(r0, '107 permit udp any any eq 53');
+
+    const res = resequenceRouterAcl(r0.id, 'GAPPY', 10, 10);
+    assert.strictEqual(res.success, true);
+    const acl = getRouterAcl(r0.id, 'GAPPY');
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[1].sequence, 20);
+    assert.strictEqual(acl.rules[2].sequence, 30);
+});
+
+// 1505. Relative rule order preserved
+runTest('1505. Relative rule order preserved', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended ORDER_CHECK');
+    executeCliCommand(r0, '15 deny ip host 10.0.0.1 any');
+    executeCliCommand(r0, '45 permit ip any any');
+
+    const acl = getRouterAcl(r0.id, 'ORDER_CHECK');
+    assert.strictEqual(acl.rules[0].action, 'deny');
+    assert.strictEqual(acl.rules[0].source.ip, '10.0.0.1');
+    assert.strictEqual(acl.rules[1].action, 'permit');
+
+    resequenceRouterAcl(r0.id, 'ORDER_CHECK', 10, 10);
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[0].action, 'deny');
+    assert.strictEqual(acl.rules[0].source.ip, '10.0.0.1');
+    assert.strictEqual(acl.rules[1].sequence, 20);
+    assert.strictEqual(acl.rules[1].action, 'permit');
+});
+
+// 1506. Single-rule ACL
+runTest('1506. Single-rule ACL', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended SINGLE');
+    executeCliCommand(r0, '77 permit ip any any');
+
+    const res = resequenceRouterAcl(r0.id, 'SINGLE', 10, 10);
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.resequencedCount, 1);
+    const acl = getRouterAcl(r0.id, 'SINGLE');
+    assert.strictEqual(acl.rules[0].sequence, 10);
+});
+
+// 1507. Empty ACL
+runTest('1507. Empty ACL', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended EMPTY');
+
+    const res = resequenceRouterAcl(r0.id, 'EMPTY', 10, 10);
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.resequencedCount, 0);
+    const acl = getRouterAcl(r0.id, 'EMPTY');
+    assert.strictEqual(acl.rules.length, 0);
+});
+
+// 1508. Remark rules resequence correctly
+runTest('1508. Remark rules resequence correctly', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended REMARK_TEST');
+    executeCliCommand(r0, '10 remark Allow Web');
+    executeCliCommand(r0, '15 permit tcp any any eq 80');
+    executeCliCommand(r0, '25 remark Allow Secure Web');
+    executeCliCommand(r0, '30 permit tcp any any eq 443');
+    executeCliCommand(r0, '40 remark Deny Rest');
+    executeCliCommand(r0, '45 deny ip any any');
+
+    const res = resequenceRouterAcl(r0.id, 'REMARK_TEST', 10, 10);
+    assert.strictEqual(res.success, true);
+    const acl = getRouterAcl(r0.id, 'REMARK_TEST');
+    assert.strictEqual(acl.rules.length, 6);
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[0].action, 'remark');
+    assert.strictEqual(acl.rules[0].remark, 'Allow Web');
+    assert.strictEqual(acl.rules[1].sequence, 20);
+    assert.strictEqual(acl.rules[1].action, 'permit');
+    assert.strictEqual(acl.rules[2].sequence, 30);
+    assert.strictEqual(acl.rules[2].action, 'remark');
+    assert.strictEqual(acl.rules[3].sequence, 40);
+    assert.strictEqual(acl.rules[3].action, 'permit');
+    assert.strictEqual(acl.rules[4].sequence, 50);
+    assert.strictEqual(acl.rules[4].action, 'remark');
+    assert.strictEqual(acl.rules[5].sequence, 60);
+    assert.strictEqual(acl.rules[5].action, 'deny');
+});
+
+// 1509. Hit counters preserved
+runTest('1509. Hit counters preserved', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 100 permit tcp any any eq 80');
+    executeCliCommand(r0, 'access-list 100 deny ip any any');
+
+    const acl = getRouterAcl(r0.id, '100');
+    acl.rules[0].hits = 42;
+    acl.rules[1].hits = 99;
+
+    const res = resequenceRouterAcl(r0.id, '100', 100, 10);
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(acl.rules[0].sequence, 100);
+    assert.strictEqual(acl.rules[0].hits, 42);
+    assert.strictEqual(acl.rules[1].sequence, 110);
+    assert.strictEqual(acl.rules[1].hits, 99);
+});
+
+// 1510. log/log-input attributes preserved
+runTest('1510. log/log-input attributes preserved', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended LOG_TEST');
+    executeCliCommand(r0, '15 permit tcp any any eq 80 log');
+    executeCliCommand(r0, '25 deny ip any any log-input');
+
+    const acl = getRouterAcl(r0.id, 'LOG_TEST');
+    assert.strictEqual(acl.rules[0].log, 'log');
+    assert.strictEqual(acl.rules[1].log, 'log-input');
+
+    const res = resequenceRouterAcl(r0.id, 'LOG_TEST', 10, 10);
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[0].log, 'log');
+    assert.strictEqual(acl.rules[1].sequence, 20);
+    assert.strictEqual(acl.rules[1].log, 'log-input');
+});
+
+// 1511. established and ICMP matching preserved
+runTest('1511. established and ICMP matching preserved', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended PROTO_TEST');
+    executeCliCommand(r0, '35 permit tcp any any established');
+    executeCliCommand(r0, '75 permit icmp any any echo');
+
+    const acl = getRouterAcl(r0.id, 'PROTO_TEST');
+    assert.strictEqual(acl.rules[0].established, true);
+    assert.strictEqual(acl.rules[1].icmpType, 'echo');
+
+    const res = resequenceRouterAcl(r0.id, 'PROTO_TEST', 10, 10);
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[0].established, true);
+    assert.strictEqual(acl.rules[1].sequence, 20);
+    assert.strictEqual(acl.rules[1].icmpType, 'echo');
+});
+
+// 1512. TCP/UDP port operators preserved
+runTest('1512. TCP/UDP port operators preserved', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended OPS_TEST');
+    executeCliCommand(r0, '12 permit tcp any any eq 80');
+    executeCliCommand(r0, '24 permit tcp any any neq 22');
+    executeCliCommand(r0, '36 permit udp any any gt 1024');
+    executeCliCommand(r0, '48 permit udp any any range 8000 8080');
+
+    const acl = getRouterAcl(r0.id, 'OPS_TEST');
+    resequenceRouterAcl(r0.id, 'OPS_TEST', 10, 10);
+
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[0].dstPortOp, 'eq');
+    assert.strictEqual(acl.rules[0].dstPort, 80);
+
+    assert.strictEqual(acl.rules[1].sequence, 20);
+    assert.strictEqual(acl.rules[1].dstPortOp, 'neq');
+    assert.strictEqual(acl.rules[1].dstPort, 22);
+
+    assert.strictEqual(acl.rules[2].sequence, 30);
+    assert.strictEqual(acl.rules[2].dstPortOp, 'gt');
+    assert.strictEqual(acl.rules[2].dstPort, 1024);
+
+    assert.strictEqual(acl.rules[3].sequence, 40);
+    assert.strictEqual(acl.rules[3].dstPortOp, 'range');
+    assert.deepStrictEqual(acl.rules[3].dstPortRange, [8000, 8080]);
+});
+
+// 1513. Inbound ACL binding still behaves identically
+runTest('1513. Inbound ACL binding still behaves identically', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 101 permit tcp any any eq 80');
+    executeCliCommand(r0, 'access-list 101 deny ip any any');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'ip access-group 101 in');
+    executeCliCommand(r0, 'end');
+
+    // Traffic before resequencing
+    const tx1 = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(tx1.success, true);
+    const tx2 = simulateSendFrame(pc0, pc1, { protocol: 'udp', destinationPort: 53 });
+    assert.strictEqual(tx2.success, false);
+
+    // Resequence ACL 101
+    executeCliCommand(r0, 'conf t');
+    const res = executeCliCommand(r0, 'ip access-list resequence 101 10 10');
+    assert.strictEqual(res.success, true);
+    executeCliCommand(r0, 'end');
+
+    // Traffic after resequencing behaves identically
+    const tx3 = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(tx3.success, true);
+    const tx4 = simulateSendFrame(pc0, pc1, { protocol: 'udp', destinationPort: 53 });
+    assert.strictEqual(tx4.success, false);
+
+    const acl = getRouterAcl(r0.id, '101');
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[0].hits, 2);
+    assert.strictEqual(acl.rules[1].sequence, 20);
+    assert.strictEqual(acl.rules[1].hits, 2);
+});
+
+// 1514. Outbound ACL binding still behaves identically
+runTest('1514. Outbound ACL binding still behaves identically', () => {
+    const { pc0, r0, pc1 } = setupAclPipelineTopology();
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 102 permit udp any any eq 53');
+    executeCliCommand(r0, 'access-list 102 deny ip any any');
+    executeCliCommand(r0, 'interface Gig0/1');
+    executeCliCommand(r0, 'ip access-group 102 out');
+
+    executeCliCommand(r0, 'ip access-list resequence 102 10 10');
+    executeCliCommand(r0, 'end');
+
+    const txPermit = simulateSendFrame(pc0, pc1, { protocol: 'udp', destinationPort: 53 });
+    assert.strictEqual(txPermit.success, true);
+
+    const txDeny = simulateSendFrame(pc0, pc1, { protocol: 'tcp', destinationPort: 80 });
+    assert.strictEqual(txDeny.success, false);
+
+    const acl = getRouterAcl(r0.id, '102');
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[0].hits, 1);
+    assert.strictEqual(acl.rules[1].sequence, 20);
+    assert.strictEqual(acl.rules[1].hits, 1);
+});
+
+// 1515. New rule can be inserted using the new sequence spacing
+runTest('1515. New rule can be inserted using the new sequence spacing', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list extended INSERT_TEST');
+    executeCliCommand(r0, '1 permit tcp any any eq 80');
+    executeCliCommand(r0, '2 permit tcp any any eq 443');
+    executeCliCommand(r0, '3 deny ip any any');
+
+    // Resequence to 10, 20, 30
+    executeCliCommand(r0, 'ip access-list resequence INSERT_TEST 10 10');
+
+    // Insert rule between 10 and 20
+    executeCliCommand(r0, '15 permit tcp any any eq 8080');
+
+    const acl = getRouterAcl(r0.id, 'INSERT_TEST');
+    assert.strictEqual(acl.rules.length, 4);
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[0].dstPort, 80);
+    assert.strictEqual(acl.rules[1].sequence, 15);
+    assert.strictEqual(acl.rules[1].dstPort, 8080);
+    assert.strictEqual(acl.rules[2].sequence, 20);
+    assert.strictEqual(acl.rules[2].dstPort, 443);
+    assert.strictEqual(acl.rules[3].sequence, 30);
+    assert.strictEqual(acl.rules[3].action, 'deny');
+});
+
+// 1516. show access-lists reflects new sequences and existing hit counts
+runTest('1516. show access-lists reflects new sequences and existing hit counts', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 100 permit tcp any any eq 80');
+    executeCliCommand(r0, 'access-list 100 deny ip any any');
+
+    const acl = getRouterAcl(r0.id, '100');
+    acl.rules[0].hits = 7;
+    acl.rules[1].hits = 3;
+
+    executeCliCommand(r0, 'ip access-list resequence 100 10 10');
+
+    const showRes = executeCliCommand(r0, 'show access-lists');
+    assert.strictEqual(showRes.success, true);
+    assert.ok(showRes.output.includes('Extended IP access list 100'));
+    assert.ok(showRes.output.includes('10 permit tcp any any eq 80 (7 matches)'));
+    assert.ok(showRes.output.includes('20 deny ip any any (3 matches)'));
+});
+
+// 1517. targeted show access-lists output
+runTest('1517. targeted show access-lists output', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 100 permit ip any any');
+    executeCliCommand(r0, 'access-list 101 deny ip any any');
+
+    executeCliCommand(r0, 'ip access-list resequence 100 50 50');
+
+    const showTarget = executeCliCommand(r0, 'show access-lists 100');
+    assert.strictEqual(showTarget.success, true);
+    assert.ok(showTarget.output.includes('Extended IP access list 100'));
+    assert.ok(showTarget.output.includes('50 permit ip any any'));
+    assert.ok(!showTarget.output.includes('access list 101'));
+});
+
+// 1518. canonical CLI command
+runTest('1518. canonical CLI command', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 105 permit tcp any any eq 22');
+    executeCliCommand(r0, 'access-list 105 deny ip any any');
+
+    const cliRes = executeCliCommand(r0, 'ip access-list resequence 105 10 10');
+    assert.strictEqual(cliRes.success, true);
+    assert.strictEqual(cliRes.output, '');
+
+    const acl = getRouterAcl(r0.id, '105');
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[1].sequence, 20);
+});
+
+// 1519. invalid/nonexistent ACL
+runTest('1519. invalid/nonexistent ACL', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+
+    const cliRes = executeCliCommand(r0, 'ip access-list resequence 999 10 10');
+    assert.strictEqual(cliRes.success, false);
+    assert.strictEqual(cliRes.output, '% Access list 999 not found.');
+});
+
+// 1520. invalid starting sequence
+runTest('1520. invalid starting sequence', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 100 permit ip any any');
+
+    const res0 = executeCliCommand(r0, 'ip access-list resequence 100 0 10');
+    assert.strictEqual(res0.success, false);
+    assert.strictEqual(res0.output, '% Invalid starting sequence number: "0". Must be between 1 and 2147483647.');
+
+    const resNeg = executeCliCommand(r0, 'ip access-list resequence 100 -5 10');
+    assert.strictEqual(resNeg.success, false);
+    assert.strictEqual(resNeg.output, '% Invalid starting sequence number: "-5". Must be between 1 and 2147483647.');
+
+    const resAlpha = executeCliCommand(r0, 'ip access-list resequence 100 abc 10');
+    assert.strictEqual(resAlpha.success, false);
+    assert.strictEqual(resAlpha.output, '% Invalid starting sequence number: "abc". Must be between 1 and 2147483647.');
+
+    const resPartial = executeCliCommand(r0, 'ip access-list resequence 100 10abc 10');
+    assert.strictEqual(resPartial.success, false);
+    assert.strictEqual(resPartial.output, '% Invalid starting sequence number: "10abc". Must be between 1 and 2147483647.');
+
+    const resFloat = executeCliCommand(r0, 'ip access-list resequence 100 1.5 10');
+    assert.strictEqual(resFloat.success, false);
+    assert.strictEqual(resFloat.output, '% Invalid starting sequence number: "1.5". Must be between 1 and 2147483647.');
+
+    // Direct helper calls with whitespace and empty inputs
+    const hEmpty = resequenceRouterAcl(r0.id, '100', '', 10);
+    assert.strictEqual(hEmpty.success, false);
+    assert.strictEqual(hEmpty.reason, '% Invalid starting sequence number: "". Must be between 1 and 2147483647.');
+
+    const hWhitespace = resequenceRouterAcl(r0.id, '100', '   ', 10);
+    assert.strictEqual(hWhitespace.success, false);
+    assert.strictEqual(hWhitespace.reason, '% Invalid starting sequence number: "   ". Must be between 1 and 2147483647.');
+});
+
+// 1521. invalid increment
+runTest('1521. invalid increment', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 100 permit ip any any');
+
+    const res0 = executeCliCommand(r0, 'ip access-list resequence 100 10 0');
+    assert.strictEqual(res0.success, false);
+    assert.strictEqual(res0.output, '% Invalid sequence increment: "0". Must be between 1 and 2147483647.');
+
+    const resNeg = executeCliCommand(r0, 'ip access-list resequence 100 10 -1');
+    assert.strictEqual(resNeg.success, false);
+    assert.strictEqual(resNeg.output, '% Invalid sequence increment: "-1". Must be between 1 and 2147483647.');
+
+    const resAlpha = executeCliCommand(r0, 'ip access-list resequence 100 10 xyz');
+    assert.strictEqual(resAlpha.success, false);
+    assert.strictEqual(resAlpha.output, '% Invalid sequence increment: "xyz". Must be between 1 and 2147483647.');
+
+    const resPartial = executeCliCommand(r0, 'ip access-list resequence 100 10 20xyz');
+    assert.strictEqual(resPartial.success, false);
+    assert.strictEqual(resPartial.output, '% Invalid sequence increment: "20xyz". Must be between 1 and 2147483647.');
+
+    const resFloat = executeCliCommand(r0, 'ip access-list resequence 100 10 5.5');
+    assert.strictEqual(resFloat.success, false);
+    assert.strictEqual(resFloat.output, '% Invalid sequence increment: "5.5". Must be between 1 and 2147483647.');
+
+    // Direct helper calls with whitespace and empty inputs
+    const hEmpty = resequenceRouterAcl(r0.id, '100', 10, '');
+    assert.strictEqual(hEmpty.success, false);
+    assert.strictEqual(hEmpty.reason, '% Invalid sequence increment: "". Must be between 1 and 2147483647.');
+
+    const hWhitespace = resequenceRouterAcl(r0.id, '100', 10, '   ');
+    assert.strictEqual(hWhitespace.success, false);
+    assert.strictEqual(hWhitespace.reason, '% Invalid sequence increment: "   ". Must be between 1 and 2147483647.');
+});
+
+// 1522. overflow rejected atomically
+runTest('1522. overflow rejected atomically', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 100 permit tcp any any eq 80');
+    executeCliCommand(r0, 'access-list 100 deny ip any any');
+
+    const acl = getRouterAcl(r0.id, '100');
+    acl.rules[0].sequence = 10;
+    acl.rules[1].sequence = 20;
+
+    // Start 2147483640 with step 10 -> rule 2 would be 2147483650 (> 2147483647)
+    const res = executeCliCommand(r0, 'ip access-list resequence 100 2147483640 10');
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.output, '% Resequence failed: maximum sequence number (2147483647) exceeded.');
+
+    // Atomic verify: original sequences untouched
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[1].sequence, 20);
+});
+
+// 1523. malformed/missing parameters
+runTest('1523. malformed/missing parameters', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+
+    const resIncomplete1 = executeCliCommand(r0, 'ip access-list resequence');
+    assert.strictEqual(resIncomplete1.success, false);
+    assert.strictEqual(resIncomplete1.output, '% Incomplete command: ip access-list resequence <acl> <starting-sequence> <increment>');
+
+    const resIncomplete2 = executeCliCommand(r0, 'ip access-list resequence 100');
+    assert.strictEqual(resIncomplete2.success, false);
+    assert.strictEqual(resIncomplete2.output, '% Incomplete command: ip access-list resequence <acl> <starting-sequence> <increment>');
+
+    const resIncomplete3 = executeCliCommand(r0, 'ip access-list resequence 100 10');
+    assert.strictEqual(resIncomplete3.success, false);
+    assert.strictEqual(resIncomplete3.output, '% Incomplete command: ip access-list resequence <acl> <starting-sequence> <increment>');
+
+    const resTooMany = executeCliCommand(r0, 'ip access-list resequence 100 10 10 extra');
+    assert.strictEqual(resTooMany.success, false);
+    assert.strictEqual(resTooMany.output, '% Too many parameters: ip access-list resequence <acl> <starting-sequence> <increment>');
+});
+
+// 1524. router isolation
+runTest('1524. router isolation', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    const r0 = networkState.devices[0];
+    const r1 = networkState.devices[1];
+
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 100 permit ip any any');
+    executeCliCommand(r0, 'access-list 100 deny tcp any any eq 80');
+
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'access-list 100 permit ip any any');
+    executeCliCommand(r1, 'access-list 100 deny tcp any any eq 80');
+
+    const r0Acl = getRouterAcl(r0.id, '100');
+    const r1Acl = getRouterAcl(r1.id, '100');
+    r0Acl.rules[0].sequence = 50;
+    r0Acl.rules[1].sequence = 100;
+    r1Acl.rules[0].sequence = 50;
+    r1Acl.rules[1].sequence = 100;
+
+    executeCliCommand(r0, 'ip access-list resequence 100 10 10');
+
+    assert.strictEqual(r0Acl.rules[0].sequence, 10);
+    assert.strictEqual(r0Acl.rules[1].sequence, 20);
+    assert.strictEqual(r1Acl.rules[0].sequence, 50);
+    assert.strictEqual(r1Acl.rules[1].sequence, 100);
+});
+
+// 1525. standard numbered ACL regression
+runTest('1525. standard numbered ACL regression', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 1 permit 192.168.1.10');
+    executeCliCommand(r0, 'access-list 1 deny any');
+
+    const acl = getRouterAcl(r0.id, '1');
+    acl.rules[0].sequence = 25;
+    acl.rules[1].sequence = 55;
+
+    const res = executeCliCommand(r0, 'ip access-list resequence 1 10 10');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[1].sequence, 20);
+});
+
+// 1526. standard named ACL regression
+runTest('1526. standard named ACL regression', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'ip access-list standard STD_MGMT');
+    executeCliCommand(r0, '35 permit 10.0.0.1');
+    executeCliCommand(r0, '75 deny any');
+
+    const res = executeCliCommand(r0, 'ip access-list resequence STD_MGMT 10 10');
+    assert.strictEqual(res.success, true);
+
+    const acl = getRouterAcl(r0.id, 'STD_MGMT');
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[1].sequence, 20);
+});
+
+// 1527. CLI execution from EXEC mode rejected
+runTest('1527. CLI execution from EXEC mode rejected', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+
+    const res = executeCliCommand(r0, 'ip access-list resequence 100 10 10');
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.output, '% "ip access-list" must be executed in configuration mode.');
+});
+
+// 1528. Total test count verification check (V5.16 Phase 2B Sub-phase 6 baseline verification)
+runTest('1528. Total test count verification check (V5.16 Phase 2B Sub-phase 6 baseline verification)', () => {
+    assert.strictEqual(testsPassed, 1527, 'Total tests passed should be exactly 1527 prior to this check');
+    assert.strictEqual(testsFailed, 0, 'Zero tests should have failed');
+});
 
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);

@@ -9070,6 +9070,68 @@ function deleteRouterAclRule(routerId, aclId, sequence) {
     return { success: true };
 }
 
+function resequenceRouterAcl(routerId, aclId, startingSequence, increment) {
+    const router = typeof routerId === 'object' && routerId ? routerId : getDeviceById(routerId);
+    if (!router || router.type !== 'router') {
+        return { success: false, reason: "% 'resequence' is a Cisco IOS router command." };
+    }
+
+    const acls = getRouterAcls(router.id);
+    const key = String(aclId ?? '').trim();
+    if (!key) {
+        return { success: false, reason: '% Access list not specified.' };
+    }
+
+    let acl = acls[key];
+    if (!acl) {
+        const foundKey = Object.keys(acls).find(k =>
+            k.toLowerCase() === key.toLowerCase() ||
+            String(acls[k]?.name || '').toLowerCase() === key.toLowerCase()
+        );
+        if (foundKey) {
+            acl = acls[foundKey];
+        }
+    }
+
+    if (!acl) {
+        return { success: false, reason: `% Access list ${key} not found.` };
+    }
+
+    const startStr = String(startingSequence ?? '').trim();
+    const startSeq = Number(startStr);
+    if (!/^\d+$/.test(startStr) || !Number.isInteger(startSeq) || startSeq < 1 || startSeq > 2147483647) {
+        return { success: false, reason: `% Invalid starting sequence number: "${startingSequence}". Must be between 1 and 2147483647.` };
+    }
+
+    const stepStr = String(increment ?? '').trim();
+    const step = Number(stepStr);
+    if (!/^\d+$/.test(stepStr) || !Number.isInteger(step) || step < 1 || step > 2147483647) {
+        return { success: false, reason: `% Invalid sequence increment: "${increment}". Must be between 1 and 2147483647.` };
+    }
+
+    if (!Array.isArray(acl.rules) || acl.rules.length === 0) {
+        return { success: true, acl, resequencedCount: 0 };
+    }
+
+    const ruleCount = acl.rules.length;
+    const maxTargetSeq = startSeq + (ruleCount - 1) * step;
+    if (maxTargetSeq > 2147483647) {
+        return { success: false, reason: '% Resequence failed: maximum sequence number (2147483647) exceeded.' };
+    }
+
+    acl.rules.sort((a, b) => a.sequence - b.sequence);
+
+    let currentSeq = startSeq;
+    for (let i = 0; i < acl.rules.length; i++) {
+        acl.rules[i].sequence = currentSeq;
+        currentSeq += step;
+    }
+
+    acl.rules.sort((a, b) => a.sequence - b.sequence);
+
+    return { success: true, acl, resequencedCount: acl.rules.length };
+}
+
 function bindRouterInterfaceAcl(routerId, interfaceName, direction, aclId) {
     const router = typeof routerId === 'object' && routerId ? routerId : getDeviceById(routerId);
     if (!router || router.type !== 'router') {
@@ -15139,6 +15201,7 @@ function executeCliCommand(deviceId, rawInput) {
   no ip access-list standard <name> - Delete standard named access list
   ip access-list extended <name> - Configure extended named access list
   no ip access-list extended <name> - Delete extended named access list
+  ip access-list resequence <acl> <start> <step> - Resequence access list sequence numbers
   ip route <net> <mask> <next-hop> [ad] [metric] - Configure a static route
   no ip route <net> <mask> [next-hop]            - Delete a static route
   router ospf <process-id>      - Configure OSPF routing process (enters router config mode)
@@ -19298,6 +19361,63 @@ function executeCliCommand(deviceId, rawInput) {
                     output: '% "ip access-list" must be executed in configuration mode.',
                     clear: false,
                     status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (tokens[2] === 'resequence') {
+                if (!isRouter) {
+                    return {
+                        success: false,
+                        output: "% 'ip access-list resequence' is a Cisco IOS router command.",
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (tokens.length < 6 || !tokens[3] || !tokens[4] || !tokens[5]) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: ip access-list resequence <acl> <starting-sequence> <increment>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (tokens.length > 6) {
+                    return {
+                        success: false,
+                        output: '% Too many parameters: ip access-list resequence <acl> <starting-sequence> <increment>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                const targetAcl = (rawTokens[3] || tokens[3] || '').trim();
+                const startSeq = tokens[4];
+                const increment = tokens[5];
+
+                pushHistory();
+                const res = resequenceRouterAcl(dev.id, targetAcl, startSeq, increment);
+                if (!res.success) {
+                    return {
+                        success: false,
+                        output: res.reason,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
                     command,
                     device: dev
                 };
