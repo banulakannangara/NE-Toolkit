@@ -458,6 +458,16 @@ function addDevice(type, x, y) {
                 passiveInterfaces: [],
                 neighbors: {},
                 interfaces: {}
+            },
+            cdp: {
+                run: true,
+                holdtime: 180,
+                timer: 60
+            },
+            lldp: {
+                run: false,
+                holdtime: 120,
+                timer: 30
             }
         };
         getRouterRuntime(device.id);
@@ -489,7 +499,17 @@ function addDevice(type, x, y) {
             switchports: {},
             svis: {},
             ipRouting: false,
-            defaultGateway: ''
+            defaultGateway: '',
+            cdp: {
+                run: true,
+                holdtime: 180,
+                timer: 60
+            },
+            lldp: {
+                run: false,
+                holdtime: 120,
+                timer: 30
+            }
         };
     } else {
         device = {
@@ -501,7 +521,17 @@ function addDevice(type, x, y) {
             ip: '',
             subnetMask: '',
             gateway: '',
-            mac: generateMacAddress(networkState.devices)
+            mac: generateMacAddress(networkState.devices),
+            cdp: {
+                run: false,
+                holdtime: 180,
+                timer: 60
+            },
+            lldp: {
+                run: false,
+                holdtime: 120,
+                timer: 30
+            }
         };
     }
 
@@ -1072,6 +1102,7 @@ function restoreSnapshot(snapshot) {
         if (dev && dev.type === 'switch') {
             ensureSwitchStpState(dev);
         }
+        ensureDeviceDiscoveryState(dev);
     });
     recalculateTopologyStp();
 }
@@ -15050,6 +15081,492 @@ function formatCliSwitchSpanningTree(switchOrId) {
     return lines.join('\n');
 }
 
+// ==========================================
+// PHASE 3A: CDP & LLDP DISCOVERY ENGINE
+// ==========================================
+
+function ensureDeviceDiscoveryState(dev) {
+    if (!dev) return;
+    const isCiscoL2L3 = dev.type === 'router' || dev.type === 'switch';
+    if (!dev.cdp || typeof dev.cdp !== 'object') {
+        dev.cdp = {
+            run: isCiscoL2L3,
+            holdtime: 180,
+            timer: 60
+        };
+    } else {
+        if (dev.cdp.run === undefined) dev.cdp.run = isCiscoL2L3;
+        if (typeof dev.cdp.holdtime !== 'number') dev.cdp.holdtime = 180;
+        if (typeof dev.cdp.timer !== 'number') dev.cdp.timer = 60;
+    }
+
+    if (!dev.lldp || typeof dev.lldp !== 'object') {
+        dev.lldp = {
+            run: false,
+            holdtime: 120,
+            timer: 30
+        };
+    } else {
+        if (dev.lldp.run === undefined) dev.lldp.run = false;
+        if (typeof dev.lldp.holdtime !== 'number') dev.lldp.holdtime = 120;
+        if (typeof dev.lldp.timer !== 'number') dev.lldp.timer = 30;
+    }
+}
+
+function getDevicePortLabel(dev, connectionId) {
+    if (!dev) return null;
+    if (dev.type === 'switch') {
+        return getSwitchPortLabel(dev.id, connectionId);
+    }
+    if (dev.type === 'router') {
+        return getRouterPortLabel(dev.id, connectionId);
+    }
+    return 'FastEthernet0';
+}
+
+function getInterfaceOperStatus(dev, ifName) {
+    if (!dev || !ifName) return 'down';
+    if (dev.type === 'router') {
+        const iface = dev.interfaces?.[ifName];
+        return (iface && iface.status === 'down') ? 'down' : 'up';
+    }
+    if (dev.type === 'switch') {
+        const normPort = normalizeSwitchPortName(ifName) || ifName;
+        const cfg = dev.switchports?.[normPort];
+        return (cfg && cfg.status === 'down') ? 'down' : 'up';
+    }
+    return 'up';
+}
+
+function isInterfaceCdpEnabled(dev, ifName) {
+    if (!dev || !ifName) return false;
+    if (dev.type === 'router') {
+        const iface = dev.interfaces?.[ifName];
+        return iface ? (iface.cdpEnabled !== false) : true;
+    }
+    if (dev.type === 'switch') {
+        const normPort = normalizeSwitchPortName(ifName) || ifName;
+        const cfg = dev.switchports?.[normPort];
+        return cfg ? (cfg.cdpEnabled !== false) : true;
+    }
+    return true;
+}
+
+function setInterfaceCdpEnabled(dev, ifName, enabled) {
+    if (!dev || !ifName) return;
+    if (dev.type === 'router') {
+        if (!dev.interfaces) dev.interfaces = {};
+        if (!dev.interfaces[ifName]) {
+            dev.interfaces[ifName] = { name: ifName, status: 'up' };
+        }
+        dev.interfaces[ifName].cdpEnabled = !!enabled;
+    } else if (dev.type === 'switch') {
+        const normPort = normalizeSwitchPortName(ifName) || ifName;
+        if (!dev.switchports) dev.switchports = {};
+        if (!dev.switchports[normPort]) {
+            dev.switchports[normPort] = {
+                port: normPort,
+                name: normPort,
+                mode: 'access',
+                accessVlan: 1,
+                nativeVlan: 1,
+                allowedVlans: 'all'
+            };
+        }
+        dev.switchports[normPort].cdpEnabled = !!enabled;
+    }
+}
+
+function isInterfaceLldpTransmitEnabled(dev, ifName) {
+    if (!dev || !ifName) return false;
+    if (dev.type === 'router') {
+        const iface = dev.interfaces?.[ifName];
+        return iface ? (iface.lldpTransmit !== false) : true;
+    }
+    if (dev.type === 'switch') {
+        const normPort = normalizeSwitchPortName(ifName) || ifName;
+        const cfg = dev.switchports?.[normPort];
+        return cfg ? (cfg.lldpTransmit !== false) : true;
+    }
+    return true;
+}
+
+function setInterfaceLldpTransmit(dev, ifName, enabled) {
+    if (!dev || !ifName) return;
+    if (dev.type === 'router') {
+        if (!dev.interfaces) dev.interfaces = {};
+        if (!dev.interfaces[ifName]) {
+            dev.interfaces[ifName] = { name: ifName, status: 'up' };
+        }
+        dev.interfaces[ifName].lldpTransmit = !!enabled;
+    } else if (dev.type === 'switch') {
+        const normPort = normalizeSwitchPortName(ifName) || ifName;
+        if (!dev.switchports) dev.switchports = {};
+        if (!dev.switchports[normPort]) {
+            dev.switchports[normPort] = {
+                port: normPort,
+                name: normPort,
+                mode: 'access',
+                accessVlan: 1,
+                nativeVlan: 1,
+                allowedVlans: 'all'
+            };
+        }
+        dev.switchports[normPort].lldpTransmit = !!enabled;
+    }
+}
+
+function isInterfaceLldpReceiveEnabled(dev, ifName) {
+    if (!dev || !ifName) return false;
+    if (dev.type === 'router') {
+        const iface = dev.interfaces?.[ifName];
+        return iface ? (iface.lldpReceive !== false) : true;
+    }
+    if (dev.type === 'switch') {
+        const normPort = normalizeSwitchPortName(ifName) || ifName;
+        const cfg = dev.switchports?.[normPort];
+        return cfg ? (cfg.lldpReceive !== false) : true;
+    }
+    return true;
+}
+
+function setInterfaceLldpReceive(dev, ifName, enabled) {
+    if (!dev || !ifName) return;
+    if (dev.type === 'router') {
+        if (!dev.interfaces) dev.interfaces = {};
+        if (!dev.interfaces[ifName]) {
+            dev.interfaces[ifName] = { name: ifName, status: 'up' };
+        }
+        dev.interfaces[ifName].lldpReceive = !!enabled;
+    } else if (dev.type === 'switch') {
+        const normPort = normalizeSwitchPortName(ifName) || ifName;
+        if (!dev.switchports) dev.switchports = {};
+        if (!dev.switchports[normPort]) {
+            dev.switchports[normPort] = {
+                port: normPort,
+                name: normPort,
+                mode: 'access',
+                accessVlan: 1,
+                nativeVlan: 1,
+                allowedVlans: 'all'
+            };
+        }
+        dev.switchports[normPort].lldpReceive = !!enabled;
+    }
+}
+
+function getDevicePlatform(dev) {
+    if (!dev) return '';
+    if (dev.model) return dev.model;
+    if (dev.platform) return dev.platform;
+    if (dev.type === 'router') return 'cisco 2911';
+    if (dev.type === 'switch') return 'cisco 2960';
+    if (dev.type === 'pc') return 'PC';
+    if (dev.type === 'server') return 'Server';
+    return dev.type || 'Unknown';
+}
+
+function getDeviceCapabilities(dev) {
+    if (!dev) return '';
+    if (dev.type === 'router') return 'R';
+    if (dev.type === 'switch') {
+        return dev.ipRouting ? 'R S' : 'S';
+    }
+    return 'H';
+}
+
+function getDeviceManagementIp(dev, portName = null) {
+    if (!dev) return '';
+    if (dev.type === 'switch') {
+        if (dev.svis?.[1]?.ip && dev.svis[1].status !== 'down') {
+            return dev.svis[1].ip;
+        }
+        if (dev.svis) {
+            for (const svi of Object.values(dev.svis)) {
+                if (svi?.ip && svi.status !== 'down') {
+                    return svi.ip;
+                }
+            }
+        }
+        if (dev.ip) return dev.ip;
+        return '';
+    }
+    if (dev.type === 'router') {
+        if (portName && dev.interfaces?.[portName]?.ip && dev.interfaces[portName].status !== 'down') {
+            return dev.interfaces[portName].ip;
+        }
+        if (dev.interfaces) {
+            for (const iface of Object.values(dev.interfaces)) {
+                if (iface?.ip && iface.status !== 'down') {
+                    return iface.ip;
+                }
+            }
+        }
+        return '';
+    }
+    return dev.ip || '';
+}
+
+function getDeviceNeighbors(deviceOrId, protocol = 'all') {
+    const dev = typeof deviceOrId === 'object' ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return [];
+
+    ensureDeviceDiscoveryState(dev);
+
+    const proto = String(protocol || 'all').toLowerCase();
+
+    if (proto === 'cdp' && !dev.cdp.run) {
+        return [];
+    }
+    if (proto === 'lldp' && !dev.lldp.run) {
+        return [];
+    }
+
+    const connections = networkState.connections || [];
+    const results = [];
+
+    for (const conn of connections) {
+        if (!conn || !conn.source || !conn.target) continue;
+
+        let remoteId = null;
+        if (conn.source === dev.id) {
+            remoteId = conn.target;
+        } else if (conn.target === dev.id) {
+            remoteId = conn.source;
+        } else {
+            continue;
+        }
+
+        const remoteDev = getDeviceById(remoteId);
+        if (!remoteDev) continue;
+
+        ensureDeviceDiscoveryState(remoteDev);
+
+        const localIface = getDevicePortLabel(dev, conn.id);
+        const remoteIface = getDevicePortLabel(remoteDev, conn.id);
+
+        if (!localIface || !remoteIface) continue;
+
+        const localStatus = getInterfaceOperStatus(dev, localIface);
+        const remoteStatus = getInterfaceOperStatus(remoteDev, remoteIface);
+
+        if (localStatus === 'down' || remoteStatus === 'down') {
+            continue;
+        }
+
+        if (proto === 'cdp') {
+            if (!isInterfaceCdpEnabled(dev, localIface)) continue;
+            if (!remoteDev.cdp.run) continue;
+            if (!isInterfaceCdpEnabled(remoteDev, remoteIface)) continue;
+        } else if (proto === 'lldp') {
+            if (!isInterfaceLldpReceiveEnabled(dev, localIface)) continue;
+            if (!remoteDev.lldp.run) continue;
+            if (!isInterfaceLldpTransmitEnabled(remoteDev, remoteIface)) continue;
+        }
+
+        const holdtime = proto === 'lldp'
+            ? (remoteDev.lldp?.holdtime || 120)
+            : (remoteDev.cdp?.holdtime || 180);
+
+        results.push({
+            connectionId: conn.id,
+            localDevice: dev,
+            localInterface: localIface,
+            remoteDevice: remoteDev,
+            remoteDeviceId: remoteDev.name || remoteDev.id,
+            remoteDeviceType: remoteDev.type,
+            remoteInterface: remoteIface,
+            remoteMac: remoteDev.mac || (remoteDev.interfaces?.[remoteIface]?.mac || ''),
+            remoteIp: getDeviceManagementIp(remoteDev, remoteIface),
+            platform: getDevicePlatform(remoteDev),
+            capabilities: getDeviceCapabilities(remoteDev),
+            holdtime: holdtime,
+            linkState: 'up'
+        });
+    }
+
+    results.sort((a, b) => {
+        const cmp = a.localInterface.localeCompare(b.localInterface, undefined, { numeric: true });
+        if (cmp !== 0) return cmp;
+        return a.remoteDeviceId.localeCompare(b.remoteDeviceId);
+    });
+
+    return results;
+}
+
+function formatCliCdpNeighbors(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return '% Device not found.';
+    ensureDeviceDiscoveryState(dev);
+    if (!dev.cdp.run) return '% CDP is not active';
+
+    const neighbors = getDeviceNeighbors(dev, 'cdp');
+    const lines = [
+        'Capability Codes: R - Router, T - Trans Bridge, B - Source Route Bridge',
+        '                  S - Switch, H - Host, I - IGMP, r - Repeater, P - Phone',
+        '',
+        'Device ID        Local Intrfce     Holdtme    Capability  Platform    Port ID'
+    ];
+
+    for (const n of neighbors) {
+        const devId = (n.remoteDeviceId || '').padEnd(17);
+        const localIf = (n.localInterface || '').padEnd(18);
+        const hold = String(n.holdtime || 180).padEnd(11);
+        const cap = (n.capabilities || '').padEnd(12);
+        const plat = (n.platform || '').padEnd(12);
+        const portId = n.remoteInterface || '';
+        lines.push(`${devId}${localIf}${hold}${cap}${plat}${portId}`);
+    }
+
+    return lines.join('\n');
+}
+
+function formatCliCdpNeighborsDetail(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return '% Device not found.';
+    ensureDeviceDiscoveryState(dev);
+    if (!dev.cdp.run) return '% CDP is not active';
+
+    const neighbors = getDeviceNeighbors(dev, 'cdp');
+    if (neighbors.length === 0) {
+        return 'Total cdp entries displayed : 0';
+    }
+
+    const lines = [];
+    for (let i = 0; i < neighbors.length; i++) {
+        const n = neighbors[i];
+        lines.push('-------------------------');
+        lines.push(`Device ID: ${n.remoteDeviceId}`);
+        lines.push('Entry address(es): ');
+        if (n.remoteIp) {
+            lines.push(`  IP address: ${n.remoteIp}`);
+        } else {
+            lines.push('  IP address: none');
+        }
+        const capDesc = n.capabilities === 'R' ? 'Router' : n.capabilities === 'S' ? 'Switch' : n.capabilities === 'R S' ? 'Router Switch' : 'Host';
+        lines.push(`Platform: ${n.platform},  Capabilities: ${capDesc}`);
+        lines.push(`Interface: ${n.localInterface},  Port ID (outgoing port): ${n.remoteInterface}`);
+        lines.push(`Holdtime : ${n.holdtime || 180} sec`);
+        lines.push('');
+        lines.push('Version :');
+        lines.push(`Cisco IOS Software, ${n.platform} Software, Version 15.1`);
+    }
+
+    return lines.join('\n');
+}
+
+function formatCliCdpInterface(deviceOrId, targetIface = null) {
+    const dev = typeof deviceOrId === 'object' ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return '% Device not found.';
+    ensureDeviceDiscoveryState(dev);
+    if (!dev.cdp.run) return '% CDP is not active';
+
+    let ifaces = [];
+    if (dev.type === 'router') {
+        const keys = Object.keys(dev.interfaces || {}).filter(k => !k.includes('.'));
+        ifaces = keys.length ? keys : ['Gig0/0', 'Gig0/1'];
+    } else if (dev.type === 'switch') {
+        const portSet = new Set(Object.keys(dev.switchports || {}));
+        (networkState.connections || []).forEach(c => {
+            if (c.source === dev.id || c.target === dev.id) {
+                const p = getSwitchPortLabel(dev.id, c.id);
+                if (p) portSet.add(p);
+            }
+        });
+        if (portSet.size === 0) {
+            portSet.add('Fa0/1');
+        }
+        ifaces = Array.from(portSet).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    }
+
+    if (targetIface) {
+        const norm = dev.type === 'switch' ? normalizeSwitchPortName(targetIface) : normalizeRouterInterfaceName(targetIface);
+        const match = ifaces.find(i => i.toLowerCase() === (norm || targetIface).toLowerCase());
+        if (!match) {
+            if (norm) {
+                ifaces = [norm];
+            } else {
+                return `% Interface ${targetIface} not found`;
+            }
+        } else {
+            ifaces = [match];
+        }
+    }
+
+    const lines = [];
+    for (const ifName of ifaces) {
+        const operStatus = getInterfaceOperStatus(dev, ifName);
+        const isEnabled = isInterfaceCdpEnabled(dev, ifName);
+        const statusText = operStatus === 'down' ? 'administratively down, line protocol is down' : 'up, line protocol is up';
+        lines.push(`${ifName} is ${statusText}`);
+        lines.push('  Encapsulation ARPA');
+        if (!isEnabled) {
+            lines.push('  CDP is not enabled on interface');
+        } else {
+            lines.push(`  Sending CDP packets every ${dev.cdp.timer || 60} seconds`);
+            lines.push(`  Holdtime is ${dev.cdp.holdtime || 180} seconds`);
+        }
+    }
+    return lines.join('\n');
+}
+
+function formatCliLldpNeighbors(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return '% Device not found.';
+    ensureDeviceDiscoveryState(dev);
+    if (!dev.lldp.run) return '% LLDP is not active';
+
+    const neighbors = getDeviceNeighbors(dev, 'lldp');
+    const lines = [
+        'Capability codes:',
+        '    (R) Router, (B) Bridge, (T) Telephone, (C) DOCSIS Cable Device',
+        '    (W) WLAN Access Point, (P) Repeater, (S) Station, (O) Other',
+        '',
+        'Device ID           Local Intf     Hold-time  Capability      Port ID'
+    ];
+
+    for (const n of neighbors) {
+        const devId = (n.remoteDeviceId || '').padEnd(20);
+        const localIf = (n.localInterface || '').padEnd(15);
+        const hold = String(n.holdtime || 120).padEnd(11);
+        const lldpCap = n.remoteDeviceType === 'switch' ? 'B' : n.remoteDeviceType === 'router' ? 'R' : 'S';
+        const cap = lldpCap.padEnd(16);
+        const portId = n.remoteInterface || '';
+        lines.push(`${devId}${localIf}${hold}${cap}${portId}`);
+    }
+
+    return lines.join('\n');
+}
+
+function formatCliLldpNeighborsDetail(deviceOrId) {
+    const dev = typeof deviceOrId === 'object' ? deviceOrId : getDeviceById(deviceOrId);
+    if (!dev) return '% Device not found.';
+    ensureDeviceDiscoveryState(dev);
+    if (!dev.lldp.run) return '% LLDP is not active';
+
+    const neighbors = getDeviceNeighbors(dev, 'lldp');
+    if (neighbors.length === 0) {
+        return 'Total entries displayed: 0';
+    }
+
+    const lines = [];
+    for (const n of neighbors) {
+        const lldpCap = n.remoteDeviceType === 'switch' ? 'Bridge' : n.remoteDeviceType === 'router' ? 'Router' : 'Station';
+        lines.push('------------------------------------------------');
+        lines.push(`Chassis id: ${n.remoteMac || '0000.0000.0000'}`);
+        lines.push(`Port id: ${n.remoteInterface}`);
+        lines.push(`Port Description: ${n.remoteInterface}`);
+        lines.push(`System Name: ${n.remoteDeviceId}`);
+        lines.push(`System Capabilities: ${lldpCap}`);
+        lines.push(`Enabled Capabilities: ${lldpCap}`);
+        lines.push('Management Addresses:');
+        lines.push(`    IP: ${n.remoteIp || 'none'}`);
+        lines.push(`Time to live: ${n.holdtime || 120} sec`);
+    }
+
+    return lines.join('\n');
+}
+
 function findDeviceByIp(ip) {
     if (!ip || typeof ip !== 'string') {
         return null;
@@ -18151,6 +18668,22 @@ function executeCliCommand(deviceId, rawInput) {
                 pushHistory();
                 setSwitchSviAdminStatus(dev, getSviVlanId(session.selectedInterface), 'down');
                 render();
+            } else {
+                pushHistory();
+                const normPort = normalizeSwitchPortName(session.selectedInterface) || session.selectedInterface;
+                if (!dev.switchports) dev.switchports = {};
+                if (!dev.switchports[normPort]) {
+                    dev.switchports[normPort] = {
+                        port: normPort,
+                        name: normPort,
+                        mode: 'access',
+                        accessVlan: 1,
+                        nativeVlan: 1,
+                        allowedVlans: 'all'
+                    };
+                }
+                dev.switchports[normPort].status = 'down';
+                render();
             }
         }
         return {
@@ -18448,6 +18981,13 @@ function executeCliCommand(deviceId, rawInput) {
                 if (isSviName(session.selectedInterface)) {
                     pushHistory();
                     setSwitchSviAdminStatus(dev, getSviVlanId(session.selectedInterface), 'up');
+                    render();
+                } else {
+                    pushHistory();
+                    const normPort = normalizeSwitchPortName(session.selectedInterface) || session.selectedInterface;
+                    if (dev.switchports?.[normPort]) {
+                        dev.switchports[normPort].status = 'up';
+                    }
                     render();
                 }
             }
@@ -19507,6 +20047,394 @@ function executeCliCommand(deviceId, rawInput) {
                 device: dev
             };
         }
+
+        // no cdp run / no cdp enable
+        if (sub1 === 'cdp') {
+            if (!isRouter && !isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'no cdp' is a Cisco IOS command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (sub2 === 'run') {
+                if (session.mode !== 'config') {
+                    return {
+                        success: false,
+                        output: '% "no cdp run" must be executed in global configuration mode.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                ensureDeviceDiscoveryState(dev);
+                pushHistory();
+                dev.cdp.run = false;
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            if (sub2 === 'enable') {
+                if (session.mode !== 'config-if' || !session.selectedInterface) {
+                    return {
+                        success: false,
+                        output: '% "no cdp enable" must be executed inside interface configuration mode.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (isSviName(session.selectedInterface)) {
+                    return {
+                        success: false,
+                        output: '% CDP interface commands are only supported on physical interfaces.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                ensureDeviceDiscoveryState(dev);
+                pushHistory();
+                setInterfaceCdpEnabled(dev, session.selectedInterface, false);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: false,
+                output: '% Incomplete or unrecognized command: no cdp [run | enable]',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
+        // no lldp run / no lldp transmit / no lldp receive
+        if (sub1 === 'lldp') {
+            if (!isRouter && !isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'no lldp' is a Cisco IOS command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (sub2 === 'run') {
+                if (session.mode !== 'config') {
+                    return {
+                        success: false,
+                        output: '% "no lldp run" must be executed in global configuration mode.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                ensureDeviceDiscoveryState(dev);
+                pushHistory();
+                dev.lldp.run = false;
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            if (sub2 === 'transmit') {
+                if (session.mode !== 'config-if' || !session.selectedInterface) {
+                    return {
+                        success: false,
+                        output: '% "no lldp transmit" must be executed inside interface configuration mode.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (isSviName(session.selectedInterface)) {
+                    return {
+                        success: false,
+                        output: '% LLDP interface commands are only supported on physical interfaces.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                ensureDeviceDiscoveryState(dev);
+                pushHistory();
+                setInterfaceLldpTransmit(dev, session.selectedInterface, false);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            if (sub2 === 'receive') {
+                if (session.mode !== 'config-if' || !session.selectedInterface) {
+                    return {
+                        success: false,
+                        output: '% "no lldp receive" must be executed inside interface configuration mode.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (isSviName(session.selectedInterface)) {
+                    return {
+                        success: false,
+                        output: '% LLDP interface commands are only supported on physical interfaces.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                ensureDeviceDiscoveryState(dev);
+                pushHistory();
+                setInterfaceLldpReceive(dev, session.selectedInterface, false);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: false,
+                output: '% Incomplete or unrecognized command: no lldp [run | transmit | receive]',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+    }
+
+    // 12c. CDP configuration commands
+    if (mainCmd === 'cdp') {
+        if (!isRouter && !isSwitch) {
+            return {
+                success: false,
+                output: "% 'cdp' is a Cisco IOS command.",
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (tokens[1] === 'run') {
+            if (session.mode !== 'config') {
+                return {
+                    success: false,
+                    output: '% "cdp run" must be executed in global configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            ensureDeviceDiscoveryState(dev);
+            pushHistory();
+            dev.cdp.run = true;
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+        if (tokens[1] === 'enable') {
+            if (session.mode !== 'config-if' || !session.selectedInterface) {
+                return {
+                    success: false,
+                    output: '% "cdp enable" must be executed inside interface configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (isSviName(session.selectedInterface)) {
+                return {
+                    success: false,
+                    output: '% CDP interface commands are only supported on physical interfaces.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            ensureDeviceDiscoveryState(dev);
+            pushHistory();
+            setInterfaceCdpEnabled(dev, session.selectedInterface, true);
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+        return {
+            success: false,
+            output: '% Incomplete or unrecognized command: cdp [run | enable]',
+            clear: false,
+            status: 'error',
+            command,
+            device: dev
+        };
+    }
+
+    // 12d. LLDP configuration commands
+    if (mainCmd === 'lldp') {
+        if (!isRouter && !isSwitch) {
+            return {
+                success: false,
+                output: "% 'lldp' is a Cisco IOS command.",
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+        if (tokens[1] === 'run') {
+            if (session.mode !== 'config') {
+                return {
+                    success: false,
+                    output: '% "lldp run" must be executed in global configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            ensureDeviceDiscoveryState(dev);
+            pushHistory();
+            dev.lldp.run = true;
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+        if (tokens[1] === 'transmit') {
+            if (session.mode !== 'config-if' || !session.selectedInterface) {
+                return {
+                    success: false,
+                    output: '% "lldp transmit" must be executed inside interface configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (isSviName(session.selectedInterface)) {
+                return {
+                    success: false,
+                    output: '% LLDP interface commands are only supported on physical interfaces.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            ensureDeviceDiscoveryState(dev);
+            pushHistory();
+            setInterfaceLldpTransmit(dev, session.selectedInterface, true);
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+        if (tokens[1] === 'receive') {
+            if (session.mode !== 'config-if' || !session.selectedInterface) {
+                return {
+                    success: false,
+                    output: '% "lldp receive" must be executed inside interface configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (isSviName(session.selectedInterface)) {
+                return {
+                    success: false,
+                    output: '% LLDP interface commands are only supported on physical interfaces.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            ensureDeviceDiscoveryState(dev);
+            pushHistory();
+            setInterfaceLldpReceive(dev, session.selectedInterface, true);
+            render();
+            return {
+                success: true,
+                output: '',
+                clear: false,
+                status: 'success',
+                command,
+                device: dev
+            };
+        }
+        return {
+            success: false,
+            output: '% Incomplete or unrecognized command: lldp [run | transmit | receive]',
+            clear: false,
+            status: 'error',
+            command,
+            device: dev
+        };
     }
 
     // 12b. SPANNING-TREE commands
@@ -21586,6 +22514,125 @@ function executeCliCommand(deviceId, rawInput) {
     if (mainCmd === 'show') {
         const sub1 = tokens[1] || '';
         const sub2 = tokens[2] || '';
+
+        // show cdp neighbors [detail] / show cdp interface [name]
+        if (sub1 === 'cdp') {
+            if (!isRouter && !isSwitch) {
+                return {
+                    success: false,
+                    output: `% 'show cdp' is a Cisco IOS command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            ensureDeviceDiscoveryState(dev);
+            if (!dev.cdp.run) {
+                return {
+                    success: true,
+                    output: '% CDP is not active',
+                    clear: false,
+                    status: 'info',
+                    command,
+                    device: dev
+                };
+            }
+            if (sub2 === 'neighbors' || sub2 === 'neighbor' || sub2 === 'nei') {
+                if (tokens[3] === 'detail' || tokens[3] === 'det') {
+                    return {
+                        success: true,
+                        output: formatCliCdpNeighborsDetail(dev),
+                        clear: false,
+                        status: 'success',
+                        command,
+                        device: dev
+                    };
+                }
+                return {
+                    success: true,
+                    output: formatCliCdpNeighbors(dev),
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            if (sub2 === 'interface' || sub2 === 'int') {
+                const targetIf = rawTokens[3] || tokens[3] || null;
+                const out = formatCliCdpInterface(dev, targetIf);
+                const isErr = out.startsWith('% Interface');
+                return {
+                    success: !isErr,
+                    output: out,
+                    clear: false,
+                    status: isErr ? 'error' : 'success',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: false,
+                output: '% Incomplete or unrecognized command: show cdp [neighbors [detail] | interface [name]]',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
+        // show lldp neighbors [detail]
+        if (sub1 === 'lldp') {
+            if (!isRouter && !isSwitch) {
+                return {
+                    success: false,
+                    output: `% 'show lldp' is a Cisco IOS command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            ensureDeviceDiscoveryState(dev);
+            if (!dev.lldp.run) {
+                return {
+                    success: true,
+                    output: '% LLDP is not active',
+                    clear: false,
+                    status: 'info',
+                    command,
+                    device: dev
+                };
+            }
+            if (sub2 === 'neighbors' || sub2 === 'neighbor' || sub2 === 'nei') {
+                if (tokens[3] === 'detail' || tokens[3] === 'det') {
+                    return {
+                        success: true,
+                        output: formatCliLldpNeighborsDetail(dev),
+                        clear: false,
+                        status: 'success',
+                        command,
+                        device: dev
+                    };
+                }
+                return {
+                    success: true,
+                    output: formatCliLldpNeighbors(dev),
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: false,
+                output: '% Incomplete or unrecognized command: show lldp neighbors [detail]',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
 
         // show hosts / show ip hosts
         if (sub1 === 'hosts' || (sub1 === 'ip' && sub2 === 'hosts')) {

@@ -38961,6 +38961,503 @@ runTest('1575. Packet simulation and hit counter increment against GUI-created a
     assert.ok(html.includes('<td><strong>200</strong></td>'));
 });
 
+// ========================================================
+// PHASE 3A: CDP / LLDP NEIGHBOR DISCOVERY REGRESSION TESTS
+// ========================================================
+
+runTest('1576. Canonical topology discovery resolves bidirectional router-to-switch neighbor relationship', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 200, 100);
+    addConnection('Router0', 'Switch0');
+    const r0 = getDeviceById('Router0');
+    const sw0 = getDeviceById('Switch0');
+    const r0Nbrs = getDeviceNeighbors(r0, 'cdp');
+    assert.strictEqual(r0Nbrs.length, 1);
+    assert.strictEqual(r0Nbrs[0].remoteDeviceId, 'Switch0');
+    assert.strictEqual(r0Nbrs[0].localInterface, 'Gig0/0');
+    assert.strictEqual(r0Nbrs[0].remoteInterface, 'Fa0/1');
+    assert.strictEqual(r0Nbrs[0].capabilities, 'S');
+    assert.strictEqual(r0Nbrs[0].platform, 'cisco 2960');
+    assert.strictEqual(r0Nbrs[0].holdtime, 180);
+
+    const sw0Nbrs = getDeviceNeighbors(sw0, 'cdp');
+    assert.strictEqual(sw0Nbrs.length, 1);
+    assert.strictEqual(sw0Nbrs[0].remoteDeviceId, 'Router0');
+    assert.strictEqual(sw0Nbrs[0].localInterface, 'Fa0/1');
+    assert.strictEqual(sw0Nbrs[0].remoteInterface, 'Gig0/0');
+    assert.strictEqual(sw0Nbrs[0].capabilities, 'R');
+    assert.strictEqual(sw0Nbrs[0].platform, 'cisco 2911');
+});
+
+runTest('1577. show cdp neighbors tabular CLI output format', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 200, 100);
+    addConnection('Router0', 'Switch0');
+    const r0 = getDeviceById('Router0');
+    const res = executeCliCommand(r0, 'show cdp neighbors');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Capability Codes:'));
+    assert.ok(res.output.includes('Device ID        Local Intrfce     Holdtme    Capability  Platform    Port ID'));
+    assert.ok(res.output.includes('Switch0          Gig0/0            180        S           cisco 2960  Fa0/1'));
+});
+
+runTest('1578. show cdp neighbors detail CLI output format', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 200, 100);
+    addConnection('Router0', 'Switch0');
+    const r0 = getDeviceById('Router0');
+    const res = executeCliCommand(r0, 'show cdp neighbors detail');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Device ID: Switch0'));
+    assert.ok(res.output.includes('Entry address(es):'));
+    assert.ok(res.output.includes('Platform: cisco 2960,  Capabilities: Switch'));
+    assert.ok(res.output.includes('Interface: Gig0/0,  Port ID (outgoing port): Fa0/1'));
+    assert.ok(res.output.includes('Holdtime : 180 sec'));
+});
+
+runTest('1579. show cdp interface CLI output for all interfaces and specific interface', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = getDeviceById('Router0');
+    const resAll = executeCliCommand(r0, 'show cdp interface');
+    assert.strictEqual(resAll.success, true);
+    assert.ok(resAll.output.includes('Gig0/0 is up, line protocol is up'));
+    assert.ok(resAll.output.includes('Sending CDP packets every 60 seconds'));
+    assert.ok(resAll.output.includes('Holdtime is 180 seconds'));
+
+    const resGig0 = executeCliCommand(r0, 'show cdp interface Gig0/0');
+    assert.strictEqual(resGig0.success, true);
+    assert.ok(resGig0.output.includes('Gig0/0 is up'));
+
+    const resNotFound = executeCliCommand(r0, 'show cdp interface NonExistent0');
+    assert.strictEqual(resNotFound.success, false);
+    assert.ok(resNotFound.output.includes('% Interface NonExistent0 not found'));
+});
+
+runTest('1580. Global cdp run / no cdp run toggles CDP discovery and CLI output', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 200, 100);
+    addConnection('Router0', 'Switch0');
+    const r0 = getDeviceById('Router0');
+
+    executeCliCommand(r0, 'configure terminal');
+    executeCliCommand(r0, 'no cdp run');
+    executeCliCommand(r0, 'exit');
+    assert.strictEqual(r0.cdp.run, false);
+
+    const resDisabled = executeCliCommand(r0, 'show cdp neighbors');
+    assert.ok(resDisabled.output.includes('% CDP is not active'));
+    assert.strictEqual(getDeviceNeighbors(r0, 'cdp').length, 0);
+
+    // Other side can no longer discover R0
+    const sw0 = getDeviceById('Switch0');
+    assert.strictEqual(getDeviceNeighbors(sw0, 'cdp').length, 0);
+
+    // Re-enable
+    executeCliCommand(r0, 'configure terminal');
+    executeCliCommand(r0, 'cdp run');
+    executeCliCommand(r0, 'exit');
+    assert.strictEqual(r0.cdp.run, true);
+    assert.strictEqual(getDeviceNeighbors(r0, 'cdp').length, 1);
+    assert.strictEqual(getDeviceNeighbors(sw0, 'cdp').length, 1);
+});
+
+runTest('1581. Interface cdp enable / no cdp enable suppresses neighbor advertisement on that link', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 200, 100);
+    addConnection('Router0', 'Switch0');
+    const r0 = getDeviceById('Router0');
+    const sw0 = getDeviceById('Switch0');
+
+    executeCliCommand(r0, 'configure terminal');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'no cdp enable');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'exit');
+
+    // R0 suppresses CDP on Gig0/0: R0 cannot discover SW0, and SW0 cannot discover R0
+    assert.strictEqual(getDeviceNeighbors(r0, 'cdp').length, 0);
+    assert.strictEqual(getDeviceNeighbors(sw0, 'cdp').length, 0);
+
+    // Verify show cdp interface reflects disabled state
+    const resInt = executeCliCommand(r0, 'show cdp interface Gig0/0');
+    assert.ok(resInt.output.includes('CDP is not enabled on interface'));
+
+    // Re-enable
+    executeCliCommand(r0, 'configure terminal');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'cdp enable');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'exit');
+
+    assert.strictEqual(getDeviceNeighbors(r0, 'cdp').length, 1);
+    assert.strictEqual(getDeviceNeighbors(sw0, 'cdp').length, 1);
+});
+
+runTest('1582. Interface administrative shutdown suppresses neighbor discovery', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 200, 100);
+    addConnection('Router0', 'Switch0');
+    const r0 = getDeviceById('Router0');
+    const sw0 = getDeviceById('Switch0');
+
+    executeCliCommand(sw0, 'configure terminal');
+    executeCliCommand(sw0, 'interface Fa0/1');
+    executeCliCommand(sw0, 'shutdown');
+    executeCliCommand(sw0, 'exit');
+    executeCliCommand(sw0, 'exit');
+
+    assert.strictEqual(sw0.switchports['Fa0/1'].status, 'down');
+    assert.strictEqual(getDeviceNeighbors(r0, 'cdp').length, 0);
+    assert.strictEqual(getDeviceNeighbors(sw0, 'cdp').length, 0);
+
+    // Re-enable via no shutdown
+    executeCliCommand(sw0, 'configure terminal');
+    executeCliCommand(sw0, 'interface Fa0/1');
+    executeCliCommand(sw0, 'no shutdown');
+    executeCliCommand(sw0, 'exit');
+    executeCliCommand(sw0, 'exit');
+
+    assert.strictEqual(sw0.switchports['Fa0/1'].status, 'up');
+    assert.strictEqual(getDeviceNeighbors(r0, 'cdp').length, 1);
+});
+
+runTest('1583. Router interface shutdown suppresses neighbor discovery', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 200, 100);
+    addConnection('Router0', 'Switch0');
+    const r0 = getDeviceById('Router0');
+    const sw0 = getDeviceById('Switch0');
+
+    executeCliCommand(r0, 'configure terminal');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'shutdown');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'exit');
+
+    assert.strictEqual(r0.interfaces['Gig0/0'].status, 'down');
+    assert.strictEqual(getDeviceNeighbors(r0, 'cdp').length, 0);
+    assert.strictEqual(getDeviceNeighbors(sw0, 'cdp').length, 0);
+
+    executeCliCommand(r0, 'configure terminal');
+    executeCliCommand(r0, 'interface Gig0/0');
+    executeCliCommand(r0, 'no shutdown');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'exit');
+
+    assert.strictEqual(r0.interfaces['Gig0/0'].status, 'up');
+    assert.strictEqual(getDeviceNeighbors(r0, 'cdp').length, 1);
+});
+
+runTest('1584. LLDP is disabled by default on routers and switches', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 200, 100);
+    const r0 = getDeviceById('Router0');
+    const sw0 = getDeviceById('Switch0');
+
+    ensureDeviceDiscoveryState(r0);
+    ensureDeviceDiscoveryState(sw0);
+    assert.strictEqual(r0.lldp.run, false);
+    assert.strictEqual(sw0.lldp.run, false);
+
+    const res = executeCliCommand(r0, 'show lldp neighbors');
+    assert.ok(res.output.includes('% LLDP is not active'));
+});
+
+runTest('1585. Global lldp run enables LLDP discovery when enabled on both ends', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 200, 100);
+    addConnection('Router0', 'Switch0');
+    const r0 = getDeviceById('Router0');
+    const sw0 = getDeviceById('Switch0');
+
+    executeCliCommand(r0, 'configure terminal');
+    executeCliCommand(r0, 'lldp run');
+    executeCliCommand(r0, 'exit');
+
+    executeCliCommand(sw0, 'configure terminal');
+    executeCliCommand(sw0, 'lldp run');
+    executeCliCommand(sw0, 'exit');
+
+    const r0LldpNbrs = getDeviceNeighbors(r0, 'lldp');
+    assert.strictEqual(r0LldpNbrs.length, 1);
+    assert.strictEqual(r0LldpNbrs[0].remoteDeviceId, 'Switch0');
+    assert.strictEqual(r0LldpNbrs[0].localInterface, 'Gig0/0');
+    assert.strictEqual(r0LldpNbrs[0].remoteInterface, 'Fa0/1');
+    assert.strictEqual(r0LldpNbrs[0].holdtime, 120);
+
+    const resShow = executeCliCommand(r0, 'show lldp neighbors');
+    assert.strictEqual(resShow.success, true);
+    assert.ok(resShow.output.includes('Capability codes:'));
+    assert.ok(resShow.output.includes('Device ID           Local Intf     Hold-time  Capability      Port ID'));
+    assert.ok(resShow.output.includes('Switch0             Gig0/0         120        B               Fa0/1'));
+});
+
+runTest('1586. LLDP neighbors detail CLI output format', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 200, 100);
+    addConnection('Router0', 'Switch0');
+    const r0 = getDeviceById('Router0');
+    const sw0 = getDeviceById('Switch0');
+
+    executeCliCommand(r0, 'configure terminal');
+    executeCliCommand(r0, 'lldp run');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(sw0, 'configure terminal');
+    executeCliCommand(sw0, 'lldp run');
+    executeCliCommand(sw0, 'exit');
+
+    const res = executeCliCommand(r0, 'show lldp neighbors detail');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Chassis id:'));
+    assert.ok(res.output.includes('Port id: Fa0/1'));
+    assert.ok(res.output.includes('System Name: Switch0'));
+    assert.ok(res.output.includes('System Capabilities: Bridge'));
+    assert.ok(res.output.includes('Time to live: 120 sec'));
+});
+
+runTest('1587. lldp transmit and lldp receive interface controls', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 200, 100);
+    addConnection('Router0', 'Switch0');
+    const r0 = getDeviceById('Router0');
+    const sw0 = getDeviceById('Switch0');
+
+    executeCliCommand(r0, 'configure terminal');
+    executeCliCommand(r0, 'lldp run');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(sw0, 'configure terminal');
+    executeCliCommand(sw0, 'lldp run');
+    executeCliCommand(sw0, 'exit');
+
+    // Disable transmit on SW0 Fa0/1
+    executeCliCommand(sw0, 'configure terminal');
+    executeCliCommand(sw0, 'interface Fa0/1');
+    executeCliCommand(sw0, 'no lldp transmit');
+    executeCliCommand(sw0, 'exit');
+    executeCliCommand(sw0, 'exit');
+
+    // R0 should NOT see SW0 via LLDP
+    assert.strictEqual(getDeviceNeighbors(r0, 'lldp').length, 0);
+    // SW0 still receives from R0
+    assert.strictEqual(getDeviceNeighbors(sw0, 'lldp').length, 1);
+
+    // Disable receive on SW0 Fa0/1
+    executeCliCommand(sw0, 'configure terminal');
+    executeCliCommand(sw0, 'interface Fa0/1');
+    executeCliCommand(sw0, 'no lldp receive');
+    executeCliCommand(sw0, 'exit');
+    executeCliCommand(sw0, 'exit');
+
+    assert.strictEqual(getDeviceNeighbors(sw0, 'lldp').length, 0);
+});
+
+runTest('1588. Discovery protocol isolation: CDP active does not imply LLDP and vice versa', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 200, 100);
+    addConnection('Router0', 'Switch0');
+    const r0 = getDeviceById('Router0');
+
+    // Default: CDP active, LLDP inactive
+    assert.strictEqual(getDeviceNeighbors(r0, 'cdp').length, 1);
+    assert.strictEqual(getDeviceNeighbors(r0, 'lldp').length, 0);
+
+    // Invert: Disable CDP, enable LLDP
+    const sw0 = getDeviceById('Switch0');
+    executeCliCommand(r0, 'configure terminal');
+    executeCliCommand(r0, 'no cdp run');
+    executeCliCommand(r0, 'lldp run');
+    executeCliCommand(r0, 'exit');
+
+    executeCliCommand(sw0, 'configure terminal');
+    executeCliCommand(sw0, 'no cdp run');
+    executeCliCommand(sw0, 'lldp run');
+    executeCliCommand(sw0, 'exit');
+
+    assert.strictEqual(getDeviceNeighbors(r0, 'cdp').length, 0);
+    assert.strictEqual(getDeviceNeighbors(r0, 'lldp').length, 1);
+});
+
+runTest('1589. Multi-device topology: Router connected to multiple switches orders deterministically', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 200, 100);
+    addDevice('switch', 300, 100);
+    addConnection('Router0', 'Switch0');
+    addConnection('Router0', 'Switch1');
+    const r0 = getDeviceById('Router0');
+
+    const nbrs = getDeviceNeighbors(r0, 'cdp');
+    assert.strictEqual(nbrs.length, 2);
+    assert.strictEqual(nbrs[0].localInterface, 'Gig0/0');
+    assert.strictEqual(nbrs[0].remoteDeviceId, 'Switch0');
+    assert.strictEqual(nbrs[1].localInterface, 'Gig0/1');
+    assert.strictEqual(nbrs[1].remoteDeviceId, 'Switch1');
+});
+
+runTest('1590. Switch-to-switch trunk link neighbor discovery and platform details', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 200, 100);
+    addConnection('Switch0', 'Switch1');
+    const sw0 = getDeviceById('Switch0');
+    const sw1 = getDeviceById('Switch1');
+
+    const nbrs = getDeviceNeighbors(sw0, 'cdp');
+    assert.strictEqual(nbrs.length, 1);
+    assert.strictEqual(nbrs[0].remoteDeviceId, 'Switch1');
+    assert.strictEqual(nbrs[0].capabilities, 'S');
+
+    // MLS capability check when ipRouting is enabled
+    sw1.ipRouting = true;
+    const mlsNbrs = getDeviceNeighbors(sw0, 'cdp');
+    assert.strictEqual(mlsNbrs[0].capabilities, 'R S');
+});
+
+runTest('1591. Host devices connected to switch show capability H in CDP and S in LLDP', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 200, 100);
+    addConnection('Switch0', 'PC0');
+    const sw0 = getDeviceById('Switch0');
+    const pc0 = getDeviceById('PC0');
+
+    // Enable CDP on host
+    ensureDeviceDiscoveryState(pc0);
+    pc0.cdp.run = true;
+
+    const cdpNbrs = getDeviceNeighbors(sw0, 'cdp');
+    assert.strictEqual(cdpNbrs.length, 1);
+    assert.strictEqual(cdpNbrs[0].remoteDeviceId, 'PC0');
+    assert.strictEqual(cdpNbrs[0].capabilities, 'H');
+
+    // Enable LLDP on both
+    executeCliCommand(sw0, 'configure terminal');
+    executeCliCommand(sw0, 'lldp run');
+    executeCliCommand(sw0, 'exit');
+    pc0.lldp.run = true;
+
+    const lldpNbrs = getDeviceNeighbors(sw0, 'lldp');
+    assert.strictEqual(lldpNbrs.length, 1);
+    assert.strictEqual(lldpNbrs[0].remoteDeviceId, 'PC0');
+    const resShow = executeCliCommand(sw0, 'show lldp neighbors');
+    assert.ok(resShow.output.includes('PC0                 Fa0/1          120        S'));
+});
+
+runTest('1592. Discovery commands error handling and mode validation', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = getDeviceById('Router0');
+
+    // cdp run from unprivileged mode
+    const res1 = executeCliCommand(r0, 'cdp run');
+    assert.strictEqual(res1.success, false);
+    assert.ok(res1.output.includes('must be executed in global configuration mode'));
+
+    // cdp enable from global config mode
+    executeCliCommand(r0, 'configure terminal');
+    const res2 = executeCliCommand(r0, 'cdp enable');
+    assert.strictEqual(res2.success, false);
+    assert.ok(res2.output.includes('must be executed inside interface configuration mode'));
+
+    // lldp transmit from global config mode
+    const res3 = executeCliCommand(r0, 'lldp transmit');
+    assert.strictEqual(res3.success, false);
+    assert.ok(res3.output.includes('must be executed inside interface configuration mode'));
+
+    // show cdp with unknown subcommand
+    executeCliCommand(r0, 'exit');
+    const res4 = executeCliCommand(r0, 'show cdp unknown_cmd');
+    assert.strictEqual(res4.success, false);
+    assert.ok(res4.output.includes('Incomplete or unrecognized command'));
+});
+
+runTest('1593. Snapshot save and restore preserves CDP/LLDP configuration state', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('switch', 200, 100);
+    const r0 = getDeviceById('Router0');
+    const sw0 = getDeviceById('Switch0');
+
+    executeCliCommand(r0, 'configure terminal');
+    executeCliCommand(r0, 'no cdp run');
+    executeCliCommand(r0, 'lldp run');
+    executeCliCommand(r0, 'exit');
+
+    executeCliCommand(sw0, 'configure terminal');
+    executeCliCommand(sw0, 'lldp run');
+    executeCliCommand(sw0, 'exit');
+
+    const snap = createLabSnapshot();
+    resetLab();
+    assert.strictEqual(networkState.devices.length, 0);
+
+    restoreSnapshot(snap);
+    const restoredR0 = getDeviceById('Router0');
+    const restoredSw0 = getDeviceById('Switch0');
+
+    assert.strictEqual(restoredR0.cdp.run, false);
+    assert.strictEqual(restoredR0.lldp.run, true);
+    assert.strictEqual(restoredSw0.lldp.run, true);
+});
+
+runTest('1594. Undo and redo history tracking for discovery configuration changes', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = getDeviceById('Router0');
+    assert.strictEqual(r0.cdp.run, true);
+
+    executeCliCommand(r0, 'configure terminal');
+    executeCliCommand(r0, 'no cdp run');
+    assert.strictEqual(r0.cdp.run, false);
+
+    undo();
+    const undoDev = getDeviceById('Router0');
+    assert.strictEqual(undoDev.cdp.run, true);
+
+    redo();
+    const redoDev = getDeviceById('Router0');
+    assert.strictEqual(redoDev.cdp.run, false);
+});
+
+runTest('1595. Safety check: missing devices or broken connections do not crash discovery', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = getDeviceById('Router0');
+
+    // Inject orphan/corrupt connections
+    networkState.connections.push({ id: 'conn_orphan_1', source: 'Router0', target: 'Ghost99' });
+    networkState.connections.push({ id: 'conn_orphan_2', source: null, target: 'Router0' });
+    networkState.connections.push(null);
+
+    // Must not throw error and return empty array
+    const nbrsCdp = getDeviceNeighbors(r0, 'cdp');
+    assert.strictEqual(Array.isArray(nbrsCdp), true);
+    assert.strictEqual(nbrsCdp.length, 0);
+
+    const nbrsLldp = getDeviceNeighbors(r0, 'lldp');
+    assert.strictEqual(Array.isArray(nbrsLldp), true);
+    assert.strictEqual(nbrsLldp.length, 0);
+
+    // CLI formatters handle device not found or empty cleanly
+    const outCdp = formatCliCdpNeighbors('GhostDevice');
+    assert.strictEqual(outCdp, '% Device not found.');
+    const outLldp = formatCliLldpNeighbors('GhostDevice');
+    assert.strictEqual(outLldp, '% Device not found.');
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
