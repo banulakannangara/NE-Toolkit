@@ -1572,7 +1572,8 @@ body {
 
 .acl-binding-form,
 .acl-creation-form,
-.acl-rule-form {
+.acl-rule-form,
+.acl-resequence-form {
     background: rgba(0, 0, 0, 0.25);
     padding: 0.75rem;
     border-radius: 6px;
@@ -1600,6 +1601,12 @@ body {
     margin-bottom: 0.5rem;
     padding-bottom: 0.4rem;
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.router-acl-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
 }
 
 .router-acl-title-group {
@@ -1670,6 +1677,41 @@ body {
     color: #e2e8f0;
     font-family: var(--font-mono, monospace);
     font-size: 0.68rem;
+}
+
+.acl-badge--est {
+    background: rgba(59, 130, 246, 0.18);
+    color: #93c5fd;
+    border: 1px solid rgba(59, 130, 246, 0.4);
+}
+
+.acl-badge--icmp {
+    background: rgba(245, 158, 11, 0.18);
+    color: #fcd34d;
+    border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
+.acl-badge--log {
+    background: rgba(168, 85, 247, 0.18);
+    color: #d8b4fe;
+    border: 1px solid rgba(168, 85, 247, 0.4);
+}
+
+.acl-badge--log-input {
+    background: rgba(236, 72, 153, 0.18);
+    color: #f472b6;
+    border: 1px solid rgba(236, 72, 153, 0.4);
+}
+
+.acl-port-badge {
+    display: inline-block;
+    padding: 0.05rem 0.25rem;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.08);
+    color: #93c5fd;
+    font-size: 0.68rem;
+    font-family: var(--font-mono, monospace);
+    margin-left: 0.25rem;
 }
 
 /* ==========================================================================

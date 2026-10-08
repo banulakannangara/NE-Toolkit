@@ -2428,6 +2428,19 @@ function renderPropertiesPanel() {
             });
         });
 
+        panel.querySelectorAll('.acl-card-resequence-btn[data-acl-id], .acl-resequence-btn[data-acl-id]').forEach((btn) => {
+            btn.addEventListener('click', (event) => {
+                event.stopPropagation();
+                const aclId = btn.dataset.aclId;
+                if (!aclId) return;
+                const targetSelect = panel.querySelector('#aclResequenceTargetSelect');
+                if (targetSelect) {
+                    targetSelect.value = aclId;
+                }
+                resequenceRouterAclFromInspector(panel, selected, aclId);
+            });
+        });
+
         panel.querySelectorAll('.acl-rule-delete-btn[data-acl-id][data-sequence]').forEach((btn) => {
             btn.addEventListener('click', (event) => {
                 event.stopPropagation();
@@ -2446,52 +2459,43 @@ function renderPropertiesPanel() {
             });
         });
 
+        const aclTargetSelect = panel.querySelector('#aclRuleTargetSelect');
+        if (aclTargetSelect) {
+            aclTargetSelect.addEventListener('change', () => {
+                updateAclRuleFormVisibility(panel, selected);
+            });
+        }
+        const aclProtoSelect = panel.querySelector('#aclRuleProtocol');
+        if (aclProtoSelect) {
+            aclProtoSelect.addEventListener('change', () => {
+                updateAclRuleFormVisibility(panel, selected);
+            });
+        }
+        const aclSrcPortOp = panel.querySelector('#aclRuleSrcPortOp');
+        if (aclSrcPortOp) {
+            aclSrcPortOp.addEventListener('change', () => {
+                updateAclRuleFormVisibility(panel, selected);
+            });
+        }
+        const aclDstPortOp = panel.querySelector('#aclRuleDstPortOp');
+        if (aclDstPortOp) {
+            aclDstPortOp.addEventListener('change', () => {
+                updateAclRuleFormVisibility(panel, selected);
+            });
+        }
+        updateAclRuleFormVisibility(panel, selected);
+
         const addAclRuleBtn = panel.querySelector('#addAclRuleBtn');
         if (addAclRuleBtn) {
             addAclRuleBtn.addEventListener('click', () => {
-                const targetAclSelect = panel.querySelector('#aclRuleTargetSelect');
-                const seqInput = panel.querySelector('#aclRuleSequence');
-                const actionSelect = panel.querySelector('#aclRuleAction');
-                const protoSelect = panel.querySelector('#aclRuleProtocol');
-                const srcInput = panel.querySelector('#aclRuleSource');
-                const srcMaskInput = panel.querySelector('#aclRuleSourceMask');
-                const dstInput = panel.querySelector('#aclRuleDest');
-                const dstMaskInput = panel.querySelector('#aclRuleDestMask');
-                const feedbackEl = panel.querySelector('#aclRuleFeedback');
+                submitRouterAclRuleFromInspector(panel, selected);
+            });
+        }
 
-                const targetAclId = targetAclSelect ? targetAclSelect.value.trim() : '';
-                const rawSeq = seqInput ? seqInput.value.trim() : '';
-                const action = actionSelect ? actionSelect.value.trim() : 'permit';
-                const protocol = protoSelect ? protoSelect.value.trim() : 'ip';
-                const source = srcInput ? srcInput.value.trim() : 'any';
-                const sourceMask = srcMaskInput ? srcMaskInput.value.trim() : '';
-                const dest = dstInput ? dstInput.value.trim() : 'any';
-                const destMask = dstMaskInput ? dstMaskInput.value.trim() : '';
-
-                const ruleData = {
-                    action,
-                    protocol,
-                    sourceIp: source,
-                    sourceWildcard: sourceMask || undefined,
-                    destinationIp: dest,
-                    destinationWildcard: destMask || undefined
-                };
-                if (rawSeq !== '') {
-                    ruleData.sequence = parseInt(rawSeq, 10);
-                }
-
-                pushHistory();
-                const result = addRouterAclRule(selected.id, targetAclId, ruleData);
-                if (result.success) {
-                    updateStatus(`Rule ${result.rule.sequence} added to ACL ${targetAclId} on ${selected.name}.`);
-                    renderPropertiesPanel();
-                } else {
-                    networkState.history.pop();
-                    if (feedbackEl) {
-                        feedbackEl.textContent = `✗ ${result.reason}`;
-                        feedbackEl.className = 'property-feedback property-feedback--error';
-                    }
-                }
+        const resequenceAclBtn = panel.querySelector('#resequenceAclBtn');
+        if (resequenceAclBtn) {
+            resequenceAclBtn.addEventListener('click', () => {
+                resequenceRouterAclFromInspector(panel, selected);
             });
         }
 
@@ -3915,6 +3919,441 @@ function renderRouterStaticRouteFormSection(router) {
     `;
 }
 
+function updateAclRuleFormVisibility(container, router) {
+    const root = container || (typeof document !== 'undefined' ? document : null);
+    if (!root) return;
+    const findEl = (sel) => {
+        if (root.querySelector) {
+            return root.querySelector(sel);
+        }
+        if (typeof document !== 'undefined' && document.getElementById) {
+            return document.getElementById(sel.replace(/^#/, ''));
+        }
+        return null;
+    };
+
+    const targetAclSelect = findEl('#aclRuleTargetSelect');
+    const protoSelect = findEl('#aclRuleProtocol');
+    const srcPortOpSelect = findEl('#aclRuleSrcPortOp');
+    const dstPortOpSelect = findEl('#aclRuleDstPortOp');
+
+    const protoGroup = findEl('#aclRuleProtocolGroup');
+    const destGroup = findEl('#aclRuleDestGroup');
+    const destMaskGroup = findEl('#aclRuleDestMaskGroup');
+    const srcPortGroup = findEl('#aclRuleSrcPortGroup');
+    const srcPortInputGroup = findEl('#aclRuleSrcPortInputGroup');
+    const srcPortRangeEndGroup = findEl('#aclRuleSrcPortRangeEndGroup');
+    const dstPortGroup = findEl('#aclRuleDstPortGroup');
+    const dstPortInputGroup = findEl('#aclRuleDstPortInputGroup');
+    const dstPortRangeEndGroup = findEl('#aclRuleDstPortRangeEndGroup');
+    const establishedGroup = findEl('#aclRuleEstablishedGroup');
+    const icmpTypeGroup = findEl('#aclRuleIcmpTypeGroup');
+    const logGroup = findEl('#aclRuleLogGroup');
+
+    // 1. Determine if the selected target ACL is Extended or Standard
+    const targetAclId = targetAclSelect ? String(targetAclSelect.value || '').trim() : '';
+    let isExtended = true;
+    if (router && targetAclId) {
+        const acl = getRouterAcl(router.id, targetAclId);
+        if (acl) {
+            isExtended = acl.type === 'extended';
+        }
+    }
+
+    const setDisplay = (el, show) => {
+        if (!el || !el.style) return;
+        el.style.display = show ? '' : 'none';
+    };
+
+    // 2. If Standard ACL, hide all extended fields
+    if (!isExtended) {
+        setDisplay(protoGroup, false);
+        setDisplay(destGroup, false);
+        setDisplay(destMaskGroup, false);
+        setDisplay(srcPortGroup, false);
+        setDisplay(srcPortInputGroup, false);
+        setDisplay(srcPortRangeEndGroup, false);
+        setDisplay(dstPortGroup, false);
+        setDisplay(dstPortInputGroup, false);
+        setDisplay(dstPortRangeEndGroup, false);
+        setDisplay(establishedGroup, false);
+        setDisplay(icmpTypeGroup, false);
+        setDisplay(logGroup, false);
+        return;
+    }
+
+    // 3. For Extended ACL: show base extended fields
+    setDisplay(protoGroup, true);
+    setDisplay(destGroup, true);
+    setDisplay(destMaskGroup, true);
+    setDisplay(logGroup, true);
+
+    const protocol = protoSelect ? String(protoSelect.value || 'ip').toLowerCase().trim() : 'ip';
+
+    if (protocol === 'tcp' || protocol === 'udp') {
+        setDisplay(srcPortGroup, true);
+        const srcOp = srcPortOpSelect ? srcPortOpSelect.value : '';
+        setDisplay(srcPortInputGroup, Boolean(srcOp));
+        setDisplay(srcPortRangeEndGroup, srcOp === 'range');
+
+        setDisplay(dstPortGroup, true);
+        const dstOp = dstPortOpSelect ? dstPortOpSelect.value : '';
+        setDisplay(dstPortInputGroup, Boolean(dstOp));
+        setDisplay(dstPortRangeEndGroup, dstOp === 'range');
+
+        setDisplay(establishedGroup, protocol === 'tcp');
+        setDisplay(icmpTypeGroup, false);
+    } else if (protocol === 'icmp') {
+        setDisplay(srcPortGroup, false);
+        setDisplay(srcPortInputGroup, false);
+        setDisplay(srcPortRangeEndGroup, false);
+        setDisplay(dstPortGroup, false);
+        setDisplay(dstPortInputGroup, false);
+        setDisplay(dstPortRangeEndGroup, false);
+        setDisplay(establishedGroup, false);
+        setDisplay(icmpTypeGroup, true);
+    } else { // 'ip'
+        setDisplay(srcPortGroup, false);
+        setDisplay(srcPortInputGroup, false);
+        setDisplay(srcPortRangeEndGroup, false);
+        setDisplay(dstPortGroup, false);
+        setDisplay(dstPortInputGroup, false);
+        setDisplay(dstPortRangeEndGroup, false);
+        setDisplay(establishedGroup, false);
+        setDisplay(icmpTypeGroup, false);
+    }
+}
+
+function submitRouterAclRuleFromInspector(panel, selected) {
+    const targetPanel = panel || (typeof document !== 'undefined' ? document.getElementById('propertiesPanel') : null);
+    const selectedDev = (selected && typeof selected === 'object' && selected.id)
+        ? selected
+        : (typeof getDeviceById === 'function' && typeof networkState !== 'undefined' ? getDeviceById(networkState.selectedDeviceId) : null);
+
+    if (!targetPanel || !selectedDev) {
+        return { success: false, reason: 'No router or panel selected.' };
+    }
+
+    const findEl = (sel) => {
+        if (targetPanel && typeof targetPanel.querySelector === 'function') {
+            const found = targetPanel.querySelector(sel);
+            if (found) return found;
+        }
+        if (typeof document !== 'undefined' && document.getElementById) {
+            return document.getElementById(sel.replace(/^#/, ''));
+        }
+        return null;
+    };
+
+    const feedbackEl = findEl('#aclRuleFeedback');
+    const showFeedback = (msg, isError = true) => {
+        if (feedbackEl) {
+            feedbackEl.textContent = `${isError ? '✗' : '✓'} ${msg}`;
+            feedbackEl.className = isError
+                ? 'property-feedback property-feedback--error'
+                : 'property-feedback property-feedback--success';
+        }
+    };
+
+    const targetAclSelect = findEl('#aclRuleTargetSelect');
+    const targetAclId = targetAclSelect ? String(targetAclSelect.value || '').trim() : '';
+    if (!targetAclId) {
+        showFeedback('Please select a target ACL.');
+        return { success: false, reason: 'Please select a target ACL.' };
+    }
+
+    const targetAcl = getRouterAcl(selectedDev.id, targetAclId);
+    if (!targetAcl) {
+        showFeedback(`ACL ${targetAclId} not found.`);
+        return { success: false, reason: `ACL ${targetAclId} not found.` };
+    }
+
+    const isExtended = targetAcl.type === 'extended';
+    const seqInput = findEl('#aclRuleSequence');
+    const rawSeq = seqInput ? String(seqInput.value || '').trim() : '';
+    let sequence;
+    if (rawSeq !== '') {
+        const parsedSeq = parseInt(rawSeq, 10);
+        if (!isNaN(parsedSeq)) {
+            sequence = parsedSeq;
+        }
+    }
+
+    const actionSelect = findEl('#aclRuleAction');
+    const rawAction = actionSelect ? String(actionSelect.value || 'permit').toLowerCase().trim() : 'permit';
+    const action = (rawAction === 'deny') ? 'deny' : 'permit';
+
+    const srcInput = findEl('#aclRuleSource');
+    const srcMaskInput = findEl('#aclRuleSourceMask');
+    const source = srcInput ? String(srcInput.value || '').trim() || 'any' : 'any';
+    const sourceMask = srcMaskInput ? String(srcMaskInput.value || '').trim() : '';
+
+    if (!isExtended) {
+        const ruleData = {
+            action,
+            protocol: 'ip',
+            sourceIp: source,
+            sourceWildcard: sourceMask || undefined
+        };
+        if (sequence !== undefined) {
+            ruleData.sequence = sequence;
+        }
+
+        pushHistory();
+        const result = addRouterAclRule(selectedDev.id, targetAclId, ruleData);
+        if (result.success) {
+            updateStatus(`Rule ${result.rule.sequence} added to ACL ${targetAclId} on ${selectedDev.name}.`);
+            renderPropertiesPanel();
+            return result;
+        } else {
+            networkState.history.pop();
+            showFeedback(result.reason);
+            return result;
+        }
+    }
+
+    // Extended ACL rule collection & validation
+    const protoSelect = findEl('#aclRuleProtocol');
+    const rawProto = protoSelect ? String(protoSelect.value || 'ip').toLowerCase().trim() : 'ip';
+    const validProtos = ['ip', 'tcp', 'udp', 'icmp'];
+    if (!validProtos.includes(rawProto)) {
+        showFeedback(`Invalid protocol "${rawProto}". Expected "ip", "tcp", "udp", or "icmp".`);
+        return { success: false, reason: `Invalid protocol "${rawProto}".` };
+    }
+    const protocol = rawProto;
+
+    const dstInput = findEl('#aclRuleDest');
+    const dstMaskInput = findEl('#aclRuleDestMask');
+    const dest = dstInput ? String(dstInput.value || '').trim() || 'any' : 'any';
+    const destMask = dstMaskInput ? String(dstMaskInput.value || '').trim() : '';
+
+    let srcPortOp = null;
+    let srcPort = null;
+    let srcPortRange = null;
+
+    let dstPortOp = null;
+    let dstPort = null;
+    let dstPortRange = null;
+
+    let established = false;
+    let icmpType = null;
+
+    const parsePortControl = (opEl, pEl, pRangeEndEl, fieldName) => {
+        const op = opEl ? String(opEl.value || '').toLowerCase().trim() : '';
+        if (!op) {
+            return { valid: true, op: null, port: null, range: null };
+        }
+        const singleOps = ['eq', 'neq', 'gt', 'lt'];
+        if (singleOps.includes(op)) {
+            const rawP = pEl ? String(pEl.value || '').trim() : '';
+            if (!rawP) {
+                return { valid: false, error: `${fieldName} port is required when operator "${op}" is selected.` };
+            }
+            const resolved = resolvePortNumber(rawP);
+            if (resolved === null || !isValidPort(resolved)) {
+                return { valid: false, error: `Invalid ${fieldName.toLowerCase()} port: "${rawP}". Must be a valid port alias or integer (1-65535).` };
+            }
+            return { valid: true, op, port: resolved, range: null };
+        }
+        if (op === 'range') {
+            const rawStart = pEl ? String(pEl.value || '').trim() : '';
+            const rawEnd = pRangeEndEl ? String(pRangeEndEl.value || '').trim() : '';
+            if (!rawStart || !rawEnd) {
+                return { valid: false, error: `Both start and end ports are required for ${fieldName.toLowerCase()} port range.` };
+            }
+            const rMin = resolvePortNumber(rawStart);
+            const rMax = resolvePortNumber(rawEnd);
+            if (rMin === null || !isValidPort(rMin)) {
+                return { valid: false, error: `Invalid ${fieldName.toLowerCase()} port range start: "${rawStart}".` };
+            }
+            if (rMax === null || !isValidPort(rMax)) {
+                return { valid: false, error: `Invalid ${fieldName.toLowerCase()} port range end: "${rawEnd}".` };
+            }
+            if (rMin > rMax) {
+                return { valid: false, error: `Invalid ${fieldName.toLowerCase()} port range: start (${rMin}) cannot be greater than end (${rMax}).` };
+            }
+            return { valid: true, op: 'range', port: `${rMin}-${rMax}`, range: [rMin, rMax] };
+        }
+        return { valid: false, error: `Invalid ${fieldName.toLowerCase()} port operator "${op}".` };
+    };
+
+    if (protocol === 'tcp' || protocol === 'udp') {
+        const srcOpSelect = findEl('#aclRuleSrcPortOp');
+        const srcPortInput = findEl('#aclRuleSrcPort');
+        const srcPortRangeEndInput = findEl('#aclRuleSrcPortRangeEnd');
+        const srcRes = parsePortControl(srcOpSelect, srcPortInput, srcPortRangeEndInput, 'Source');
+        if (!srcRes.valid) {
+            showFeedback(srcRes.error);
+            return { success: false, reason: srcRes.error };
+        }
+        srcPortOp = srcRes.op;
+        srcPort = srcRes.port;
+        srcPortRange = srcRes.range;
+
+        const dstOpSelect = findEl('#aclRuleDstPortOp');
+        const dstPortInput = findEl('#aclRuleDstPort');
+        const dstPortRangeEndInput = findEl('#aclRuleDstPortRangeEnd');
+        const dstRes = parsePortControl(dstOpSelect, dstPortInput, dstPortRangeEndInput, 'Destination');
+        if (!dstRes.valid) {
+            showFeedback(dstRes.error);
+            return { success: false, reason: dstRes.error };
+        }
+        dstPortOp = dstRes.op;
+        dstPort = dstRes.port;
+        dstPortRange = dstRes.range;
+
+        if (protocol === 'tcp') {
+            const establishedCb = findEl('#aclRuleEstablished');
+            established = Boolean(establishedCb && establishedCb.checked);
+        }
+    } else if (protocol === 'icmp') {
+        const icmpTypeSelect = findEl('#aclRuleIcmpType');
+        const rawIcmp = icmpTypeSelect ? String(icmpTypeSelect.value || '').trim() : '';
+        icmpType = rawIcmp || null;
+    }
+
+    const logSelect = findEl('#aclRuleLog');
+    const rawLog = logSelect ? String(logSelect.value || '').toLowerCase().trim() : 'none';
+    let logMode = null;
+    if (rawLog === 'log') {
+        logMode = 'log';
+    } else if (rawLog === 'log-input') {
+        logMode = 'log-input';
+    }
+
+    const ruleData = {
+        action,
+        protocol,
+        sourceIp: source,
+        sourceWildcard: sourceMask || undefined,
+        destinationIp: dest,
+        destinationWildcard: destMask || undefined,
+        srcPortOp,
+        srcPort,
+        srcPortRange,
+        dstPortOp,
+        dstPort,
+        dstPortRange,
+        established,
+        icmpType,
+        log: logMode
+    };
+    if (sequence !== undefined) {
+        ruleData.sequence = sequence;
+    }
+
+    pushHistory();
+    const result = addRouterAclRule(selectedDev.id, targetAclId, ruleData);
+    if (result.success) {
+        updateStatus(`Rule ${result.rule.sequence} added to ACL ${targetAclId} on ${selectedDev.name}.`);
+        renderPropertiesPanel();
+        return result;
+    } else {
+        networkState.history.pop();
+        showFeedback(result.reason);
+        return result;
+    }
+}
+
+function resequenceRouterAclFromInspector(panel, selected, targetAclIdOverride) {
+    const targetPanel = panel || (typeof document !== 'undefined' ? document.getElementById('propertiesPanel') : null);
+    const selectedDev = (selected && typeof selected === 'object' && selected.id)
+        ? selected
+        : (typeof getDeviceById === 'function' && typeof networkState !== 'undefined' ? getDeviceById(networkState.selectedDeviceId) : null);
+
+    if (!targetPanel || !selectedDev) {
+        return { success: false, reason: 'No router or panel selected.' };
+    }
+
+    const findEl = (sel) => {
+        if (targetPanel && typeof targetPanel.querySelector === 'function') {
+            const found = targetPanel.querySelector(sel);
+            if (found) return found;
+        }
+        if (typeof document !== 'undefined' && document.getElementById) {
+            return document.getElementById(sel.replace(/^#/, ''));
+        }
+        return null;
+    };
+
+    const feedbackEl = findEl('#aclResequenceFeedback');
+    const showFeedback = (msg, isError = true) => {
+        if (feedbackEl) {
+            feedbackEl.textContent = `${isError ? '✗' : '✓'} ${msg}`;
+            feedbackEl.className = isError
+                ? 'property-feedback property-feedback--error'
+                : 'property-feedback property-feedback--success';
+        }
+    };
+
+    const targetSelect = findEl('#aclResequenceTargetSelect') || findEl('#aclRuleTargetSelect');
+    const aclId = targetAclIdOverride || (targetSelect ? String(targetSelect.value || '').trim() : '');
+    if (!aclId) {
+        showFeedback('Please select an ACL to resequence.');
+        return { success: false, reason: 'Please select an ACL to resequence.' };
+    }
+
+    const startInput = findEl('#aclResequenceStart');
+    const stepInput = findEl('#aclResequenceStep');
+    const rawStart = startInput ? String(startInput.value || '').trim() : '10';
+    const rawStep = stepInput ? String(stepInput.value || '').trim() : '10';
+
+    // Validate start sequence
+    if (!rawStart || !/^\d+$/.test(rawStart)) {
+        showFeedback(`Invalid starting sequence number: "${rawStart}". Must be a positive integer.`);
+        return { success: false, reason: `Invalid starting sequence number: "${rawStart}". Must be a positive integer.` };
+    }
+    const startSeq = Number(rawStart);
+    if (!Number.isInteger(startSeq) || startSeq < 1 || startSeq > 2147483647) {
+        showFeedback('Starting sequence number must be between 1 and 2147483647.');
+        return { success: false, reason: 'Starting sequence number must be between 1 and 2147483647.' };
+    }
+
+    // Validate step increment
+    if (!rawStep || !/^\d+$/.test(rawStep)) {
+        showFeedback(`Invalid sequence increment: "${rawStep}". Must be a positive integer.`);
+        return { success: false, reason: `Invalid sequence increment: "${rawStep}". Must be a positive integer.` };
+    }
+    const step = Number(rawStep);
+    if (!Number.isInteger(step) || step < 1 || step > 2147483647) {
+        showFeedback('Sequence increment must be between 1 and 2147483647.');
+        return { success: false, reason: 'Sequence increment must be between 1 and 2147483647.' };
+    }
+
+    // Call authoritative resequenceRouterAcl helper
+    pushHistory();
+    const result = resequenceRouterAcl(selectedDev.id, aclId, startSeq, step);
+    if (result.success) {
+        const aclName = result.acl?.name || aclId;
+        updateStatus(`ACL ${aclName} on ${selectedDev.name} resequenced (start: ${startSeq}, step: ${step}).`);
+        renderPropertiesPanel();
+        return result;
+    } else {
+        networkState.history.pop();
+        showFeedback(result.reason);
+        return result;
+    }
+}
+
+function formatAclPortSpec(op, port, range) {
+    if (!op) return '';
+    const normOp = String(op).toLowerCase().trim();
+    if (normOp === 'range') {
+        if (Array.isArray(range) && range.length >= 2) {
+            return `range ${range[0]} ${range[1]}`;
+        }
+        if (port) {
+            const parts = String(port).split(/[-_\s]+/);
+            if (parts.length >= 2) {
+                return `range ${parts[0]} ${parts[1]}`;
+            }
+            return `range ${port}`;
+        }
+        return 'range';
+    }
+    return `${normOp} ${port ?? ''}`.trim();
+}
+
 function renderRouterAclSection(router) {
     const acls = getRouterAcls(router.id);
     const aclList = Object.values(acls);
@@ -3922,6 +4361,8 @@ function renderRouterAclSection(router) {
     const interfaceAcls = runtime.interfaceAcls || {};
 
     const ifaces = ['Gig0/0', 'Gig0/1'];
+    const firstAcl = aclList[0];
+    const isFirstExtended = Boolean(firstAcl && firstAcl.type === 'extended');
 
     // 1. Interface Bindings Summary
     const bindingRows = ifaces.map((ifName) => {
@@ -3965,6 +4406,15 @@ function renderRouterAclSection(router) {
                     ? '<span class="acl-badge acl-badge--permit">PERMIT</span>'
                     : '<span class="acl-badge acl-badge--deny">DENY</span>';
 
+                let logBadge = '';
+                if (acl.type === 'extended' && rule.log) {
+                    if (rule.log === 'log') {
+                        logBadge = '<span class="acl-badge acl-badge--log" data-log="log">LOG</span>';
+                    } else if (rule.log === 'log-input') {
+                        logBadge = '<span class="acl-badge acl-badge--log-input" data-log="log-input">LOG-IN</span>';
+                    }
+                }
+
                 const srcText = rule.source?.isAny
                     ? 'any'
                     : rule.source?.isHost
@@ -3973,26 +4423,52 @@ function renderRouterAclSection(router) {
                             ? `${rule.source.ip} ${rule.source.wildcard}`
                             : 'any';
 
-                let dstText = '-';
+                let srcPortStr = '';
+                if (acl.type === 'extended' && (rule.protocol === 'tcp' || rule.protocol === 'udp') && rule.srcPortOp) {
+                    srcPortStr = formatAclPortSpec(rule.srcPortOp, rule.srcPort, rule.srcPortRange);
+                }
+                const srcCellContent = srcPortStr
+                    ? `<code>${escapeHtml(srcText)}</code> <span class="acl-port-badge">${escapeHtml(srcPortStr)}</span>`
+                    : `<code>${escapeHtml(srcText)}</code>`;
+
+                let dstCellContent = '<code>-</code>';
                 if (acl.type === 'extended') {
-                    dstText = rule.destination?.isAny
+                    const dstText = rule.destination?.isAny
                         ? 'any'
                         : rule.destination?.isHost
                             ? `host ${rule.destination.ip}`
                             : rule.destination
                                 ? `${rule.destination.ip} ${rule.destination.wildcard}`
                                 : 'any';
+
+                    let dstPortStr = '';
+                    if ((rule.protocol === 'tcp' || rule.protocol === 'udp') && rule.dstPortOp) {
+                        dstPortStr = formatAclPortSpec(rule.dstPortOp, rule.dstPort, rule.dstPortRange);
+                    }
+                    dstCellContent = dstPortStr
+                        ? `<code>${escapeHtml(dstText)}</code> <span class="acl-port-badge">${escapeHtml(dstPortStr)}</span>`
+                        : `<code>${escapeHtml(dstText)}</code>`;
                 }
 
-                const protoText = acl.type === 'extended' ? String(rule.protocol || 'ip').toUpperCase() : 'IP';
+                let protoCellHtml = '';
+                if (acl.type === 'extended') {
+                    const protoUpper = String(rule.protocol || 'ip').toUpperCase();
+                    let protoExtras = '';
+                    if (rule.protocol === 'tcp' && rule.established) {
+                        protoExtras += ' <span class="acl-badge acl-badge--est" data-established="true">EST</span>';
+                    } else if (rule.protocol === 'icmp' && rule.icmpType) {
+                        protoExtras += ` <span class="acl-badge acl-badge--icmp" data-icmp-type="${escapeHtml(rule.icmpType)}">${escapeHtml(rule.icmpType)}</span>`;
+                    }
+                    protoCellHtml = `<td><code>${escapeHtml(protoUpper)}</code>${protoExtras}</td>`;
+                }
 
                 return `
                     <tr>
                         <td><strong>${escapeHtml(String(rule.sequence))}</strong></td>
-                        <td>${actionBadge}</td>
-                        ${acl.type === 'extended' ? `<td><code>${escapeHtml(protoText)}</code></td>` : ''}
-                        <td><code>${escapeHtml(srcText)}</code></td>
-                        ${acl.type === 'extended' ? `<td><code>${escapeHtml(dstText)}</code></td>` : ''}
+                        <td>${actionBadge}${logBadge ? ` ${logBadge}` : ''}</td>
+                        ${protoCellHtml}
+                        <td>${srcCellContent}</td>
+                        ${acl.type === 'extended' ? `<td>${dstCellContent}</td>` : ''}
                         <td><span class="acl-hits-badge">${escapeHtml(String(rule.hits || 0))}</span></td>
                         <td class="table-action-cell">
                             <button class="acl-rule-delete-btn table-action-btn" data-acl-id="${escapeHtml(acl.id)}" data-sequence="${escapeHtml(String(rule.sequence))}" title="Delete Rule">✕</button>
@@ -4028,7 +4504,10 @@ function renderRouterAclSection(router) {
                             <strong class="router-acl-title">ACL ${escapeHtml(acl.name)}</strong>
                             <span class="router-acl-count">(${acl.rules.length} rule${acl.rules.length === 1 ? '' : 's'})</span>
                         </div>
-                        <button class="acl-delete-btn table-action-btn" data-acl-id="${escapeHtml(acl.id)}" title="Delete ACL ${escapeHtml(acl.name)}">Delete ACL</button>
+                        <div class="router-acl-actions">
+                            <button class="acl-card-resequence-btn table-action-btn acl-resequence-btn" data-acl-id="${escapeHtml(acl.id)}" title="Resequence ACL ${escapeHtml(acl.name)}">Resequence</button>
+                            <button class="acl-delete-btn table-action-btn" data-acl-id="${escapeHtml(acl.id)}" title="Delete ACL ${escapeHtml(acl.name)}">Delete ACL</button>
+                        </div>
                     </div>
                     ${rulesTable}
                 </div>
@@ -4139,10 +4618,12 @@ function renderRouterAclSection(router) {
                                 <option value="deny">DENY</option>
                             </select>
                         </div>
-                        <div class="property-field" id="aclRuleProtocolGroup">
+                        <div class="property-field" id="aclRuleProtocolGroup" ${!isFirstExtended ? 'style="display: none;"' : ''}>
                             <label for="aclRuleProtocol">Protocol</label>
                             <select id="aclRuleProtocol">
                                 <option value="ip">IP (All IP Traffic)</option>
+                                <option value="tcp">TCP</option>
+                                <option value="udp">UDP</option>
                                 <option value="icmp">ICMP (Ping / Echo)</option>
                             </select>
                         </div>
@@ -4154,17 +4635,105 @@ function renderRouterAclSection(router) {
                             <label for="aclRuleSourceMask">Source Wildcard / Subnet Mask</label>
                             <input id="aclRuleSourceMask" type="text" placeholder="e.g. 0.0.0.255 or 255.255.255.0 (leave blank for host/any)">
                         </div>
-                        <div class="property-field" id="aclRuleDestGroup">
+                        <div class="property-field" id="aclRuleSrcPortGroup" style="display: none;">
+                            <label for="aclRuleSrcPortOp">Source Port Operator</label>
+                            <select id="aclRuleSrcPortOp">
+                                <option value="">None (Any Port)</option>
+                                <option value="eq">eq (Equal)</option>
+                                <option value="neq">neq (Not Equal)</option>
+                                <option value="gt">gt (Greater Than)</option>
+                                <option value="lt">lt (Less Than)</option>
+                                <option value="range">range (Port Range)</option>
+                            </select>
+                        </div>
+                        <div class="property-field" id="aclRuleSrcPortInputGroup" style="display: none;">
+                            <label for="aclRuleSrcPort">Source Port / Range Start</label>
+                            <input id="aclRuleSrcPort" type="text" placeholder="e.g. 80, http, or 1024">
+                        </div>
+                        <div class="property-field" id="aclRuleSrcPortRangeEndGroup" style="display: none;">
+                            <label for="aclRuleSrcPortRangeEnd">Source Port Range End</label>
+                            <input id="aclRuleSrcPortRangeEnd" type="text" placeholder="e.g. 2048">
+                        </div>
+                        <div class="property-field" id="aclRuleDestGroup" ${!isFirstExtended ? 'style="display: none;"' : ''}>
                             <label for="aclRuleDest">Destination IP / Network (Extended)</label>
                             <input id="aclRuleDest" type="text" placeholder="e.g. 10.0.0.0 or any">
                         </div>
-                        <div class="property-field" id="aclRuleDestMaskGroup">
+                        <div class="property-field" id="aclRuleDestMaskGroup" ${!isFirstExtended ? 'style="display: none;"' : ''}>
                             <label for="aclRuleDestMask">Destination Wildcard / Subnet Mask (Extended)</label>
                             <input id="aclRuleDestMask" type="text" placeholder="e.g. 0.0.0.255 or 255.255.255.0">
+                        </div>
+                        <div class="property-field" id="aclRuleDstPortGroup" style="display: none;">
+                            <label for="aclRuleDstPortOp">Destination Port Operator</label>
+                            <select id="aclRuleDstPortOp">
+                                <option value="">None (Any Port)</option>
+                                <option value="eq">eq (Equal)</option>
+                                <option value="neq">neq (Not Equal)</option>
+                                <option value="gt">gt (Greater Than)</option>
+                                <option value="lt">lt (Less Than)</option>
+                                <option value="range">range (Port Range)</option>
+                            </select>
+                        </div>
+                        <div class="property-field" id="aclRuleDstPortInputGroup" style="display: none;">
+                            <label for="aclRuleDstPort">Destination Port / Range Start</label>
+                            <input id="aclRuleDstPort" type="text" placeholder="e.g. 80, http, or 443">
+                        </div>
+                        <div class="property-field" id="aclRuleDstPortRangeEndGroup" style="display: none;">
+                            <label for="aclRuleDstPortRangeEnd">Destination Port Range End</label>
+                            <input id="aclRuleDstPortRangeEnd" type="text" placeholder="e.g. 8080">
+                        </div>
+                        <div class="property-field" id="aclRuleEstablishedGroup" style="display: none;">
+                            <label for="aclRuleEstablished">TCP Established</label>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <input type="checkbox" id="aclRuleEstablished" style="width: auto; cursor: pointer;">
+                                <label for="aclRuleEstablished" style="margin: 0; cursor: pointer; font-size: 0.8rem; color: var(--lab-text);">Match established connections (ACK/RST)</label>
+                            </div>
+                        </div>
+                        <div class="property-field" id="aclRuleIcmpTypeGroup" style="display: none;">
+                            <label for="aclRuleIcmpType">ICMP Message Type</label>
+                            <select id="aclRuleIcmpType">
+                                <option value="">All ICMP Messages</option>
+                                <option value="echo">echo (8 - Echo Request)</option>
+                                <option value="echo-reply">echo-reply (0 - Echo Reply)</option>
+                                <option value="unreachable">unreachable (3 - Destination Unreachable)</option>
+                                <option value="time-exceeded">time-exceeded (11 - Time Exceeded)</option>
+                            </select>
+                        </div>
+                        <div class="property-field" id="aclRuleLogGroup" ${!isFirstExtended ? 'style="display: none;"' : ''}>
+                            <label for="aclRuleLog">Logging</label>
+                            <select id="aclRuleLog">
+                                <option value="none">None</option>
+                                <option value="log">log</option>
+                                <option value="log-input">log-input</option>
+                            </select>
                         </div>
                         <div class="property-feedback" id="aclRuleFeedback"></div>
                         <div class="property-actions">
                             <button id="addAclRuleBtn" class="toolbar-button" type="button">Add Rule</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Resequence ACL Rules Form -->
+                <div class="acl-section-block">
+                    <div class="acl-resequence-form">
+                        <h5 class="acl-section-subtitle">Resequence ACL Rules</h5>
+                        <div class="property-field">
+                            <label for="aclResequenceTargetSelect">Target ACL</label>
+                            <select id="aclResequenceTargetSelect">
+                                ${aclOptions}
+                            </select>
+                        </div>
+                        <div class="property-field">
+                            <label for="aclResequenceStart">Start Sequence Number</label>
+                            <input id="aclResequenceStart" type="number" min="1" max="2147483647" value="10" placeholder="10">
+                        </div>
+                        <div class="property-field">
+                            <label for="aclResequenceStep">Sequence Increment (Step)</label>
+                            <input id="aclResequenceStep" type="number" min="1" max="2147483647" value="10" placeholder="10">
+                        </div>
+                        <div class="property-feedback" id="aclResequenceFeedback"></div>
+                        <div class="property-actions">
+                            <button id="resequenceAclBtn" class="toolbar-button acl-resequence-btn" type="button">Resequence ACL</button>
                         </div>
                     </div>
                 </div>
@@ -13912,9 +14481,16 @@ function formatCliRouterArpTable(router) {
     return lines.join('\n');
 }
 
-function formatCliRouterAcls(router, targetAclId = null) {
+function formatCliRouterAcls(router, targetAclId = null, filterType = null) {
     const acls = getRouterAcls(router.id);
     let aclList = Object.values(acls || {});
+
+    if (filterType) {
+        const normFilter = String(filterType).toLowerCase().trim();
+        if (normFilter === 'standard' || normFilter === 'extended') {
+            aclList = aclList.filter(a => a.type === normFilter);
+        }
+    }
 
     if (targetAclId) {
         const key = String(targetAclId).trim();
@@ -13922,7 +14498,13 @@ function formatCliRouterAcls(router, targetAclId = null) {
     }
 
     if (!aclList || aclList.length === 0) {
-        return targetAclId ? `% Access list ${targetAclId} not found.` : 'No access lists configured.';
+        if (targetAclId) {
+            return `% Access list ${targetAclId} not found.`;
+        }
+        if (filterType) {
+            return '';
+        }
+        return 'No access lists configured.';
     }
 
     const lines = [];
@@ -21536,18 +22118,25 @@ function executeCliCommand(deviceId, rawInput) {
                 };
             }
             let targetAclId = null;
+            let typeFilter = null;
             if (sub1 === 'ip') {
                 if (tokens[3] === 'standard' || tokens[3] === 'extended') {
+                    typeFilter = tokens[3];
                     targetAclId = tokens[4] || null;
                 } else {
                     targetAclId = tokens[3] || null;
                 }
             } else {
-                targetAclId = tokens[2] || null;
+                if (tokens[2] === 'standard' || tokens[2] === 'extended') {
+                    typeFilter = tokens[2];
+                    targetAclId = tokens[3] || null;
+                } else {
+                    targetAclId = tokens[2] || null;
+                }
             }
             return {
                 success: true,
-                output: formatCliRouterAcls(dev, targetAclId),
+                output: formatCliRouterAcls(dev, targetAclId, typeFilter),
                 clear: false,
                 status: 'success',
                 command,

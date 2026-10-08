@@ -113,6 +113,10 @@ class MockElement {
         handlers.forEach(h => h(event));
     }
 
+    click() {
+        this.dispatchEvent({ type: 'click' });
+    }
+
     querySelector(selector) {
         if (selector === '#applyDeviceConfig') {
             const el = new MockElement('button');
@@ -190,6 +194,7 @@ const vm = require('vm');
 const scriptCode = fs.readFileSync(path.join(__dirname, '../js/network-lab.js'), 'utf8');
 
 const sandbox = {
+    MockElement,
     window: global.window,
     document: global.document,
     ResizeObserver: global.ResizeObserver,
@@ -37358,6 +37363,1602 @@ runTest('1527. CLI execution from EXEC mode rejected', () => {
 runTest('1528. Total test count verification check (V5.16 Phase 2B Sub-phase 6 baseline verification)', () => {
     assert.strictEqual(testsPassed, 1527, 'Total tests passed should be exactly 1527 prior to this check');
     assert.strictEqual(testsFailed, 0, 'Zero tests should have failed');
+});
+
+// 1529. extended filter excludes standard ACLs
+runTest('1529. extended filter excludes standard ACLs', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 10 permit host 192.168.1.10');
+    executeCliCommand(r0, 'ip access-list standard STD_NET');
+    executeCliCommand(r0, 'permit 172.16.0.0 0.0.255.255');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'access-list 101 permit tcp any any eq 80');
+    executeCliCommand(r0, 'ip access-list extended EXT_WEB');
+    executeCliCommand(r0, 'permit tcp any any eq 443');
+    executeCliCommand(r0, 'exit');
+
+    const res = executeCliCommand(r0, 'show ip access-list extended');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Extended IP access list 101'), 'Must include numbered extended ACL 101');
+    assert.ok(res.output.includes('Extended IP access list EXT_WEB'), 'Must include named extended ACL EXT_WEB');
+    assert.ok(res.output.includes('permit tcp any any eq 80'), 'Must include rule from 101');
+    assert.ok(res.output.includes('permit tcp any any eq 443'), 'Must include rule from EXT_WEB');
+    assert.ok(!res.output.includes('Standard IP access list 10'), 'Must exclude numbered standard ACL 10');
+    assert.ok(!res.output.includes('Standard IP access list STD_NET'), 'Must exclude named standard ACL STD_NET');
+    assert.ok(!res.output.includes('192.168.1.10'), 'Must not include standard ACL rule content');
+});
+
+// 1530. standard filter excludes extended ACLs
+runTest('1530. standard filter excludes extended ACLs', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 10 permit host 192.168.1.10');
+    executeCliCommand(r0, 'ip access-list standard STD_NET');
+    executeCliCommand(r0, 'permit 172.16.0.0 0.0.255.255');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'access-list 101 permit tcp any any eq 80');
+    executeCliCommand(r0, 'ip access-list extended EXT_WEB');
+    executeCliCommand(r0, 'permit tcp any any eq 443');
+    executeCliCommand(r0, 'exit');
+
+    const res = executeCliCommand(r0, 'show ip access-list standard');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Standard IP access list 10'), 'Must include numbered standard ACL 10');
+    assert.ok(res.output.includes('Standard IP access list STD_NET'), 'Must include named standard ACL STD_NET');
+    assert.ok(res.output.includes('192.168.1.10'), 'Must include rule from 10');
+    assert.ok(res.output.includes('172.16.0.0 0.0.255.255'), 'Must include rule from STD_NET');
+    assert.ok(!res.output.includes('Extended IP access list 101'), 'Must exclude numbered extended ACL 101');
+    assert.ok(!res.output.includes('Extended IP access list EXT_WEB'), 'Must exclude named extended ACL EXT_WEB');
+    assert.ok(!res.output.includes('eq 80'), 'Must not include extended ACL rule content');
+    assert.ok(!res.output.includes('eq 443'), 'Must not include extended ACL rule content');
+});
+
+// 1531. targeted extended ACL output
+runTest('1531. targeted extended ACL output', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 10 permit host 192.168.1.10');
+    executeCliCommand(r0, 'access-list 101 permit tcp any any eq 80');
+    executeCliCommand(r0, 'access-list 102 permit udp any any eq 53');
+    executeCliCommand(r0, 'ip access-list extended EXT_API');
+    executeCliCommand(r0, 'permit tcp any any eq 8080');
+    executeCliCommand(r0, 'exit');
+
+    // Targeted by numbered ID via show ip access-list <id>
+    const res101 = executeCliCommand(r0, 'show ip access-list 101');
+    assert.strictEqual(res101.success, true);
+    assert.ok(res101.output.includes('Extended IP access list 101'));
+    assert.ok(res101.output.includes('permit tcp any any eq 80'));
+    assert.ok(!res101.output.includes('Extended IP access list 102'));
+    assert.ok(!res101.output.includes('Extended IP access list EXT_API'));
+    assert.ok(!res101.output.includes('Standard IP access list 10'));
+
+    // Targeted by name via show ip access-list <name>
+    const resNamed = executeCliCommand(r0, 'show ip access-list EXT_API');
+    assert.strictEqual(resNamed.success, true);
+    assert.ok(resNamed.output.includes('Extended IP access list EXT_API'));
+    assert.ok(resNamed.output.includes('permit tcp any any eq 8080'));
+    assert.ok(!resNamed.output.includes('Extended IP access list 101'));
+
+    // Targeted with explicit extended keyword: show ip access-list extended 102
+    const resExt102 = executeCliCommand(r0, 'show ip access-list extended 102');
+    assert.strictEqual(resExt102.success, true);
+    assert.ok(resExt102.output.includes('Extended IP access list 102'));
+    assert.ok(resExt102.output.includes('permit udp any any eq 53'));
+    assert.ok(!resExt102.output.includes('Extended IP access list 101'));
+});
+
+// 1532. targeted standard ACL output
+runTest('1532. targeted standard ACL output', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 10 permit host 192.168.1.10');
+    executeCliCommand(r0, 'access-list 20 permit host 192.168.1.20');
+    executeCliCommand(r0, 'ip access-list standard STD_ADMIN');
+    executeCliCommand(r0, 'permit host 10.10.10.1');
+    executeCliCommand(r0, 'exit');
+    executeCliCommand(r0, 'access-list 101 permit tcp any any eq 80');
+
+    // Targeted by numbered ID via show ip access-list <id>
+    const res10 = executeCliCommand(r0, 'show ip access-list 10');
+    assert.strictEqual(res10.success, true);
+    assert.ok(res10.output.includes('Standard IP access list 10'));
+    assert.ok(res10.output.includes('192.168.1.10'));
+    assert.ok(!res10.output.includes('Standard IP access list 20'));
+    assert.ok(!res10.output.includes('Standard IP access list STD_ADMIN'));
+    assert.ok(!res10.output.includes('Extended IP access list 101'));
+
+    // Targeted by name via show ip access-list <name>
+    const resNamed = executeCliCommand(r0, 'show ip access-list STD_ADMIN');
+    assert.strictEqual(resNamed.success, true);
+    assert.ok(resNamed.output.includes('Standard IP access list STD_ADMIN'));
+    assert.ok(resNamed.output.includes('10.10.10.1'));
+    assert.ok(!resNamed.output.includes('Standard IP access list 10'));
+
+    // Targeted with explicit standard keyword: show ip access-list standard 20
+    const resStd20 = executeCliCommand(r0, 'show ip access-list standard 20');
+    assert.strictEqual(resStd20.success, true);
+    assert.ok(resStd20.output.includes('Standard IP access list 20'));
+    assert.ok(resStd20.output.includes('192.168.1.20'));
+    assert.ok(!resStd20.output.includes('Standard IP access list 10'));
+});
+
+// 1533. type filter with no matches behaves cleanly
+runTest('1533. type filter with no matches behaves cleanly', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    executeCliCommand(r0, 'enable');
+    executeCliCommand(r0, 'conf t');
+    executeCliCommand(r0, 'access-list 10 permit host 192.168.1.10');
+
+    // 1. Extended filter on router with only standard ACL returns empty output cleanly
+    const resExt = executeCliCommand(r0, 'show ip access-list extended');
+    assert.strictEqual(resExt.success, true);
+    assert.strictEqual(resExt.output, '');
+
+    // 2. Standard filter on router with only extended ACL returns empty output cleanly
+    resetLab();
+    addDevice('router', 100, 100);
+    const r1 = networkState.devices[0];
+    executeCliCommand(r1, 'enable');
+    executeCliCommand(r1, 'conf t');
+    executeCliCommand(r1, 'access-list 101 permit tcp any any eq 80');
+
+    const resStd = executeCliCommand(r1, 'show ip access-list standard');
+    assert.strictEqual(resStd.success, true);
+    assert.strictEqual(resStd.output, '');
+
+    // 3. Fresh router with no ACLs configured returns empty output on type filter
+    resetLab();
+    addDevice('router', 100, 100);
+    const r2 = networkState.devices[0];
+    const resFreshExt = executeCliCommand(r2, 'show ip access-list extended');
+    assert.strictEqual(resFreshExt.success, true);
+    assert.strictEqual(resFreshExt.output, '');
+
+    const resFreshStd = executeCliCommand(r2, 'show ip access-list standard');
+    assert.strictEqual(resFreshStd.success, true);
+    assert.strictEqual(resFreshStd.output, '');
+
+    // 4. Baseline unfiltered show access-lists on fresh router still returns educational message
+    const resUnfiltered = executeCliCommand(r2, 'show access-lists');
+    assert.strictEqual(resUnfiltered.success, true);
+    assert.strictEqual(resUnfiltered.output, 'No access lists configured.');
+});
+
+// Helper for inspector form dynamic visibility and submission tests
+function createMockAclRuleFormContainer(initialValues = {}) {
+    const feedback = { textContent: '', className: '' };
+    const addBtn = new MockElement('button');
+    const resequenceBtn = new MockElement('button');
+    const resequenceFeedback = { textContent: '', className: '' };
+    const elements = {
+        '#aclRuleTargetSelect': { value: initialValues.targetAcl !== undefined ? initialValues.targetAcl : '100' },
+        '#aclRuleSequence': { value: initialValues.sequence !== undefined ? initialValues.sequence : '' },
+        '#aclRuleAction': { value: initialValues.action !== undefined ? initialValues.action : 'permit' },
+        '#aclRuleProtocol': { value: initialValues.protocol !== undefined ? initialValues.protocol : 'ip' },
+        '#aclRuleSource': { value: initialValues.source !== undefined ? initialValues.source : 'any' },
+        '#aclRuleSourceMask': { value: initialValues.sourceMask !== undefined ? initialValues.sourceMask : '' },
+        '#aclRuleDest': { value: initialValues.dest !== undefined ? initialValues.dest : 'any' },
+        '#aclRuleDestMask': { value: initialValues.destMask !== undefined ? initialValues.destMask : '' },
+        '#aclRuleSrcPortOp': { value: initialValues.srcPortOp || '' },
+        '#aclRuleSrcPort': { value: initialValues.srcPort || '' },
+        '#aclRuleSrcPortRangeEnd': { value: initialValues.srcPortRangeEnd || '' },
+        '#aclRuleDstPortOp': { value: initialValues.dstPortOp || '' },
+        '#aclRuleDstPort': { value: initialValues.dstPort || '' },
+        '#aclRuleDstPortRangeEnd': { value: initialValues.dstPortRangeEnd || '' },
+        '#aclRuleEstablished': { checked: Boolean(initialValues.established) },
+        '#aclRuleIcmpType': { value: initialValues.icmpType || '' },
+        '#aclRuleLog': { value: initialValues.log || 'none' },
+        '#aclRuleFeedback': feedback,
+        '#addAclRuleBtn': addBtn,
+
+        '#aclResequenceTargetSelect': { value: initialValues.resequenceTarget !== undefined ? initialValues.resequenceTarget : (initialValues.targetAcl !== undefined ? initialValues.targetAcl : '100') },
+        '#aclResequenceStart': { value: initialValues.startSeq !== undefined ? initialValues.startSeq : (initialValues.resequenceStart !== undefined ? initialValues.resequenceStart : '10') },
+        '#aclResequenceStep': { value: initialValues.step !== undefined ? initialValues.step : (initialValues.resequenceStep !== undefined ? initialValues.resequenceStep : '10') },
+        '#aclResequenceFeedback': resequenceFeedback,
+        '#resequenceAclBtn': resequenceBtn,
+
+        '#aclRuleProtocolGroup': { style: {} },
+        '#aclRuleDestGroup': { style: {} },
+        '#aclRuleDestMaskGroup': { style: {} },
+        '#aclRuleSrcPortGroup': { style: {} },
+        '#aclRuleSrcPortInputGroup': { style: {} },
+        '#aclRuleSrcPortRangeEndGroup': { style: {} },
+        '#aclRuleDstPortGroup': { style: {} },
+        '#aclRuleDstPortInputGroup': { style: {} },
+        '#aclRuleDstPortRangeEndGroup': { style: {} },
+        '#aclRuleEstablishedGroup': { style: {} },
+        '#aclRuleIcmpTypeGroup': { style: {} },
+        '#aclRuleLogGroup': { style: {} }
+    };
+    return {
+        elements,
+        feedback,
+        addBtn,
+        resequenceBtn,
+        resequenceFeedback,
+        querySelector(sel) {
+            return this.elements[sel] || null;
+        }
+    };
+}
+
+// 1534. renderRouterAclSection renders protocol and logging options for extended ACL
+runTest('1534. renderRouterAclSection renders protocol and logging options for extended ACL', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    const html = renderRouterAclSection(r0);
+    assert.ok(html.includes('id="aclRuleProtocol"'), 'Must render protocol selector');
+    assert.ok(html.includes('value="ip"'), 'Must support IP protocol');
+    assert.ok(html.includes('value="tcp"'), 'Must support TCP protocol');
+    assert.ok(html.includes('value="udp"'), 'Must support UDP protocol');
+    assert.ok(html.includes('value="icmp"'), 'Must support ICMP protocol');
+
+    assert.ok(html.includes('id="aclRuleLog"'), 'Must render logging selector');
+    assert.ok(html.includes('value="none"'), 'Must support log none');
+    assert.ok(html.includes('value="log"'), 'Must support log');
+    assert.ok(html.includes('value="log-input"'), 'Must support log-input');
+});
+
+// 1535. renderRouterAclSection renders port controls, established checkbox, and ICMP types
+runTest('1535. renderRouterAclSection renders port controls, established checkbox, and ICMP types', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    const html = renderRouterAclSection(r0);
+    // Port controls
+    assert.ok(html.includes('id="aclRuleSrcPortOp"'), 'Must render source port operator');
+    assert.ok(html.includes('id="aclRuleSrcPort"'), 'Must render source port input');
+    assert.ok(html.includes('id="aclRuleSrcPortRangeEnd"'), 'Must render source port range end input');
+    assert.ok(html.includes('id="aclRuleDstPortOp"'), 'Must render dest port operator');
+    assert.ok(html.includes('id="aclRuleDstPort"'), 'Must render dest port input');
+    assert.ok(html.includes('id="aclRuleDstPortRangeEnd"'), 'Must render dest port range end input');
+
+    // Operator options
+    ['eq', 'neq', 'gt', 'lt', 'range'].forEach(op => {
+        assert.ok(html.includes('value="' + op + '"'), 'Must include port operator ' + op);
+    });
+
+    // Established checkbox
+    assert.ok(html.includes('id="aclRuleEstablished"'), 'Must render established checkbox');
+    assert.ok(html.includes('type="checkbox"'), 'Established must be a checkbox');
+
+    // ICMP types
+    assert.ok(html.includes('id="aclRuleIcmpType"'), 'Must render ICMP type selector');
+    ['echo', 'echo-reply', 'unreachable', 'time-exceeded'].forEach(t => {
+        assert.ok(html.includes('value="' + t + '"'), 'Must include ICMP type ' + t);
+    });
+});
+
+// 1536. Protocol-dependent dynamic visibility for TCP exposes ports and established
+runTest('1536. Protocol-dependent dynamic visibility for TCP exposes ports and established', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    const form = createMockAclRuleFormContainer({ targetAcl: '100', protocol: 'tcp' });
+    updateAclRuleFormVisibility(form, r0);
+
+    assert.strictEqual(form.elements['#aclRuleSrcPortGroup'].style.display, '');
+    assert.strictEqual(form.elements['#aclRuleDstPortGroup'].style.display, '');
+    assert.strictEqual(form.elements['#aclRuleEstablishedGroup'].style.display, '');
+    assert.strictEqual(form.elements['#aclRuleIcmpTypeGroup'].style.display, 'none');
+    assert.strictEqual(form.elements['#aclRuleProtocolGroup'].style.display, '');
+    assert.strictEqual(form.elements['#aclRuleDestGroup'].style.display, '');
+});
+
+// 1537. Protocol-dependent dynamic visibility for UDP exposes ports, hides established
+runTest('1537. Protocol-dependent dynamic visibility for UDP exposes ports, hides established', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    const form = createMockAclRuleFormContainer({ targetAcl: '100', protocol: 'udp' });
+    updateAclRuleFormVisibility(form, r0);
+
+    assert.strictEqual(form.elements['#aclRuleSrcPortGroup'].style.display, '');
+    assert.strictEqual(form.elements['#aclRuleDstPortGroup'].style.display, '');
+    assert.strictEqual(form.elements['#aclRuleEstablishedGroup'].style.display, 'none', 'Established must be hidden for UDP');
+    assert.strictEqual(form.elements['#aclRuleIcmpTypeGroup'].style.display, 'none');
+});
+
+// 1538. Protocol-dependent dynamic visibility for ICMP exposes ICMP type, hides ports and established
+runTest('1538. Protocol-dependent dynamic visibility for ICMP exposes ICMP type, hides ports and established', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    const form = createMockAclRuleFormContainer({ targetAcl: '100', protocol: 'icmp' });
+    updateAclRuleFormVisibility(form, r0);
+
+    assert.strictEqual(form.elements['#aclRuleSrcPortGroup'].style.display, 'none');
+    assert.strictEqual(form.elements['#aclRuleDstPortGroup'].style.display, 'none');
+    assert.strictEqual(form.elements['#aclRuleEstablishedGroup'].style.display, 'none');
+    assert.strictEqual(form.elements['#aclRuleIcmpTypeGroup'].style.display, '');
+});
+
+// 1539. Port operator dynamic visibility handles single port and range end cleanly
+runTest('1539. Port operator dynamic visibility handles single port and range end cleanly', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    // 1. Operator eq: port input visible, range end hidden
+    const formEq = createMockAclRuleFormContainer({ targetAcl: '100', protocol: 'tcp', srcPortOp: 'eq' });
+    updateAclRuleFormVisibility(formEq, r0);
+    assert.strictEqual(formEq.elements['#aclRuleSrcPortInputGroup'].style.display, '');
+    assert.strictEqual(formEq.elements['#aclRuleSrcPortRangeEndGroup'].style.display, 'none');
+
+    // 2. Operator range: both port input and range end visible
+    const formRange = createMockAclRuleFormContainer({ targetAcl: '100', protocol: 'tcp', srcPortOp: 'range', dstPortOp: 'range' });
+    updateAclRuleFormVisibility(formRange, r0);
+    assert.strictEqual(formRange.elements['#aclRuleSrcPortInputGroup'].style.display, '');
+    assert.strictEqual(formRange.elements['#aclRuleSrcPortRangeEndGroup'].style.display, '');
+    assert.strictEqual(formRange.elements['#aclRuleDstPortInputGroup'].style.display, '');
+    assert.strictEqual(formRange.elements['#aclRuleDstPortRangeEndGroup'].style.display, '');
+
+    // 3. Operator empty/none: both port inputs hidden
+    const formNone = createMockAclRuleFormContainer({ targetAcl: '100', protocol: 'tcp', srcPortOp: '', dstPortOp: '' });
+    updateAclRuleFormVisibility(formNone, r0);
+    assert.strictEqual(formNone.elements['#aclRuleSrcPortInputGroup'].style.display, 'none');
+    assert.strictEqual(formNone.elements['#aclRuleSrcPortRangeEndGroup'].style.display, 'none');
+    assert.strictEqual(formNone.elements['#aclRuleDstPortInputGroup'].style.display, 'none');
+    assert.strictEqual(formNone.elements['#aclRuleDstPortRangeEndGroup'].style.display, 'none');
+});
+
+// 1540. Standard ACL target hides protocol and extended controls
+runTest('1540. Standard ACL target hides protocol and extended controls', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '10', 'standard');
+
+    // Render check: initial render with standard ACL target hides extended groups via style
+    const html = renderRouterAclSection(r0);
+    assert.ok(html.includes('id="aclRuleProtocolGroup" style="display: none;"'), 'Protocol group must be hidden initially for standard ACL');
+    assert.ok(html.includes('id="aclRuleDestGroup" style="display: none;"'), 'Dest group must be hidden initially for standard ACL');
+    assert.ok(html.includes('id="aclRuleLogGroup" style="display: none;"'), 'Log group must be hidden initially for standard ACL');
+
+    // Dynamic visibility check: updateAclRuleFormVisibility hides all extended fields when targeting standard ACL
+    const formStd = createMockAclRuleFormContainer({ targetAcl: '10', protocol: 'tcp' });
+    updateAclRuleFormVisibility(formStd, r0);
+    assert.strictEqual(formStd.elements['#aclRuleProtocolGroup'].style.display, 'none');
+    assert.strictEqual(formStd.elements['#aclRuleDestGroup'].style.display, 'none');
+    assert.strictEqual(formStd.elements['#aclRuleDestMaskGroup'].style.display, 'none');
+    assert.strictEqual(formStd.elements['#aclRuleSrcPortGroup'].style.display, 'none');
+    assert.strictEqual(formStd.elements['#aclRuleDstPortGroup'].style.display, 'none');
+    assert.strictEqual(formStd.elements['#aclRuleEstablishedGroup'].style.display, 'none');
+    assert.strictEqual(formStd.elements['#aclRuleIcmpTypeGroup'].style.display, 'none');
+    assert.strictEqual(formStd.elements['#aclRuleLogGroup'].style.display, 'none');
+});
+
+// 1541. GUI creates extended TCP rule with source/destination ports
+runTest('1541. GUI creates extended TCP rule with source/destination ports', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    const form = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        sequence: '10',
+        action: 'permit',
+        protocol: 'tcp',
+        source: '192.168.1.0',
+        sourceMask: '0.0.0.255',
+        srcPortOp: 'gt',
+        srcPort: '1024',
+        dest: '10.0.0.1',
+        destMask: '0.0.0.0',
+        dstPortOp: 'eq',
+        dstPort: '80'
+    });
+    form.addBtn.addEventListener('click', () => submitRouterAclRuleFromInspector(form, r0));
+    form.addBtn.click();
+
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules.length, 1);
+    const rule = acl.rules[0];
+    assert.strictEqual(rule.sequence, 10);
+    assert.strictEqual(rule.action, 'permit');
+    assert.strictEqual(rule.protocol, 'tcp');
+    assert.strictEqual(rule.source.ip, '192.168.1.0');
+    assert.strictEqual(rule.source.wildcard, '0.0.0.255');
+    assert.strictEqual(rule.destination.ip, '10.0.0.1');
+    assert.strictEqual(rule.srcPortOp, 'gt');
+    assert.strictEqual(rule.srcPort, 1024);
+    assert.strictEqual(rule.dstPortOp, 'eq');
+    assert.strictEqual(rule.dstPort, 80);
+});
+
+// 1542. GUI creates extended UDP rule with a destination port range
+runTest('1542. GUI creates extended UDP rule with a destination port range', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    const form = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        action: 'permit',
+        protocol: 'udp',
+        source: 'any',
+        dest: 'any',
+        dstPortOp: 'range',
+        dstPort: '5000',
+        dstPortRangeEnd: '6000'
+    });
+    const res = submitRouterAclRuleFromInspector(form, r0);
+    assert.strictEqual(res.success, true);
+
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules.length, 1);
+    const rule = acl.rules[0];
+    assert.strictEqual(rule.protocol, 'udp');
+    assert.strictEqual(rule.dstPortOp, 'range');
+    assert.strictEqual(rule.dstPort, '5000-6000');
+    assert.deepStrictEqual(rule.dstPortRange, [5000, 6000]);
+    assert.strictEqual(rule.established, false);
+});
+
+// 1543. GUI creates extended ICMP rule with echo type
+runTest('1543. GUI creates extended ICMP rule with echo type', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    const form = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        action: 'deny',
+        protocol: 'icmp',
+        source: 'any',
+        dest: '10.0.0.1',
+        icmpType: 'echo'
+    });
+    const res = submitRouterAclRuleFromInspector(form, r0);
+    assert.strictEqual(res.success, true);
+
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules.length, 1);
+    const rule = acl.rules[0];
+    assert.strictEqual(rule.protocol, 'icmp');
+    assert.strictEqual(rule.icmpType, 'echo');
+    assert.strictEqual(rule.srcPortOp, null);
+    assert.strictEqual(rule.dstPortOp, null);
+    assert.strictEqual(rule.established, false);
+});
+
+// 1544. GUI creates extended TCP rule with established
+runTest('1544. GUI creates extended TCP rule with established', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    const form = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        action: 'permit',
+        protocol: 'tcp',
+        source: 'any',
+        dest: 'any',
+        dstPortOp: 'eq',
+        dstPort: '80',
+        established: true
+    });
+    const res = submitRouterAclRuleFromInspector(form, r0);
+    assert.strictEqual(res.success, true);
+
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules.length, 1);
+    const rule = acl.rules[0];
+    assert.strictEqual(rule.protocol, 'tcp');
+    assert.strictEqual(rule.established, true);
+});
+
+// 1545. GUI creates extended TCP rule with log
+runTest('1545. GUI creates extended TCP rule with log', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    const form = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        action: 'permit',
+        protocol: 'tcp',
+        source: 'any',
+        dest: 'any',
+        log: 'log'
+    });
+    const res = submitRouterAclRuleFromInspector(form, r0);
+    assert.strictEqual(res.success, true);
+
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules[0].log, 'log');
+});
+
+// 1546. GUI creates extended TCP rule with log-input
+runTest('1546. GUI creates extended TCP rule with log-input', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    const form = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        action: 'deny',
+        protocol: 'tcp',
+        source: 'any',
+        dest: 'any',
+        log: 'log-input'
+    });
+    const res = submitRouterAclRuleFromInspector(form, r0);
+    assert.strictEqual(res.success, true);
+
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules[0].log, 'log-input');
+});
+
+// 1547. GUI-created rule preserves normalized port aliases
+runTest('1547. GUI-created rule preserves normalized port aliases', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    // Rule 1: http alias -> 80
+    const form1 = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        sequence: '10',
+        action: 'permit',
+        protocol: 'tcp',
+        source: 'any',
+        dest: 'any',
+        dstPortOp: 'eq',
+        dstPort: 'http'
+    });
+    submitRouterAclRuleFromInspector(form1, r0);
+
+    // Rule 2: domain alias -> 53
+    const form2 = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        sequence: '20',
+        action: 'permit',
+        protocol: 'udp',
+        source: 'any',
+        dest: 'any',
+        dstPortOp: 'eq',
+        dstPort: 'domain'
+    });
+    submitRouterAclRuleFromInspector(form2, r0);
+
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules.length, 2);
+    assert.strictEqual(acl.rules[0].dstPort, 80);
+    assert.strictEqual(acl.rules[1].dstPort, 53);
+});
+
+// 1548. GUI-created rule rejects/does not create invalid port input
+runTest('1548. GUI-created rule rejects/does not create invalid port input', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    // 1. Unknown port alias
+    const formInvalid = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        protocol: 'tcp',
+        dstPortOp: 'eq',
+        dstPort: 'not_a_valid_port'
+    });
+    const res1 = submitRouterAclRuleFromInspector(formInvalid, r0);
+    assert.strictEqual(res1.success, false);
+    assert.ok(formInvalid.feedback.textContent.includes('Invalid destination port'));
+
+    // 2. Empty port when operator selected
+    const formEmpty = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        protocol: 'tcp',
+        dstPortOp: 'eq',
+        dstPort: ''
+    });
+    const res2 = submitRouterAclRuleFromInspector(formEmpty, r0);
+    assert.strictEqual(res2.success, false);
+
+    // 3. Out-of-range port number (> 65535)
+    const formOutOfRange = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        protocol: 'tcp',
+        dstPortOp: 'eq',
+        dstPort: '70000'
+    });
+    const res3 = submitRouterAclRuleFromInspector(formOutOfRange, r0);
+    assert.strictEqual(res3.success, false);
+
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules.length, 0, 'No rule must be created on invalid port input');
+});
+
+// 1549. GUI-created rule rejects/does not create invalid range
+runTest('1549. GUI-created rule rejects/does not create invalid range', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    // 1. Inverted range (start > end)
+    const formInverted = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        protocol: 'tcp',
+        dstPortOp: 'range',
+        dstPort: '8080',
+        dstPortRangeEnd: '80'
+    });
+    const res1 = submitRouterAclRuleFromInspector(formInverted, r0);
+    assert.strictEqual(res1.success, false);
+    assert.ok(formInverted.feedback.textContent.includes('cannot be greater than end'));
+
+    // 2. Missing range end
+    const formMissingEnd = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        protocol: 'tcp',
+        dstPortOp: 'range',
+        dstPort: '80',
+        dstPortRangeEnd: ''
+    });
+    const res2 = submitRouterAclRuleFromInspector(formMissingEnd, r0);
+    assert.strictEqual(res2.success, false);
+    assert.ok(formMissingEnd.feedback.textContent.includes('Both start and end ports are required'));
+
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules.length, 0, 'No rule must be created on invalid range');
+});
+
+// 1550. GUI-created extended rule is enforced by the existing packet evaluator
+runTest('1550. GUI-created extended rule is enforced by the existing packet evaluator', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    const form = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        sequence: '10',
+        action: 'permit',
+        protocol: 'tcp',
+        source: 'any',
+        dest: '10.0.0.2',
+        destMask: '0.0.0.0',
+        dstPortOp: 'eq',
+        dstPort: '80'
+    });
+    submitRouterAclRuleFromInspector(form, r0);
+
+    const acl = getRouterAcl(r0.id, '100');
+
+    // Matching packet
+    const matchPkt = {
+        sourceIp: '192.168.1.10',
+        destinationIp: '10.0.0.2',
+        protocol: 'tcp',
+        destinationPort: 80
+    };
+    const evalMatch = evaluatePacketAcl(acl, matchPkt);
+    assert.strictEqual(evalMatch.matched, true);
+    assert.strictEqual(evalMatch.action, 'permit');
+    assert.strictEqual(evalMatch.isImplicitDeny, false);
+
+    // Non-matching packet (port mismatch -> implicit deny)
+    const nonMatchPkt = {
+        sourceIp: '192.168.1.10',
+        destinationIp: '10.0.0.2',
+        protocol: 'tcp',
+        destinationPort: 22
+    };
+    const evalNonMatch = evaluatePacketAcl(acl, nonMatchPkt);
+    assert.strictEqual(evalNonMatch.action, 'deny');
+    assert.strictEqual(evalNonMatch.isImplicitDeny, true);
+});
+
+// 1551. GUI-created extended rule increments the existing ACL hit counter
+runTest('1551. GUI-created extended rule increments the existing ACL hit counter', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    const form = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        action: 'permit',
+        protocol: 'tcp',
+        source: 'any',
+        dest: 'any',
+        dstPortOp: 'eq',
+        dstPort: '443'
+    });
+    submitRouterAclRuleFromInspector(form, r0);
+
+    const acl = getRouterAcl(r0.id, '100');
+    const rule = acl.rules[0];
+    assert.strictEqual(rule.hits, 0);
+
+    const pkt = { sourceIp: '192.168.1.5', destinationIp: '10.0.0.5', protocol: 'tcp', destinationPort: 443 };
+    evaluatePacketAcl(acl, pkt);
+    assert.strictEqual(rule.hits, 1);
+
+    evaluatePacketAcl(acl, pkt);
+    assert.strictEqual(rule.hits, 2);
+});
+
+// 1552. Existing standard ACL GUI creation still works unchanged
+runTest('1552. Existing standard ACL GUI creation still works unchanged', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '10', 'standard');
+
+    const form = createMockAclRuleFormContainer({
+        targetAcl: '10',
+        sequence: '15',
+        action: 'permit',
+        source: '192.168.1.10',
+        sourceMask: '0.0.0.0'
+    });
+    form.addBtn.addEventListener('click', () => submitRouterAclRuleFromInspector(form, r0));
+    form.addBtn.click();
+
+    const acl = getRouterAcl(r0.id, '10');
+    assert.strictEqual(acl.rules.length, 1);
+    const rule = acl.rules[0];
+    assert.strictEqual(rule.sequence, 15);
+    assert.strictEqual(rule.action, 'permit');
+    assert.strictEqual(rule.protocol, 'ip');
+    assert.strictEqual(rule.source.ip, '192.168.1.10');
+    assert.strictEqual(rule.source.isHost, true);
+    assert.strictEqual(rule.destination, null);
+    assert.strictEqual(rule.srcPortOp, null);
+    assert.strictEqual(rule.dstPortOp, null);
+    assert.strictEqual(rule.established, false);
+    assert.strictEqual(rule.icmpType, null);
+});
+
+// 1553. extended TCP row renders source and destination port restrictions
+runTest('1553. extended TCP row renders source and destination port restrictions', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    addRouterAclRule(r0.id, '100', {
+        action: 'permit',
+        protocol: 'tcp',
+        sourceIp: '192.168.1.0',
+        sourceWildcard: '0.0.0.255',
+        srcPortOp: 'gt',
+        srcPort: 1024,
+        destinationIp: '10.0.0.1',
+        destinationWildcard: '0.0.0.0',
+        dstPortOp: 'eq',
+        dstPort: 80
+    });
+
+    const html = renderRouterAclSection(r0);
+    assert.ok(html.includes('gt 1024'), 'Must render source port restriction');
+    assert.ok(html.includes('eq 80'), 'Must render destination port restriction');
+    assert.ok(html.includes('acl-port-badge'), 'Must use port badge styling');
+});
+
+// 1554. extended UDP row renders destination port range
+runTest('1554. extended UDP row renders destination port range', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    addRouterAclRule(r0.id, '100', {
+        action: 'permit',
+        protocol: 'udp',
+        sourceIp: 'any',
+        destinationIp: 'any',
+        dstPortOp: 'range',
+        dstPort: '5000-6000',
+        dstPortRange: [5000, 6000]
+    });
+
+    const html = renderRouterAclSection(r0);
+    assert.ok(html.includes('range 5000 6000'), 'Must render both endpoints of UDP port range');
+    assert.ok(html.includes('UDP'), 'Must render UDP protocol');
+});
+
+// 1555. TCP established indicator appears only when enabled
+runTest('1555. TCP established indicator appears only when enabled', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    // Rule 10 with established: true
+    addRouterAclRule(r0.id, '100', {
+        sequence: 10,
+        action: 'permit',
+        protocol: 'tcp',
+        sourceIp: 'any',
+        destinationIp: 'any',
+        established: true
+    });
+
+    // Rule 20 without established
+    addRouterAclRule(r0.id, '100', {
+        sequence: 20,
+        action: 'permit',
+        protocol: 'tcp',
+        sourceIp: 'any',
+        destinationIp: 'any',
+        established: false
+    });
+
+    const html = renderRouterAclSection(r0);
+    assert.ok(html.includes('data-established="true"'), 'Must render EST badge for established rule');
+    assert.ok(html.includes('acl-badge--est'), 'Must use acl-badge--est class');
+
+    // Extract table rows to confirm EST appears only in Rule 10 row
+    const rows = html.split('<tr>').filter(r => r.includes('<td><strong>10</strong></td>') || r.includes('<td><strong>20</strong></td>'));
+    assert.strictEqual(rows.length, 2);
+    const row10 = rows.find(r => r.includes('<td><strong>10</strong></td>'));
+    const row20 = rows.find(r => r.includes('<td><strong>20</strong></td>'));
+    assert.ok(row10.includes('EST'), 'Rule 10 must contain EST indicator');
+    assert.ok(!row20.includes('EST'), 'Rule 20 must NOT contain EST indicator');
+});
+
+// 1556. ICMP type appears for ICMP rules
+runTest('1556. ICMP type appears for ICMP rules', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    addRouterAclRule(r0.id, '100', {
+        action: 'deny',
+        protocol: 'icmp',
+        sourceIp: 'any',
+        destinationIp: '10.0.0.1',
+        icmpType: 'echo'
+    });
+
+    const html = renderRouterAclSection(r0);
+    assert.ok(html.includes('data-icmp-type="echo"'), 'Must render ICMP type attribute');
+    assert.ok(html.includes('acl-badge--icmp'), 'Must use acl-badge--icmp class');
+    assert.ok(html.includes('echo'), 'Must display ICMP type text');
+});
+
+// 1557. logging indicator renders log
+runTest('1557. logging indicator renders log', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    addRouterAclRule(r0.id, '100', {
+        action: 'permit',
+        protocol: 'tcp',
+        sourceIp: 'any',
+        destinationIp: 'any',
+        log: 'log'
+    });
+
+    const html = renderRouterAclSection(r0);
+    assert.ok(html.includes('data-log="log"'), 'Must render data-log="log" indicator');
+    assert.ok(html.includes('acl-badge--log'), 'Must use acl-badge--log class');
+    assert.ok(html.includes('>LOG<'), 'Must display LOG indicator text');
+});
+
+// 1558. logging indicator renders log-input
+runTest('1558. logging indicator renders log-input', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    addRouterAclRule(r0.id, '100', {
+        action: 'deny',
+        protocol: 'tcp',
+        sourceIp: 'any',
+        destinationIp: 'any',
+        log: 'log-input'
+    });
+
+    const html = renderRouterAclSection(r0);
+    assert.ok(html.includes('data-log="log-input"'), 'Must render data-log="log-input" indicator');
+    assert.ok(html.includes('acl-badge--log-input'), 'Must use acl-badge--log-input class');
+    assert.ok(html.includes('>LOG-IN<'), 'Must display LOG-IN indicator text');
+});
+
+// 1559. unrestricted IP rule does not display irrelevant port/ICMP/established fields
+runTest('1559. unrestricted IP rule does not display irrelevant port/ICMP/established fields', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    addRouterAclRule(r0.id, '100', {
+        action: 'permit',
+        protocol: 'ip',
+        sourceIp: 'any',
+        destinationIp: 'any'
+    });
+
+    const html = renderRouterAclSection(r0);
+    assert.ok(html.includes('<code>IP</code>'), 'Must render generic IP protocol');
+    assert.ok(!html.includes('acl-port-badge'), 'Must not display port badges');
+    assert.ok(!html.includes('acl-badge--est'), 'Must not display established badge');
+    assert.ok(!html.includes('acl-badge--icmp'), 'Must not display ICMP badge');
+    assert.ok(!html.includes('acl-badge--log'), 'Must not display log badge');
+});
+
+// 1560. standard ACL table rendering remains unchanged
+runTest('1560. standard ACL table rendering remains unchanged', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '10', 'standard');
+
+    addRouterAclRule(r0.id, '10', {
+        sequence: 10,
+        action: 'permit',
+        sourceIp: '192.168.1.10',
+        sourceWildcard: '0.0.0.0'
+    });
+
+    const html = renderRouterAclSection(r0);
+    // Standard ACL table header does not contain Proto or Destination columns
+    assert.ok(!html.includes('<th>Proto</th>'), 'Standard ACL table header must omit Proto column');
+    assert.ok(!html.includes('<th>Destination</th>'), 'Standard ACL table header must omit Destination column');
+    assert.ok(html.includes('<th>Source</th>'), 'Standard ACL table header must include Source column');
+    assert.ok(html.includes('<th>Hits</th>'), 'Standard ACL table header must include Hits column');
+    assert.ok(html.includes('host 192.168.1.10'), 'Must render standard source specification');
+    assert.ok(!html.includes('acl-port-badge'), 'Standard rule must not have port badges');
+    assert.ok(!html.includes('acl-badge--est'), 'Standard rule must not have established badge');
+});
+
+// 1561. hit counters remain visible for extended rules
+runTest('1561. hit counters remain visible for extended rules', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    const res = addRouterAclRule(r0.id, '100', {
+        action: 'permit',
+        protocol: 'tcp',
+        sourceIp: 'any',
+        destinationIp: 'any',
+        dstPortOp: 'eq',
+        dstPort: 80
+    });
+    res.rule.hits = 42;
+
+    const html = renderRouterAclSection(r0);
+    assert.ok(html.includes('<span class="acl-hits-badge">42</span>'), 'Hit counter must display live hit count');
+});
+
+// 1562. deleting an extended rule still targets the correct sequence after enhanced rendering
+runTest('1562. deleting an extended rule still targets the correct sequence after enhanced rendering', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    addRouterAclRule(r0.id, '100', { sequence: 10, action: 'permit', protocol: 'tcp', sourceIp: 'any', destinationIp: 'any' });
+    addRouterAclRule(r0.id, '100', { sequence: 20, action: 'deny', protocol: 'udp', sourceIp: 'any', destinationIp: 'any' });
+    addRouterAclRule(r0.id, '100', { sequence: 30, action: 'permit', protocol: 'icmp', sourceIp: 'any', destinationIp: 'any' });
+
+    const html = renderRouterAclSection(r0);
+    assert.ok(html.includes('data-acl-id="100" data-sequence="20"'), 'Delete button must target sequence 20');
+
+    // Delete sequence 20 via deleteRouterAclRule
+    const delRes = deleteRouterAclRule(r0.id, '100', 20);
+    assert.strictEqual(delRes.success, true);
+
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules.length, 2);
+    assert.strictEqual(acl.rules[0].sequence, 10);
+    assert.strictEqual(acl.rules[1].sequence, 30);
+});
+
+// 1563. GUI resequence action exists for an ACL inspector
+runTest('1563. GUI resequence action exists for an ACL inspector', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    const html = renderRouterAclSection(r0);
+    assert.ok(html.includes('id="resequenceAclBtn"'), 'Form must contain resequence button #resequenceAclBtn');
+    assert.ok(html.includes('id="aclResequenceTargetSelect"'), 'Form must contain target ACL select');
+    assert.ok(html.includes('id="aclResequenceStart"'), 'Form must contain start sequence input');
+    assert.ok(html.includes('id="aclResequenceStep"'), 'Form must contain sequence step input');
+    assert.ok(html.includes('acl-card-resequence-btn'), 'Card header must contain resequence action button');
+});
+
+// 1564. GUI resequence successfully changes 10, 20, 30 to 100, 110, 120 and the rendered table reflects the new sequences
+runTest('1564. GUI resequence successfully changes 10, 20, 30 to 100, 110, 120 and the rendered table reflects the new sequences', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    addRouterAclRule(r0.id, '100', { sequence: 10, action: 'permit', protocol: 'tcp', sourceIp: 'any', destinationIp: 'any' });
+    addRouterAclRule(r0.id, '100', { sequence: 20, action: 'deny', protocol: 'udp', sourceIp: 'any', destinationIp: 'any' });
+    addRouterAclRule(r0.id, '100', { sequence: 30, action: 'permit', protocol: 'icmp', sourceIp: 'any', destinationIp: 'any' });
+
+    const form = createMockAclRuleFormContainer({
+        resequenceTarget: '100',
+        startSeq: '100',
+        step: '10'
+    });
+    form.resequenceBtn.addEventListener('click', () => resequenceRouterAclFromInspector(form, r0));
+    form.resequenceBtn.click();
+
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules.length, 3);
+    assert.strictEqual(acl.rules[0].sequence, 100);
+    assert.strictEqual(acl.rules[1].sequence, 110);
+    assert.strictEqual(acl.rules[2].sequence, 120);
+
+    const html = renderRouterAclSection(r0);
+    assert.ok(html.includes('<td><strong>100</strong></td>'));
+    assert.ok(html.includes('<td><strong>110</strong></td>'));
+    assert.ok(html.includes('<td><strong>120</strong></td>'));
+});
+
+// 1565. TCP/UDP/ICMP extended metadata survives GUI resequencing
+runTest('1565. TCP/UDP/ICMP extended metadata survives GUI resequencing', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    // Rule 1: TCP with ports, established, log
+    addRouterAclRule(r0.id, '100', {
+        sequence: 10,
+        action: 'permit',
+        protocol: 'tcp',
+        sourceIp: '192.168.1.0',
+        sourceWildcard: '0.0.0.255',
+        srcPortOp: 'gt',
+        srcPort: 1024,
+        destinationIp: '10.0.0.1',
+        destinationWildcard: '0.0.0.0',
+        dstPortOp: 'eq',
+        dstPort: 80,
+        established: true,
+        log: 'log'
+    });
+
+    // Rule 2: UDP with destination port range
+    addRouterAclRule(r0.id, '100', {
+        sequence: 20,
+        action: 'deny',
+        protocol: 'udp',
+        sourceIp: 'any',
+        destinationIp: 'any',
+        dstPortOp: 'range',
+        dstPort: '5000-6000',
+        dstPortRange: [5000, 6000]
+    });
+
+    // Rule 3: ICMP with echo type and log-input
+    addRouterAclRule(r0.id, '100', {
+        sequence: 30,
+        action: 'permit',
+        protocol: 'icmp',
+        sourceIp: 'any',
+        destinationIp: 'any',
+        icmpType: 'echo',
+        log: 'log-input'
+    });
+
+    const form = createMockAclRuleFormContainer({
+        resequenceTarget: '100',
+        startSeq: '50',
+        step: '25'
+    });
+    resequenceRouterAclFromInspector(form, r0);
+
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules.length, 3);
+
+    // Rule 1 check: now sequence 50
+    const r1 = acl.rules[0];
+    assert.strictEqual(r1.sequence, 50);
+    assert.strictEqual(r1.protocol, 'tcp');
+    assert.strictEqual(r1.srcPortOp, 'gt');
+    assert.strictEqual(r1.srcPort, 1024);
+    assert.strictEqual(r1.dstPortOp, 'eq');
+    assert.strictEqual(r1.dstPort, 80);
+    assert.strictEqual(r1.established, true);
+    assert.strictEqual(r1.log, 'log');
+
+    // Rule 2 check: now sequence 75
+    const r2 = acl.rules[1];
+    assert.strictEqual(r2.sequence, 75);
+    assert.strictEqual(r2.protocol, 'udp');
+    assert.strictEqual(r2.dstPortOp, 'range');
+    assert.deepStrictEqual(r2.dstPortRange, [5000, 6000]);
+
+    // Rule 3 check: now sequence 100
+    const r3 = acl.rules[2];
+    assert.strictEqual(r3.sequence, 100);
+    assert.strictEqual(r3.protocol, 'icmp');
+    assert.strictEqual(r3.icmpType, 'echo');
+    assert.strictEqual(r3.log, 'log-input');
+
+    // UI rendering test
+    const html = renderRouterAclSection(r0);
+    assert.ok(html.includes('EST'));
+    assert.ok(html.includes('echo'));
+    assert.ok(html.includes('LOG'));
+    assert.ok(html.includes('LOG-IN'));
+    assert.ok(html.includes('range 5000 6000'));
+});
+
+// 1566. Hit counters survive GUI resequencing
+runTest('1566. Hit counters survive GUI resequencing', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    const res1 = addRouterAclRule(r0.id, '100', { sequence: 10, action: 'permit', protocol: 'tcp', sourceIp: 'any', destinationIp: 'any' });
+    const res2 = addRouterAclRule(r0.id, '100', { sequence: 20, action: 'permit', protocol: 'tcp', sourceIp: 'any', destinationIp: 'any' });
+    res1.rule.hits = 15;
+    res2.rule.hits = 42;
+
+    const form = createMockAclRuleFormContainer({
+        resequenceTarget: '100',
+        startSeq: '100',
+        step: '10'
+    });
+    resequenceRouterAclFromInspector(form, r0);
+
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules[0].sequence, 100);
+    assert.strictEqual(acl.rules[0].hits, 15);
+    assert.strictEqual(acl.rules[1].sequence, 110);
+    assert.strictEqual(acl.rules[1].hits, 42);
+
+    const html = renderRouterAclSection(r0);
+    assert.ok(html.includes('<span class="acl-hits-badge">42</span>'));
+    assert.ok(html.includes('<span class="acl-hits-badge">15</span>'));
+});
+
+// 1567. Delete action targets the new sequence after resequencing
+runTest('1567. Delete action targets the new sequence after resequencing', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    addRouterAclRule(r0.id, '100', { sequence: 10, action: 'permit', protocol: 'ip', sourceIp: 'any', destinationIp: 'any' });
+    addRouterAclRule(r0.id, '100', { sequence: 20, action: 'deny', protocol: 'ip', sourceIp: 'any', destinationIp: 'any' });
+
+    const form = createMockAclRuleFormContainer({
+        resequenceTarget: '100',
+        startSeq: '100',
+        step: '10'
+    });
+    resequenceRouterAclFromInspector(form, r0);
+
+    const html = renderRouterAclSection(r0);
+    assert.ok(html.includes('data-sequence="110"'), 'Rendered table must have delete button targeting sequence 110');
+    assert.ok(!html.includes('data-sequence="20"'), 'Old sequence 20 delete button must no longer exist');
+});
+
+// 1568. Invalid start sequence is rejected without mutating the ACL
+runTest('1568. Invalid start sequence is rejected without mutating the ACL', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+    addRouterAclRule(r0.id, '100', { sequence: 10, action: 'permit', protocol: 'ip', sourceIp: 'any', destinationIp: 'any' });
+
+    const form = createMockAclRuleFormContainer({
+        resequenceTarget: '100',
+        startSeq: '-10',
+        step: '10'
+    });
+    const res = resequenceRouterAclFromInspector(form, r0);
+    assert.strictEqual(res.success, false);
+    assert.ok(form.resequenceFeedback.textContent.includes('Invalid starting sequence number'));
+
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules[0].sequence, 10, 'Rule sequence must remain untouched');
+});
+
+// 1569. Invalid step is rejected without mutating the ACL
+runTest('1569. Invalid step is rejected without mutating the ACL', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+    addRouterAclRule(r0.id, '100', { sequence: 10, action: 'permit', protocol: 'ip', sourceIp: 'any', destinationIp: 'any' });
+
+    const form = createMockAclRuleFormContainer({
+        resequenceTarget: '100',
+        startSeq: '10',
+        step: '0'
+    });
+    const res = resequenceRouterAclFromInspector(form, r0);
+    assert.strictEqual(res.success, false);
+    assert.ok(form.resequenceFeedback.textContent.includes('Sequence increment'));
+
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules[0].sequence, 10, 'Rule sequence must remain untouched');
+});
+
+// 1570. Overflow/invalid resequence is rejected without partial mutation
+runTest('1570. Overflow/invalid resequence is rejected without partial mutation', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+    addRouterAclRule(r0.id, '100', { sequence: 10, action: 'permit', protocol: 'ip', sourceIp: 'any', destinationIp: 'any' });
+    addRouterAclRule(r0.id, '100', { sequence: 20, action: 'permit', protocol: 'ip', sourceIp: 'any', destinationIp: 'any' });
+
+    const form = createMockAclRuleFormContainer({
+        resequenceTarget: '100',
+        startSeq: '2147483640',
+        step: '10'
+    });
+    const res = resequenceRouterAclFromInspector(form, r0);
+    assert.strictEqual(res.success, false);
+    assert.ok(form.resequenceFeedback.textContent.includes('exceeded'));
+
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules[0].sequence, 10, 'Rule 0 sequence must remain 10');
+    assert.strictEqual(acl.rules[1].sequence, 20, 'Rule 1 sequence must remain 20');
+});
+
+// 1571. Failed resequence does not create an unnecessary history entry
+runTest('1571. Failed resequence does not create an unnecessary history entry', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+    addRouterAclRule(r0.id, '100', { sequence: 10, action: 'permit', protocol: 'ip', sourceIp: 'any', destinationIp: 'any' });
+    addRouterAclRule(r0.id, '100', { sequence: 20, action: 'permit', protocol: 'ip', sourceIp: 'any', destinationIp: 'any' });
+
+    const initialHistoryLength = networkState.history.length;
+
+    // 1. Validation failure (bad step)
+    const form1 = createMockAclRuleFormContainer({
+        resequenceTarget: '100',
+        startSeq: '10',
+        step: 'invalid_step'
+    });
+    resequenceRouterAclFromInspector(form1, r0);
+    assert.strictEqual(networkState.history.length, initialHistoryLength, 'Validation failure must not push history');
+
+    // 2. Authoritative overflow failure
+    const form2 = createMockAclRuleFormContainer({
+        resequenceTarget: '100',
+        startSeq: '2147483640',
+        step: '100'
+    });
+    resequenceRouterAclFromInspector(form2, r0);
+    assert.strictEqual(networkState.history.length, initialHistoryLength, 'Overflow failure must not retain history entry');
+});
+
+// 1572. Standard ACL resequencing remains compatible
+runTest('1572. Standard ACL resequencing remains compatible', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '10', 'standard');
+    addRouterAclRule(r0.id, '10', { sequence: 10, action: 'permit', sourceIp: '10.0.0.1', sourceWildcard: '0.0.0.0' });
+    addRouterAclRule(r0.id, '10', { sequence: 20, action: 'deny', sourceIp: '10.0.0.2', sourceWildcard: '0.0.0.0' });
+
+    const form = createMockAclRuleFormContainer({
+        resequenceTarget: '10',
+        startSeq: '200',
+        step: '50'
+    });
+    const res = resequenceRouterAclFromInspector(form, r0);
+    assert.strictEqual(res.success, true);
+
+    const acl = getRouterAcl(r0.id, '10');
+    assert.strictEqual(acl.rules.length, 2);
+    assert.strictEqual(acl.rules[0].sequence, 200);
+    assert.strictEqual(acl.rules[1].sequence, 250);
+    assert.strictEqual(acl.rules[0].source.ip, '10.0.0.1');
+
+    const html = renderRouterAclSection(r0);
+    assert.ok(html.includes('<td><strong>200</strong></td>'));
+    assert.ok(html.includes('<td><strong>250</strong></td>'));
+    assert.ok(!html.includes('<th>Proto</th>'), 'Standard ACL table must preserve standard header');
+});
+
+// 1573. Comprehensive end-to-end GUI ACL lifecycle
+runTest('1573. Comprehensive end-to-end GUI ACL lifecycle (create, submit, render, resequence, delete, clear, CLI parity)', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+
+    // A. Create extended ACL
+    const createRes = createRouterAcl(r0.id, '150', 'extended');
+    assert.strictEqual(createRes.success, true);
+    assert.strictEqual(createRes.acl.type, 'extended');
+
+    // B. Add rules via GUI helper
+    // 1. TCP rule with ports, established, log
+    const formTcp = createMockAclRuleFormContainer({
+        targetAcl: '150',
+        sequence: '10',
+        action: 'permit',
+        protocol: 'tcp',
+        source: '192.168.1.0',
+        sourceMask: '0.0.0.255',
+        srcPortOp: 'gt',
+        srcPort: '1024',
+        dest: '10.0.0.1',
+        destMask: '0.0.0.0',
+        dstPortOp: 'eq',
+        dstPort: 'http',
+        established: true,
+        log: 'log'
+    });
+    submitRouterAclRuleFromInspector(formTcp, r0);
+
+    // 2. UDP rule with destination port range
+    const formUdp = createMockAclRuleFormContainer({
+        targetAcl: '150',
+        sequence: '20',
+        action: 'deny',
+        protocol: 'udp',
+        source: 'any',
+        dest: 'any',
+        dstPortOp: 'range',
+        dstPort: '5000',
+        dstPortRangeEnd: '6000'
+    });
+    submitRouterAclRuleFromInspector(formUdp, r0);
+
+    // 3. ICMP rule with echo type and log-input
+    const formIcmp = createMockAclRuleFormContainer({
+        targetAcl: '150',
+        sequence: '30',
+        action: 'permit',
+        protocol: 'icmp',
+        source: 'any',
+        dest: '10.0.0.1',
+        destMask: '0.0.0.0',
+        icmpType: 'echo',
+        log: 'log-input'
+    });
+    submitRouterAclRuleFromInspector(formIcmp, r0);
+
+    // 4. IP generic rule
+    const formIp = createMockAclRuleFormContainer({
+        targetAcl: '150',
+        sequence: '40',
+        action: 'deny',
+        protocol: 'ip',
+        source: 'any',
+        dest: 'any'
+    });
+    submitRouterAclRuleFromInspector(formIp, r0);
+
+    const acl = getRouterAcl(r0.id, '150');
+    assert.strictEqual(acl.rules.length, 4);
+
+    // C. Render Table & Verify Badges
+    const initialHtml = renderRouterAclSection(r0);
+    assert.ok(initialHtml.includes('gt 1024'));
+    assert.ok(initialHtml.includes('eq 80'));
+    assert.ok(initialHtml.includes('EST'));
+    assert.ok(initialHtml.includes('range 5000 6000'));
+    assert.ok(initialHtml.includes('echo'));
+    assert.ok(initialHtml.includes('>LOG<'));
+    assert.ok(initialHtml.includes('>LOG-IN<'));
+
+    // D. GUI Resequence: 10,20,30,40 -> 100,110,120,130
+    const reseqForm = createMockAclRuleFormContainer({
+        resequenceTarget: '150',
+        startSeq: '100',
+        step: '10'
+    });
+    const reseqRes = resequenceRouterAclFromInspector(reseqForm, r0);
+    assert.strictEqual(reseqRes.success, true);
+    assert.strictEqual(acl.rules[0].sequence, 100);
+    assert.strictEqual(acl.rules[1].sequence, 110);
+    assert.strictEqual(acl.rules[2].sequence, 120);
+    assert.strictEqual(acl.rules[3].sequence, 130);
+
+    // E. Delete Rule 110 (the UDP rule) using the new sequence
+    const delRes = deleteRouterAclRule(r0.id, '150', 110);
+    assert.strictEqual(delRes.success, true);
+    assert.strictEqual(acl.rules.length, 3);
+    assert.strictEqual(acl.rules[0].sequence, 100);
+    assert.strictEqual(acl.rules[1].sequence, 120);
+    assert.strictEqual(acl.rules[2].sequence, 130);
+
+    // F. Counter clearing
+    acl.rules[0].hits = 55;
+    const postHitHtml = renderRouterAclSection(r0);
+    assert.ok(postHitHtml.includes('<span class="acl-hits-badge">55</span>'));
+    clearRouterAclCounters(r0.id, '150');
+    assert.strictEqual(acl.rules[0].hits, 0);
+    const postClearHtml = renderRouterAclSection(r0);
+    assert.ok(postClearHtml.includes('<span class="acl-hits-badge">0</span>'));
+
+    // G. CLI Parity
+    const cliOutput = formatCliRouterAcls(r0, '150');
+    assert.ok(cliOutput.includes('Extended IP access list 150'));
+    assert.ok(cliOutput.includes('100 permit tcp 192.168.1.0 0.0.0.255 gt 1024 host 10.0.0.1 eq 80 established log (0 matches)'));
+    assert.ok(cliOutput.includes('120 permit icmp any host 10.0.0.1 echo log-input (0 matches)'));
+    assert.ok(cliOutput.includes('130 deny ip any any (0 matches)'));
+});
+
+// 1574. Undo / Redo history integration across GUI ACL rule addition and resequencing
+runTest('1574. Undo / Redo history integration across GUI ACL rule addition and resequencing', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    createRouterAcl(r0.id, '100', 'extended');
+
+    // Add Rule 1 via GUI
+    const form1 = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        sequence: '10',
+        action: 'permit',
+        protocol: 'ip',
+        source: 'any',
+        dest: 'any'
+    });
+    submitRouterAclRuleFromInspector(form1, r0);
+    assert.strictEqual(getRouterAcl(r0.id, '100').rules.length, 1);
+
+    // Add Rule 2 via GUI
+    const form2 = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        sequence: '20',
+        action: 'deny',
+        protocol: 'ip',
+        source: 'any',
+        dest: 'any'
+    });
+    submitRouterAclRuleFromInspector(form2, r0);
+    assert.strictEqual(getRouterAcl(r0.id, '100').rules.length, 2);
+
+    // Resequence via GUI (10, 20 -> 50, 100)
+    const reseqForm = createMockAclRuleFormContainer({
+        resequenceTarget: '100',
+        startSeq: '50',
+        step: '50'
+    });
+    resequenceRouterAclFromInspector(reseqForm, r0);
+    const aclReseq = getRouterAcl(r0.id, '100');
+    assert.strictEqual(aclReseq.rules[0].sequence, 50);
+    assert.strictEqual(aclReseq.rules[1].sequence, 100);
+
+    // Undo resequence
+    undo();
+    const aclUndoneReseq = getRouterAcl(r0.id, '100');
+    assert.strictEqual(aclUndoneReseq.rules[0].sequence, 10);
+    assert.strictEqual(aclUndoneReseq.rules[1].sequence, 20);
+
+    // Undo Rule 2 addition
+    undo();
+    const aclUndoneRule2 = getRouterAcl(r0.id, '100');
+    assert.strictEqual(aclUndoneRule2.rules.length, 1);
+    assert.strictEqual(aclUndoneRule2.rules[0].sequence, 10);
+});
+
+// 1575. Packet simulation and hit counter increment against GUI-created and GUI-resequenced ACL
+runTest('1575. Packet simulation and hit counter increment against GUI-created and GUI-resequenced ACL', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    const r0 = networkState.devices[0];
+    r0.interfaces['Gig0/0'].ip = '192.168.1.1';
+    r0.interfaces['Gig0/0'].subnetMask = '255.255.255.0';
+    r0.interfaces['Gig0/1'].ip = '10.0.0.1';
+    r0.interfaces['Gig0/1'].subnetMask = '255.255.255.0';
+
+    createRouterAcl(r0.id, '100', 'extended');
+
+    // Create GUI rule: permit tcp any any eq 80
+    const formTcp = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        sequence: '10',
+        action: 'permit',
+        protocol: 'tcp',
+        source: 'any',
+        dest: 'any',
+        dstPortOp: 'eq',
+        dstPort: '80'
+    });
+    submitRouterAclRuleFromInspector(formTcp, r0);
+
+    // Create GUI rule: deny ip any any
+    const formDeny = createMockAclRuleFormContainer({
+        targetAcl: '100',
+        sequence: '20',
+        action: 'deny',
+        protocol: 'ip',
+        source: 'any',
+        dest: 'any'
+    });
+    submitRouterAclRuleFromInspector(formDeny, r0);
+
+    // Bind ACL to Gig0/0 inbound
+    bindRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', '100');
+
+    // GUI Resequence to 100, 200
+    const formReseq = createMockAclRuleFormContainer({
+        resequenceTarget: '100',
+        startSeq: '100',
+        step: '100'
+    });
+    resequenceRouterAclFromInspector(formReseq, r0);
+
+    const acl = getRouterAcl(r0.id, '100');
+    assert.strictEqual(acl.rules[0].sequence, 100);
+    assert.strictEqual(acl.rules[1].sequence, 200);
+
+    // Evaluate matching packet: TCP port 80
+    const evalTcp = evaluateRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', {
+        protocol: 'tcp',
+        sourceIp: '192.168.1.50',
+        destinationIp: '10.0.0.50',
+        srcPort: 54321,
+        dstPort: 80
+    });
+    assert.strictEqual(evalTcp.action, 'permit');
+    assert.strictEqual(acl.rules[0].hits, 1);
+    assert.strictEqual(acl.rules[1].hits, 0);
+
+    // Evaluate non-matching packet: UDP port 53 (falls through to deny rule sequence 200)
+    const evalUdp = evaluateRouterInterfaceAcl(r0.id, 'Gig0/0', 'in', {
+        protocol: 'udp',
+        sourceIp: '192.168.1.50',
+        destinationIp: '10.0.0.50',
+        srcPort: 54321,
+        dstPort: 53
+    });
+    assert.strictEqual(evalUdp.action, 'deny');
+    assert.strictEqual(acl.rules[0].hits, 1);
+    assert.strictEqual(acl.rules[1].hits, 1);
+
+    // Verify UI reflects these hit counts
+    const html = renderRouterAclSection(r0);
+    assert.ok(html.includes('<td><strong>100</strong></td>'));
+    assert.ok(html.includes('<td><strong>200</strong></td>'));
 });
 
 console.log('----------------------------------------------------');
