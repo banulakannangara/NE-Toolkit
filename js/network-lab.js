@@ -2304,6 +2304,30 @@ function renderPropertiesPanel() {
         });
     }
 
+    const recoverPortButtons = panel.querySelectorAll ? panel.querySelectorAll('.recover-port-btn') : [];
+    if (recoverPortButtons && recoverPortButtons.forEach) {
+        recoverPortButtons.forEach((btn) => {
+            btn.addEventListener('click', (e) => {
+                const port = e.currentTarget?.dataset?.port;
+                const devId = e.currentTarget?.dataset?.deviceId || selected.id;
+                const sw = getSwitchDevice(devId);
+                if (sw && port) {
+                    const normPort = normalizeSwitchPortName(port) || port;
+                    const cfg = sw.switchports?.[normPort];
+                    if (cfg && cfg.adminDown) {
+                        const res = setSwitchPortOperState(sw, port, 'CANONICAL_RECOVERY');
+                        updateStatus(res.output || `Port ${port} is administratively down.`);
+                        return;
+                    }
+                    pushHistory();
+                    const res = setSwitchPortOperState(sw, port, 'CANONICAL_RECOVERY');
+                    updateStatus(res.output || `Port ${port} recovered.`);
+                    render();
+                }
+            });
+        });
+    }
+
     const clearArpButton = panel.querySelector('#clearArpTable');
     if (clearArpButton) {
         clearArpButton.addEventListener('click', () => {
@@ -5277,6 +5301,36 @@ function renderSwitchInspector(selected) {
         `;
     }).join('');
 
+    const secPorts = sortedPortNames.filter((pName) => {
+        const cfg = getSwitchPortConfig(targetSw, pName);
+        return cfg.portSecurity && (cfg.portSecurity.enabled || cfg.portSecurity.errDisabled);
+    });
+
+    const portSecurityRows = secPorts.map((pName) => {
+        const cfg = getSwitchPortConfig(targetSw, pName);
+        const sec = cfg.portSecurity;
+        let badge = '<span class="status-badge status-up">SECURE-UP</span>';
+        if (sec.errDisabled) {
+            badge = '<span class="status-badge status-down">ERR-DISABLED</span>';
+        } else if (cfg.status === 'down' || cfg.adminDown) {
+            badge = '<span class="status-badge status-down">DOWN</span>';
+        }
+        const actionHtml = sec.errDisabled
+            ? `<button class="toolbar-button recover-port-btn" type="button" data-port="${escapeHtml(pName)}" data-device-id="${escapeHtml(targetSw.id)}">Recover Port</button>`
+            : '-';
+        return `
+            <tr>
+                <td>${escapeHtml(pName)}</td>
+                <td>${badge}</td>
+                <td>${escapeHtml(sec.violationMode)}</td>
+                <td>${escapeHtml(String(sec.maxMacs))}</td>
+                <td>${escapeHtml(String(sec.secureMacs?.length || 0))}</td>
+                <td>${escapeHtml(String(sec.violationCount))}</td>
+                <td>${actionHtml}</td>
+            </tr>
+        `;
+    }).join('');
+
     return `
         <div class="property-summary">
             <h4>SWITCH</h4>
@@ -5385,6 +5439,27 @@ function renderSwitchInspector(selected) {
                 </table>
             </div>
         ` : ''}
+        <div class="property-summary">
+            <h4>PORT SECURITY</h4>
+            ${secPorts.length ? `
+                <table class="property-table">
+                    <thead>
+                        <tr>
+                            <th>Port</th>
+                            <th>Status</th>
+                            <th>Mode</th>
+                            <th>Max</th>
+                            <th>Current</th>
+                            <th>Violations</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${portSecurityRows}
+                    </tbody>
+                </table>
+            ` : '<p class="empty-state">No ports have port security enabled.</p>'}
+        </div>
         <div class="property-summary">
             <h4>MAC ADDRESS TABLE</h4>
             ${learnedCount ? `
@@ -6305,18 +6380,24 @@ function findTopologyPath(sourceId, targetId) {
             return;
         }
 
-        // Check if source switchport is in STP blocking state
+        // Check if source switchport is in STP blocking state or down
         if (source.type === 'switch') {
             const port = getSwitchPortLabel(source.id, connection.id);
+            if (getInterfaceOperStatus(source, port) === 'down') {
+                return;
+            }
             const stpPort = source.stp?.ports?.[port];
             if (stpPort && stpPort.state === 'blocking') {
                 return;
             }
         }
 
-        // Check if target switchport is in STP blocking state
+        // Check if target switchport is in STP blocking state or down
         if (target.type === 'switch') {
             const port = getSwitchPortLabel(target.id, connection.id);
+            if (getInterfaceOperStatus(target, port) === 'down') {
+                return;
+            }
             const stpPort = target.stp?.ports?.[port];
             if (stpPort && stpPort.state === 'blocking') {
                 return;
@@ -6809,6 +6890,16 @@ function recalculateTopologyStp() {
             ]);
 
             allPortNames.forEach(portName => {
+                if (getInterfaceOperStatus(sw, portName) === 'down') {
+                    sw.stp.ports[portName] = {
+                        role: 'disabled',
+                        state: 'blocking',
+                        cost: getSwitchPortCost(sw, portName),
+                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY
+                    };
+                    return;
+                }
+
                 if (sw.stp.rootPort && sw.stp.rootPort === portName) {
                     sw.stp.ports[portName] = {
                         role: 'root',
@@ -7193,6 +7284,60 @@ function setRouterSubinterfaceEncapsulation(routerOrId, subinterfaceName, vlanId
     return subif;
 }
 
+function ensurePortSecurityState(sw, portName) {
+    const normPort = normalizeSwitchPortName(portName) || portName;
+    if (!sw.switchports) sw.switchports = {};
+    if (!sw.switchports[normPort]) {
+        sw.switchports[normPort] = {
+            port: normPort,
+            name: normPort,
+            mode: 'access',
+            accessVlan: 1,
+            nativeVlan: 1,
+            allowedVlans: 'all',
+            status: 'up',
+            adminDown: false
+        };
+    }
+    const cfg = sw.switchports[normPort];
+    if (typeof cfg.adminDown !== 'boolean') {
+        cfg.adminDown = cfg.status === 'down';
+    }
+    if (!cfg.portSecurity || typeof cfg.portSecurity !== 'object') {
+        cfg.portSecurity = {
+            enabled: false,
+            maxMacs: 1,
+            violationMode: 'shutdown',
+            sticky: false,
+            secureMacs: [],
+            violationCount: 0,
+            lastViolationMac: null,
+            errDisabled: false
+        };
+    }
+    if (!Array.isArray(cfg.portSecurity.secureMacs)) {
+        cfg.portSecurity.secureMacs = [];
+    }
+    if (typeof cfg.portSecurity.enabled !== 'boolean') cfg.portSecurity.enabled = false;
+    if (typeof cfg.portSecurity.maxMacs !== 'number') cfg.portSecurity.maxMacs = 1;
+    if (!['protect', 'restrict', 'shutdown'].includes(cfg.portSecurity.violationMode)) cfg.portSecurity.violationMode = 'shutdown';
+    if (typeof cfg.portSecurity.sticky !== 'boolean') cfg.portSecurity.sticky = false;
+    if (typeof cfg.portSecurity.violationCount !== 'number') cfg.portSecurity.violationCount = 0;
+    if (typeof cfg.portSecurity.errDisabled !== 'boolean') cfg.portSecurity.errDisabled = false;
+
+    // Keep status synchronized with canonical invariants:
+    // Port must not be considered operational if either adminDown or errDisabled is true
+    if (cfg.adminDown || cfg.portSecurity.errDisabled) {
+        cfg.status = 'down';
+    } else if (cfg.status !== 'down') {
+        cfg.status = 'up';
+    } else {
+        cfg.adminDown = true;
+    }
+
+    return cfg.portSecurity;
+}
+
 function getSwitchPortConfig(switchOrId, portName) {
     const sw = getSwitchDevice(switchOrId);
     const normPort = normalizeSwitchPortName(portName) || portName;
@@ -7204,23 +7349,24 @@ function getSwitchPortConfig(switchOrId, portName) {
             accessVlan: 1,
             nativeVlan: 1,
             allowedVlans: 'all',
+            status: 'up',
+            adminDown: false,
+            portSecurity: {
+                enabled: false,
+                maxMacs: 1,
+                violationMode: 'shutdown',
+                sticky: false,
+                secureMacs: [],
+                violationCount: 0,
+                lastViolationMac: null,
+                errDisabled: false
+            },
             stpCost: normPort.toLowerCase().startsWith('gi') ? DEFAULT_PORT_COST_GI : DEFAULT_PORT_COST_FA,
             stpPortPriority: DEFAULT_PORT_PRIORITY
         };
     }
     ensureSwitchVlanState(sw);
-    if (!sw.switchports[normPort]) {
-        return {
-            port: normPort,
-            name: normPort,
-            mode: 'access',
-            accessVlan: 1,
-            nativeVlan: 1,
-            allowedVlans: 'all',
-            stpCost: normPort.toLowerCase().startsWith('gi') ? DEFAULT_PORT_COST_GI : DEFAULT_PORT_COST_FA,
-            stpPortPriority: DEFAULT_PORT_PRIORITY
-        };
-    }
+    ensurePortSecurityState(sw, normPort);
     const cfg = sw.switchports[normPort];
     return {
         port: cfg.port || cfg.name || normPort,
@@ -7229,6 +7375,9 @@ function getSwitchPortConfig(switchOrId, portName) {
         accessVlan: cfg.accessVlan || 1,
         nativeVlan: cfg.nativeVlan || 1,
         allowedVlans: cfg.allowedVlans !== undefined ? cfg.allowedVlans : 'all',
+        status: cfg.status || 'up',
+        adminDown: Boolean(cfg.adminDown),
+        portSecurity: cfg.portSecurity,
         stpCost: typeof cfg.stpCost === 'number' && cfg.stpCost > 0 ? cfg.stpCost : (normPort.toLowerCase().startsWith('gi') ? DEFAULT_PORT_COST_GI : DEFAULT_PORT_COST_FA),
         stpPortPriority: typeof cfg.stpPortPriority === 'number' ? cfg.stpPortPriority : DEFAULT_PORT_PRIORITY
     };
@@ -7243,6 +7392,11 @@ function setSwitchPortMode(switchOrId, portName, mode) {
     const lowerMode = String(mode || '').toLowerCase().trim();
     if (lowerMode !== 'access' && lowerMode !== 'trunk') {
         throw new Error(`Mode "${mode}" is not supported (supported modes: access, trunk).`);
+    }
+    ensurePortSecurityState(sw, normPort);
+    const portSec = sw.switchports[normPort]?.portSecurity;
+    if (lowerMode === 'trunk' && portSec?.enabled) {
+        throw new Error(`Command rejected: Port ${normPort} has port-security enabled. Disable port-security before configuring trunk mode.`);
     }
     if (!sw.switchports[normPort]) {
         sw.switchports[normPort] = {
@@ -7594,6 +7748,443 @@ function getEgressTagAction(portConfig, ingressVlan) {
             priority: 0,
             isTagged: true
         }
+    };
+}
+
+const MAX_SWITCH_LOG_ENTRIES = 100;
+
+function getSwitchSecurityLog(switchId) {
+    const runtime = getSwitchRuntime(switchId);
+    if (!Array.isArray(runtime.securityLog)) {
+        runtime.securityLog = [];
+    }
+    return runtime.securityLog;
+}
+
+function appendSwitchSecurityLog(sw, message) {
+    if (!sw) return;
+    const log = getSwitchSecurityLog(sw.id);
+    log.push(message);
+    if (log.length > MAX_SWITCH_LOG_ENTRIES) {
+        log.shift();
+    }
+}
+
+function setSwitchPortOperState(dev, portName, action) {
+    const sw = getSwitchDevice(dev);
+    if (!sw) return { success: false, reason: 'Device is not a switch' };
+    const normPort = normalizeSwitchPortName(portName) || portName;
+    ensurePortSecurityState(sw, normPort);
+    const cfg = sw.switchports[normPort];
+    const sec = cfg.portSecurity;
+
+    switch (action) {
+        case 'SHUTDOWN': {
+            cfg.adminDown = true;
+            sec.errDisabled = false;
+            cfg.status = 'down';
+            recalculateTopologyStp();
+            return {
+                success: true,
+                state: 'ADMIN_DOWN',
+                adminDown: true,
+                errDisabled: false,
+                status: 'down',
+                output: `% Interface ${normPort} changed state to administratively down`
+            };
+        }
+
+        case 'NO_SHUTDOWN': {
+            if (sec.errDisabled) {
+                return {
+                    success: false,
+                    rejected: true,
+                    state: 'ERR_DISABLED',
+                    adminDown: cfg.adminDown,
+                    errDisabled: true,
+                    status: 'down',
+                    output: `% Interface ${normPort} is in err-disabled state. Issue "shutdown" followed by "no shutdown" to re-enable.`
+                };
+            }
+            cfg.adminDown = false;
+            cfg.status = 'up';
+            recalculateTopologyStp();
+            return {
+                success: true,
+                state: 'OPERATIONAL_UP',
+                adminDown: false,
+                errDisabled: false,
+                status: 'up',
+                output: `% Interface ${normPort} changed state to up`
+            };
+        }
+
+        case 'VIOLATION_SHUTDOWN': {
+            sec.errDisabled = true;
+            cfg.status = 'down';
+            sec.secureMacs = sec.secureMacs.filter(e => e.type !== 'dynamic');
+            if (networkState.switchRuntime?.[sw.id]?.macTable) {
+                networkState.switchRuntime[sw.id].macTable = networkState.switchRuntime[sw.id].macTable.filter(
+                    e => e.port !== normPort || e.type === 'STATIC'
+                );
+            }
+            recalculateTopologyStp();
+            return {
+                success: true,
+                state: 'ERR_DISABLED',
+                adminDown: cfg.adminDown,
+                errDisabled: true,
+                status: 'down',
+                output: `% Interface ${normPort} entered err-disabled state`
+            };
+        }
+
+        case 'CANONICAL_RECOVERY': {
+            if (cfg.adminDown) {
+                sec.errDisabled = false;
+                cfg.status = 'down';
+                recalculateTopologyStp();
+                return {
+                    success: false,
+                    rejected: true,
+                    state: 'ADMIN_DOWN',
+                    adminDown: true,
+                    errDisabled: false,
+                    status: 'down',
+                    output: `% Interface ${normPort} is administratively down. Issue "no shutdown" to enable.`
+                };
+            }
+            if (!sec.errDisabled) {
+                return {
+                    success: true,
+                    state: 'OPERATIONAL_UP',
+                    adminDown: false,
+                    errDisabled: false,
+                    status: 'up',
+                    output: `% Interface ${normPort} is already operational.`
+                };
+            }
+            sec.errDisabled = false;
+            cfg.adminDown = false;
+            cfg.status = 'up';
+            recalculateTopologyStp();
+            return {
+                success: true,
+                state: 'OPERATIONAL_UP',
+                adminDown: false,
+                errDisabled: false,
+                status: 'up',
+                output: `% Interface ${normPort} recovered from err-disabled state to up.`
+            };
+        }
+
+        case 'DISABLE_PORT_SECURITY': {
+            sec.enabled = false;
+            sec.secureMacs = sec.secureMacs.filter(e => e.type !== 'dynamic');
+            if (sec.errDisabled || cfg.adminDown) {
+                cfg.status = 'down';
+            } else {
+                cfg.status = 'up';
+            }
+            return {
+                success: true,
+                state: sec.errDisabled ? 'ERR_DISABLED' : (cfg.adminDown ? 'ADMIN_DOWN' : 'OPERATIONAL_UP'),
+                adminDown: cfg.adminDown,
+                errDisabled: sec.errDisabled,
+                status: cfg.status
+            };
+        }
+
+        default:
+            return { success: false, reason: `Unknown action: ${action}` };
+    }
+}
+
+function setSwitchPortSecurityEnabled(switchOrId, portName, enabled) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) throw new Error('Switch not found.');
+    ensureSwitchVlanState(sw);
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) throw new Error(`Invalid switch port "${portName}".`);
+    const cfg = getSwitchPortConfig(sw, normPort);
+    if (enabled && cfg.mode === 'trunk') {
+        throw new Error(`Command rejected: Port ${normPort} is a trunk port. Port security is only supported on access ports.`);
+    }
+    ensurePortSecurityState(sw, normPort);
+    const sec = sw.switchports[normPort].portSecurity;
+    if (enabled) {
+        sec.enabled = true;
+    } else {
+        setSwitchPortOperState(sw, normPort, 'DISABLE_PORT_SECURITY');
+    }
+    return sec;
+}
+
+function setSwitchPortSecurityMaximum(switchOrId, portName, maxCount) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) throw new Error('Switch not found.');
+    ensureSwitchVlanState(sw);
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) throw new Error(`Invalid switch port "${portName}".`);
+    const num = parseInt(maxCount, 10);
+    if (isNaN(num) || num < 1 || num > 1024) {
+        throw new Error('Maximum MAC addresses must be between 1 and 1024.');
+    }
+    ensurePortSecurityState(sw, normPort);
+    const sec = sw.switchports[normPort].portSecurity;
+    if (num < sec.secureMacs.length) {
+        throw new Error(`Cannot set maximum MAC addresses to ${num} because ${sec.secureMacs.length} MAC addresses are already configured/learned on port ${normPort}.`);
+    }
+    sec.maxMacs = num;
+    return sec;
+}
+
+function setSwitchPortSecurityViolation(switchOrId, portName, mode) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) throw new Error('Switch not found.');
+    ensureSwitchVlanState(sw);
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) throw new Error(`Invalid switch port "${portName}".`);
+    const lower = String(mode || '').trim().toLowerCase();
+    if (!['protect', 'restrict', 'shutdown'].includes(lower)) {
+        throw new Error(`Unsupported violation mode "${mode}". Supported modes: protect, restrict, shutdown.`);
+    }
+    ensurePortSecurityState(sw, normPort);
+    const sec = sw.switchports[normPort].portSecurity;
+    sec.violationMode = lower;
+    return sec;
+}
+
+function addSwitchPortSecurityMac(switchOrId, portName, mac, isSticky = false) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) throw new Error('Switch not found.');
+    ensureSwitchVlanState(sw);
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) throw new Error(`Invalid switch port "${portName}".`);
+    const normMac = normalizeMacAddress(mac);
+    if (!normMac) {
+        throw new Error(`Invalid MAC address "${mac}".`);
+    }
+    if (normMac === 'FF:FF:FF:FF:FF:FF' || normMac.startsWith('01:00:5E') || normMac.startsWith('33:33')) {
+        throw new Error(`MAC address "${mac}" is a broadcast or multicast address and cannot be secure.`);
+    }
+    ensurePortSecurityState(sw, normPort);
+    const cfg = sw.switchports[normPort];
+    const sec = cfg.portSecurity;
+
+    for (const [otherPort, otherCfg] of Object.entries(sw.switchports)) {
+        if (otherPort !== normPort && otherCfg?.portSecurity?.secureMacs) {
+            const match = otherCfg.portSecurity.secureMacs.find((e) => e.mac === normMac);
+            if (match) {
+                throw new Error(`MAC address ${normMac} is already configured as secure on interface ${otherPort}.`);
+            }
+        }
+    }
+
+    const vlanId = cfg.accessVlan || 1;
+    const existing = sec.secureMacs.find((e) => e.mac === normMac);
+    if (existing) {
+        if (!isSticky && existing.type !== 'static') {
+            existing.type = 'static';
+        } else if (isSticky && existing.type === 'dynamic') {
+            existing.type = 'sticky';
+        }
+        return existing;
+    }
+
+    if (sec.secureMacs.length >= sec.maxMacs) {
+        throw new Error(`Maximum MAC addresses (${sec.maxMacs}) reached on port ${normPort}. Cannot add secure MAC.`);
+    }
+
+    const newEntry = {
+        mac: normMac,
+        vlan: vlanId,
+        port: normPort,
+        type: (typeof isSticky === 'string' && isSticky) ? isSticky : (isSticky ? 'sticky' : 'static'),
+        learnedAt: new Date().toISOString()
+    };
+    sec.secureMacs.push(newEntry);
+
+    const runtime = getSwitchRuntime(sw.id);
+    const existingFwd = runtime.macTable.find((e) => e.mac === normMac && (Number(e.vlan) || 1) === vlanId);
+    if (existingFwd) {
+        existingFwd.port = normPort;
+        existingFwd.type = 'STATIC';
+        existingFwd.learnedAt = new Date().toISOString();
+    } else {
+        runtime.macTable.push({
+            vlan: vlanId,
+            mac: normMac,
+            port: normPort,
+            deviceId: null,
+            type: 'STATIC',
+            learnedAt: new Date().toISOString()
+        });
+    }
+
+    return newEntry;
+}
+
+function removeSwitchPortSecurityMac(switchOrId, portName, mac, isSticky = false) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) throw new Error('Switch not found.');
+    ensureSwitchVlanState(sw);
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) throw new Error(`Invalid switch port "${portName}".`);
+    const normMac = normalizeMacAddress(mac);
+    if (!normMac) {
+        throw new Error(`Invalid MAC address "${mac}".`);
+    }
+    ensurePortSecurityState(sw, normPort);
+    const sec = sw.switchports[normPort].portSecurity;
+    const idx = sec.secureMacs.findIndex((e) => e.mac === normMac && (isSticky ? e.type === 'sticky' : true));
+    if (idx === -1) {
+        throw new Error(`Secure MAC address ${normMac} not found on port ${normPort}.`);
+    }
+    const removed = sec.secureMacs.splice(idx, 1)[0];
+
+    const runtime = getSwitchRuntime(sw.id);
+    if (Array.isArray(runtime.macTable)) {
+        runtime.macTable = runtime.macTable.filter((e) => !(e.mac === normMac && e.port === normPort));
+    }
+    return removed;
+}
+
+function setSwitchPortSecuritySticky(switchOrId, portName, enabled) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) throw new Error('Switch not found.');
+    ensureSwitchVlanState(sw);
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) throw new Error(`Invalid switch port "${portName}".`);
+    ensurePortSecurityState(sw, normPort);
+    const sec = sw.switchports[normPort].portSecurity;
+    sec.sticky = Boolean(enabled);
+    if (sec.sticky) {
+        sec.secureMacs.forEach((e) => {
+            if (e.type === 'dynamic') {
+                e.type = 'sticky';
+            }
+        });
+        const runtime = getSwitchRuntime(sw.id);
+        if (runtime && Array.isArray(runtime.macTable)) {
+            runtime.macTable.forEach((entry) => {
+                if (entry.port === normPort && sec.secureMacs.some((e) => e.mac === entry.mac)) {
+                    entry.type = 'STATIC';
+                }
+            });
+        }
+    }
+    return sec;
+}
+
+function evaluateSwitchPortSecurity(switchDev, ingressPort, sourceMac, ingressVlan = 1) {
+    const sw = getSwitchDevice(switchDev);
+    if (!sw) return { allowed: true, action: 'PERMIT' };
+    const normPort = normalizeSwitchPortName(ingressPort) || ingressPort;
+    ensurePortSecurityState(sw, normPort);
+    const cfg = sw.switchports[normPort];
+    const sec = cfg.portSecurity;
+
+    if (cfg.adminDown || sec.errDisabled || cfg.status === 'down') {
+        return {
+            allowed: false,
+            action: 'DROP',
+            reason: sec.errDisabled ? 'err-disabled' : 'interface-down',
+            message: `Switch ${sw.name} port ${normPort} is ${sec.errDisabled ? 'err-disabled' : 'down'}.`
+        };
+    }
+
+    if (!sec.enabled) {
+        return { allowed: true, action: 'PERMIT' };
+    }
+
+    const normMac = normalizeMacAddress(sourceMac);
+    if (!normMac) {
+        return { allowed: false, action: 'DROP', reason: 'invalid-mac', message: 'Invalid source MAC address.' };
+    }
+    const vlanId = Number(ingressVlan) || (cfg.accessVlan || 1);
+
+    const existingOnPort = sec.secureMacs.find((e) => e.mac === normMac);
+    if (existingOnPort) {
+        existingOnPort.learnedAt = new Date().toISOString();
+        return {
+            allowed: true,
+            action: 'PERMIT',
+            entry: existingOnPort,
+            isExisting: true
+        };
+    }
+
+    for (const [otherPort, otherCfg] of Object.entries(sw.switchports || {})) {
+        if (otherPort !== normPort && otherCfg?.portSecurity?.enabled) {
+            const matchElsewhere = otherCfg.portSecurity.secureMacs.find((e) => e.mac === normMac);
+            if (matchElsewhere) {
+                return handlePortSecurityViolation(sw, normPort, normMac, vlanId, 'mac-move');
+            }
+        }
+    }
+
+    if (sec.secureMacs.length < sec.maxMacs) {
+        const newEntry = {
+            mac: normMac,
+            vlan: vlanId,
+            port: normPort,
+            type: sec.sticky ? 'sticky' : 'dynamic',
+            learnedAt: new Date().toISOString()
+        };
+        sec.secureMacs.push(newEntry);
+
+        return {
+            allowed: true,
+            action: 'PERMIT',
+            learnedSecure: true,
+            entry: newEntry
+        };
+    }
+
+    return handlePortSecurityViolation(sw, normPort, normMac, vlanId, 'max-limit');
+}
+
+function handlePortSecurityViolation(switchDev, normPort, normMac, vlanId, reasonType) {
+    const sw = getSwitchDevice(switchDev);
+    const cfg = sw.switchports[normPort];
+    const sec = cfg.portSecurity;
+    sec.lastViolationMac = normMac;
+
+    if (sec.violationMode === 'protect') {
+        return {
+            allowed: false,
+            action: 'DROP',
+            violationMode: 'protect',
+            reason: 'port-security-violation',
+            message: `Switch ${sw.name} dropped frame on ${normPort}: Port security violation (protect mode - source MAC ${normMac})`
+        };
+    }
+
+    if (sec.violationMode === 'restrict') {
+        sec.violationCount += 1;
+        appendSwitchSecurityLog(sw, `%PORT_SECURITY-2-PSECURE_VIOLATION: Security violation occurred, caused by MAC ${normMac} on port ${normPort} (VLAN ${vlanId})`);
+        return {
+            allowed: false,
+            action: 'DROP',
+            violationMode: 'restrict',
+            reason: 'port-security-violation',
+            message: `Switch ${sw.name} dropped frame on ${normPort}: Port security violation (restrict mode - source MAC ${normMac}, violation count ${sec.violationCount})`
+        };
+    }
+
+    sec.violationCount += 1;
+    setSwitchPortOperState(sw, normPort, 'VIOLATION_SHUTDOWN');
+    appendSwitchSecurityLog(sw, `%PM-4-ERR_DISABLE: psecure-violation error detected on ${normPort}, putting ${normPort} in err-disable state`);
+    appendSwitchSecurityLog(sw, `%LINK-3-UPDOWN: Interface ${normPort}, changed state to down`);
+
+    return {
+        allowed: false,
+        action: 'DROP',
+        violationMode: 'shutdown',
+        reason: 'port-security-violation',
+        errDisabled: true,
+        message: `Switch ${sw.name} port ${normPort} entered err-disabled state: Port security violation by MAC ${normMac}`
     };
 }
 
@@ -10430,6 +11021,9 @@ function isMacEntryExpired(entry, agingTimeSeconds = DEFAULT_SWITCH_MAC_AGING_SE
     if (!entry || typeof entry !== 'object' || !entry.learnedAt) {
         return false;
     }
+    if (entry.type === 'STATIC') {
+        return false;
+    }
     if (typeof agingTimeSeconds !== 'number' || agingTimeSeconds <= 0 || !Number.isFinite(agingTimeSeconds)) {
         return false;
     }
@@ -10516,12 +11110,27 @@ function removeSwitchMacEntriesForConnection(connectionId) {
     let removedCount = 0;
     Object.keys(networkState.switchRuntime).forEach((switchId) => {
         const runtime = networkState.switchRuntime[switchId];
+        const sw = getSwitchDevice(switchId);
         if (runtime && runtime.ports && Object.prototype.hasOwnProperty.call(runtime.ports, connectionId)) {
             const portLabel = runtime.ports[connectionId];
-            if (portLabel && Array.isArray(runtime.macTable)) {
-                const before = runtime.macTable.length;
-                runtime.macTable = runtime.macTable.filter((entry) => entry.port !== portLabel);
-                removedCount += (before - runtime.macTable.length);
+            if (portLabel) {
+                if (sw?.switchports?.[portLabel]?.portSecurity?.secureMacs) {
+                    sw.switchports[portLabel].portSecurity.secureMacs = sw.switchports[portLabel].portSecurity.secureMacs.filter(
+                        (e) => e.type !== 'dynamic'
+                    );
+                }
+                if (Array.isArray(runtime.macTable)) {
+                    const before = runtime.macTable.length;
+                    const secureBindings = sw?.switchports?.[portLabel]?.portSecurity?.secureMacs;
+                    runtime.macTable = runtime.macTable.filter((entry) => {
+                        if (entry.port !== portLabel) return true;
+                        if (entry.type === 'STATIC' && Array.isArray(secureBindings)) {
+                            return secureBindings.some((sec) => sec.mac === entry.mac && (sec.type === 'static' || sec.type === 'sticky'));
+                        }
+                        return false;
+                    });
+                    removedCount += (before - runtime.macTable.length);
+                }
             }
         }
     });
@@ -10536,6 +11145,16 @@ function isSwitchMacEntryValid(switchId, entry) {
     const runtime = networkState.switchRuntime?.[switchId];
     if (!runtime || !runtime.ports) {
         return false;
+    }
+
+    const sw = getSwitchDevice(switchId);
+    if (entry.type === 'STATIC' && sw?.switchports?.[entry.port]?.portSecurity?.secureMacs) {
+        const isSecured = sw.switchports[entry.port].portSecurity.secureMacs.some(
+            (e) => e.mac === entry.mac && (e.type === 'static' || e.type === 'sticky')
+        );
+        if (isSecured) {
+            return true;
+        }
     }
 
     // 1. Device exists and MAC belongs to an existing device
@@ -10610,9 +11229,12 @@ function getSwitchMacEntry(switchId, mac, vlan = null) {
     return runtime.macTable.find((entry) => entry.mac === normalized) || null;
 }
 
-function learnSwitchMac(switchId, sourceMac, sourceDeviceId, portLabel, vlan = 1) {
+function learnSwitchMac(switchId, sourceMac, sourceDeviceId, portLabel, vlan = 1, options = {}) {
     const sw = getSwitchDevice(switchId);
     if (sw && sw.stp?.ports?.[portLabel]?.state === 'blocking') {
+        return null;
+    }
+    if (sw && getInterfaceOperStatus(sw, portLabel) === 'down') {
         return null;
     }
     const runtime = getSwitchRuntime(switchId);
@@ -10621,13 +11243,29 @@ function learnSwitchMac(switchId, sourceMac, sourceDeviceId, portLabel, vlan = 1
         return null;
     }
     const vlanId = Number(vlan) || 1;
+    let entryType = (options && options.type) ? options.type : 'DYNAMIC';
+    if (entryType === 'DYNAMIC' && sw && sw.switchports) {
+        const portCfg = sw.switchports[portLabel];
+        if (portCfg?.portSecurity?.secureMacs) {
+            const secBinding = portCfg.portSecurity.secureMacs.find((e) => e.mac === normalized);
+            if (secBinding && (secBinding.type === 'static' || secBinding.type === 'sticky')) {
+                entryType = 'STATIC';
+            }
+        }
+    }
 
     const existing = runtime.macTable.find((entry) => entry.mac === normalized && (Number(entry.vlan) || 1) === vlanId);
     if (existing) {
+        if (existing.type === 'STATIC' && existing.port !== portLabel) {
+            return null;
+        }
         existing.port = portLabel;
         existing.deviceId = sourceDeviceId;
         existing.vlan = vlanId;
         existing.learnedAt = new Date().toISOString();
+        if (entryType === 'STATIC') {
+            existing.type = 'STATIC';
+        }
         return existing;
     }
 
@@ -10636,7 +11274,7 @@ function learnSwitchMac(switchId, sourceMac, sourceDeviceId, portLabel, vlan = 1
         mac: normalized,
         port: portLabel,
         deviceId: sourceDeviceId,
-        type: 'DYNAMIC',
+        type: entryType,
         learnedAt: new Date().toISOString()
     };
     runtime.macTable.push(entry);
@@ -11068,6 +11706,28 @@ function simulatePathTransmission(frame, fromEndpoint, toEndpoint, topologyPath)
                 frame.events.push(`Frame entered ${toDevice.name} on trunk ${ingressPort} (untagged → native VLAN ${ingressVlan})`);
             } else {
                 frame.events.push(`Frame entered ${toDevice.name} on ${ingressPort} (VLAN ${ingressVlan})`);
+            }
+
+            const secEvaluation = evaluateSwitchPortSecurity(toDevice, ingressPort, frame.sourceMac, ingressVlan);
+            if (!secEvaluation.allowed) {
+                frame.events.push(secEvaluation.message || `Switch ${toDevice.name} dropped frame on ${ingressPort}: Port security violation`);
+                hopActions.push({
+                    deviceId: toDevice.id,
+                    deviceName: toDevice.name,
+                    type: 'switch',
+                    action: 'DROP',
+                    reason: 'port-security-violation',
+                    ingressPort,
+                    violationMode: secEvaluation.violationMode,
+                    mac: frame.sourceMac
+                });
+                return {
+                    success: false,
+                    reason: secEvaluation.message || `Switch ${toDevice.name} dropped frame due to port-security violation on port ${ingressPort}.`,
+                    path: traversedPath,
+                    action: 'DROP',
+                    hopActions
+                };
             }
 
             const learnedDevice = findDeviceByMac(frame.sourceMac, null, networkState.devices);
@@ -12522,6 +13182,28 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
                 }
             }
 
+            const secEvaluation = evaluateSwitchPortSecurity(toDevice, ingressPort, reqMac, ingressVlan);
+            if (!secEvaluation.allowed) {
+                events.push(secEvaluation.message || `Switch ${toDevice.name} dropped ARP request on ${ingressPort}: Port security violation`);
+                hopActions.push({
+                    deviceId: toDevice.id,
+                    deviceName: toDevice.name,
+                    type: 'switch',
+                    action: 'DROP',
+                    reason: 'port-security-violation',
+                    ingressPort,
+                    violationMode: secEvaluation.violationMode,
+                    mac: reqMac
+                });
+                return {
+                    success: false,
+                    reason: secEvaluation.message || `ARP resolution failed: Switch ${toDevice.name} dropped frame on port ${ingressPort} (port-security violation).`,
+                    path: arpPath.slice(0, i + 1),
+                    events,
+                    hopActions
+                };
+            }
+
             learnSwitchMac(toDevice.id, reqMac, requesterDevice.id, ingressPort, ingressVlan);
             events.push(`Switch ${toDevice.name} learned ${requesterDevice.name} MAC (${reqMac}) → ${ingressPort} (VLAN ${ingressVlan})`);
 
@@ -12704,6 +13386,28 @@ function simulateArpResolution(requesterDevice, targetIp, topologyPath, options 
                         hopActions
                     };
                 }
+            }
+
+            const secEvaluation = evaluateSwitchPortSecurity(toDevice, ingressPort, targetMac, ingressVlan);
+            if (!secEvaluation.allowed) {
+                events.push(secEvaluation.message || `Switch ${toDevice.name} dropped ARP reply on ${ingressPort}: Port security violation`);
+                hopActions.push({
+                    deviceId: toDevice.id,
+                    deviceName: toDevice.name,
+                    type: 'switch',
+                    action: 'DROP',
+                    reason: 'port-security-violation',
+                    ingressPort,
+                    violationMode: secEvaluation.violationMode,
+                    mac: targetMac
+                });
+                return {
+                    success: false,
+                    reason: secEvaluation.message || `ARP resolution failed: Switch ${toDevice.name} dropped frame on port ${ingressPort} (port-security violation).`,
+                    path: reverseArpPath.slice(0, i + 1),
+                    events,
+                    hopActions
+                };
             }
 
             learnSwitchMac(toDevice.id, targetMac, targetDevice.id, ingressPort, ingressVlan);
@@ -14905,8 +15609,145 @@ function formatCliSwitchInterfaceSwitchport(switchOrId, portName) {
         `Administrative Mode: ${isTrunk ? 'trunk' : 'static access'}`,
         `Operational Mode: ${isTrunk ? 'trunk' : 'static access'}`,
         `Administrative Native VLAN tagging: disabled`,
-        `Trunking VLANs Enabled: ${isTrunk ? (cfg.allowedVlans === 'all' ? 'ALL' : formatAllowedVlans(cfg.allowedVlans)) : 'ALL'}`
+        `Trunking VLANs Enabled: ${isTrunk ? (cfg.allowedVlans === 'all' ? 'ALL' : formatAllowedVlans(cfg.allowedVlans)) : 'ALL'}`,
+        `Port Security: ${cfg.portSecurity?.enabled ? 'Enabled' : 'Disabled'}`
     ];
+    return lines.join('\n');
+}
+
+function formatCliShowPortSecurity(switchOrId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return '% Switch not found.';
+    ensureSwitchVlanState(sw);
+    const runtime = getSwitchRuntime(sw.id);
+    const allPortNames = new Set([
+        ...Object.values(runtime.ports || {}),
+        ...Object.keys(sw.switchports || {})
+    ]);
+    const sortedPorts = Array.from(allPortNames).sort((a, b) => {
+        const numA = parseInt(a.replace(/\D/g, ''), 10) || 0;
+        const numB = parseInt(b.replace(/\D/g, ''), 10) || 0;
+        return numA - numB;
+    });
+
+    const lines = [
+        'Secure Port  MaxSecureAddr  CurrentAddr  SecurityViolation  Security Action',
+        '---------------------------------------------------------------------------'
+    ];
+
+    let totalSecureMacs = 0;
+    sortedPorts.forEach((pName) => {
+        const cfg = getSwitchPortConfig(sw, pName);
+        if (cfg.portSecurity && cfg.portSecurity.enabled) {
+            const sec = cfg.portSecurity;
+            const curCount = sec.secureMacs ? sec.secureMacs.length : 0;
+            totalSecureMacs += curCount;
+            const violAction = sec.violationMode.charAt(0).toUpperCase() + sec.violationMode.slice(1);
+            lines.push(
+                `${pName.padEnd(13)}${String(sec.maxMacs).padEnd(15)}${String(curCount).padEnd(13)}${String(sec.violationCount).padEnd(19)}${violAction}`
+            );
+        }
+    });
+
+    lines.push('---------------------------------------------------------------------------');
+    lines.push(`Total Addresses in System (including dynamic) : ${totalSecureMacs}`);
+    lines.push('Max Addresses limit in System                 : 1024');
+    return lines.join('\n');
+}
+
+function formatCliShowPortSecurityInterface(switchOrId, portName) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return '% Switch not found.';
+    ensureSwitchVlanState(sw);
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) return `% Invalid interface "${portName}".`;
+    const cfg = getSwitchPortConfig(sw, normPort);
+    const sec = cfg.portSecurity || {
+        enabled: false,
+        maxMacs: 1,
+        violationMode: 'shutdown',
+        sticky: false,
+        secureMacs: [],
+        violationCount: 0,
+        lastViolationMac: null,
+        errDisabled: false
+    };
+
+    let portStatus = 'Secure-up';
+    if (sec.errDisabled) {
+        portStatus = 'Secure-shutdown';
+    } else if (cfg.status === 'down' || cfg.adminDown) {
+        portStatus = 'Secure-down';
+    }
+
+    const staticCount = (sec.secureMacs || []).filter(e => e.type === 'static').length;
+    const stickyCount = (sec.secureMacs || []).filter(e => e.type === 'sticky').length;
+    const totalCount = (sec.secureMacs || []).length;
+    const violMode = sec.violationMode.charAt(0).toUpperCase() + sec.violationMode.slice(1);
+    const lastAddrVlan = sec.lastViolationMac ? `${sec.lastViolationMac}:${cfg.accessVlan || 1}` : '0000.0000.0000:0';
+
+    const lines = [
+        `Port Security              : ${sec.enabled ? 'Enabled' : 'Disabled'}`,
+        `Port Status                : ${portStatus}`,
+        `Violation Mode             : ${violMode}`,
+        `Aging Time                 : 0 mins`,
+        `Aging Type                 : Absolute`,
+        `SecureStatic Address Aging : Disabled`,
+        `Maximum MAC Addresses      : ${sec.maxMacs}`,
+        `Total MAC Addresses        : ${totalCount}`,
+        `Configured MAC Addresses   : ${staticCount}`,
+        `Sticky MAC Addresses       : ${stickyCount}`,
+        `Last Source Address:Vlan   : ${lastAddrVlan}`,
+        `Security Violation Count   : ${sec.violationCount}`
+    ];
+    return lines.join('\n');
+}
+
+function formatCliShowPortSecurityAddress(switchOrId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return '% Switch not found.';
+    ensureSwitchVlanState(sw);
+    const runtime = getSwitchRuntime(sw.id);
+    const allPortNames = new Set([
+        ...Object.values(runtime.ports || {}),
+        ...Object.keys(sw.switchports || {})
+    ]);
+    const sortedPorts = Array.from(allPortNames).sort((a, b) => {
+        const numA = parseInt(a.replace(/\D/g, ''), 10) || 0;
+        const numB = parseInt(b.replace(/\D/g, ''), 10) || 0;
+        return numA - numB;
+    });
+
+    const lines = [
+        '               Secure Mac Address Table',
+        '-----------------------------------------------------------------------------',
+        'Vlan    Mac Address       Type                    Ports   Remaining Age',
+        '                                                          (mins)',
+        '----    -----------       ----                    -----   -------------'
+    ];
+
+    let totalEntries = 0;
+    sortedPorts.forEach((pName) => {
+        const cfg = getSwitchPortConfig(sw, pName);
+        if (cfg.portSecurity && Array.isArray(cfg.portSecurity.secureMacs)) {
+            cfg.portSecurity.secureMacs.forEach((entry) => {
+                totalEntries++;
+                let typeStr = 'SecureDynamic';
+                if (entry.type === 'static') typeStr = 'SecureConfigured';
+                else if (entry.type === 'sticky') typeStr = 'SecureSticky';
+
+                const vlanStr = String(entry.vlan || cfg.accessVlan || 1).padEnd(8);
+                const macStr = entry.mac.padEnd(18);
+                const typeCol = typeStr.padEnd(24);
+                const portCol = pName.padEnd(8);
+                lines.push(`${vlanStr}${macStr}${typeCol}${portCol}-`);
+            });
+        }
+    });
+
+    lines.push('-----------------------------------------------------------------------------');
+    lines.push(`Total Addresses in System (including dynamic) : ${totalEntries}`);
+    lines.push('Max Addresses limit in System                 : 1024');
     return lines.join('\n');
 }
 
@@ -15133,7 +15974,11 @@ function getInterfaceOperStatus(dev, ifName) {
     if (dev.type === 'switch') {
         const normPort = normalizeSwitchPortName(ifName) || ifName;
         const cfg = dev.switchports?.[normPort];
-        return (cfg && cfg.status === 'down') ? 'down' : 'up';
+        if (!cfg) return 'up';
+        if (cfg.adminDown || cfg.portSecurity?.errDisabled || cfg.status === 'down') {
+            return 'down';
+        }
+        return 'up';
     }
     return 'up';
 }
@@ -17960,6 +18805,18 @@ function executeCliCommand(deviceId, rawInput) {
                 };
             }
             if (sub2 === 'trunk') {
+                const normPort = normalizeSwitchPortName(session.selectedInterface);
+                const cfg = getSwitchPortConfig(dev, normPort);
+                if (cfg && cfg.portSecurity?.enabled) {
+                    return {
+                        success: false,
+                        output: `% Command rejected: Port ${normPort} has port-security enabled. Disable port-security before configuring trunk mode.`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
                 pushHistory();
                 setSwitchPortMode(dev, session.selectedInterface, 'trunk');
                 render();
@@ -18180,6 +19037,251 @@ function executeCliCommand(deviceId, rawInput) {
                     };
                 }
             }
+        }
+
+        // switchport port-security ...
+        if (sub1 === 'port-security' || (sub1 === 'port' && sub2 === 'security')) {
+            const ifName = session.selectedInterface;
+            const portSecOffset = (sub1 === 'port' && sub2 === 'security') ? 1 : 0;
+            const actionKw = tokens[2 + portSecOffset] || '';
+
+            // switchport port-security (enable)
+            if (!actionKw) {
+                const normPort = normalizeSwitchPortName(ifName);
+                const cfg = getSwitchPortConfig(dev, normPort);
+                if (cfg.mode === 'trunk') {
+                    return {
+                        success: false,
+                        output: `% Command rejected: Port ${normPort} is a trunk port. Port security is only supported on access ports.`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                setSwitchPortSecurityEnabled(dev, ifName, true);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+
+            // switchport port-security maximum <1-1024>
+            if (actionKw === 'maximum' || actionKw === 'max') {
+                const maxVal = tokens[3 + portSecOffset];
+                if (!maxVal) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: switchport port-security maximum <1-1024>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                const num = parseInt(maxVal, 10);
+                if (isNaN(num) || num < 1 || num > 1024) {
+                    return {
+                        success: false,
+                        output: '% Maximum MAC addresses must be between 1 and 1024.',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                const normPort = normalizeSwitchPortName(ifName);
+                ensurePortSecurityState(dev, normPort);
+                const sec = dev.switchports[normPort].portSecurity;
+                if (num < sec.secureMacs.length) {
+                    return {
+                        success: false,
+                        output: `% Cannot set maximum MAC addresses to ${num} because ${sec.secureMacs.length} MAC addresses are already configured/learned on port ${normPort}.`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                setSwitchPortSecurityMaximum(dev, ifName, maxVal);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+
+            // switchport port-security violation {protect|restrict|shutdown}
+            if (actionKw === 'violation') {
+                const violMode = (tokens[3 + portSecOffset] || '').trim().toLowerCase();
+                if (!violMode) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: switchport port-security violation {protect|restrict|shutdown}',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (!['protect', 'restrict', 'shutdown'].includes(violMode)) {
+                    return {
+                        success: false,
+                        output: `% Unsupported violation mode "${violMode}". Supported modes: protect, restrict, shutdown.`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                setSwitchPortSecurityViolation(dev, ifName, violMode);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+
+            // switchport port-security mac-address <mac> / switchport port-security mac-address sticky [mac]
+            if (actionKw === 'mac-address' || actionKw === 'mac') {
+                const macArg1 = tokens[3 + portSecOffset];
+                if (!macArg1) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: switchport port-security mac-address <mac-address> [or sticky [mac-address]]',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (macArg1 === 'sticky') {
+                    const stickyMac = tokens[4 + portSecOffset];
+                    if (!stickyMac) {
+                        pushHistory();
+                        setSwitchPortSecuritySticky(dev, ifName, true);
+                        render();
+                        return {
+                            success: true,
+                            output: '',
+                            clear: false,
+                            status: 'success',
+                            command,
+                            device: dev
+                        };
+                    } else {
+                        try {
+                            const normPort = normalizeSwitchPortName(ifName);
+                            const normMac = normalizeMacAddress(stickyMac);
+                            if (!normMac) throw new Error(`Invalid MAC address "${stickyMac}".`);
+                            if (normMac === 'FF:FF:FF:FF:FF:FF' || normMac.startsWith('01:00:5E') || normMac.startsWith('33:33')) {
+                                throw new Error(`MAC address "${stickyMac}" is a broadcast or multicast address and cannot be secure.`);
+                            }
+                            ensurePortSecurityState(dev, normPort);
+                            for (const [otherPort, otherCfg] of Object.entries(dev.switchports)) {
+                                if (otherPort !== normPort && otherCfg?.portSecurity?.secureMacs) {
+                                    if (otherCfg.portSecurity.secureMacs.some((e) => e.mac === normMac)) {
+                                        throw new Error(`MAC address ${normMac} is already configured as secure on interface ${otherPort}.`);
+                                    }
+                                }
+                            }
+                            const sec = dev.switchports[normPort].portSecurity;
+                            const existing = sec.secureMacs.find((e) => e.mac === normMac);
+                            if (!existing && sec.secureMacs.length >= sec.maxMacs) {
+                                throw new Error(`Maximum MAC addresses (${sec.maxMacs}) reached on port ${normPort}. Cannot add secure MAC.`);
+                            }
+                            pushHistory();
+                            setSwitchPortSecuritySticky(dev, ifName, true);
+                            addSwitchPortSecurityMac(dev, ifName, stickyMac, true);
+                            render();
+                            return {
+                                success: true,
+                                output: '',
+                                clear: false,
+                                status: 'success',
+                                command,
+                                device: dev
+                            };
+                        } catch (err) {
+                            return {
+                                success: false,
+                                output: `% ${err.message}`,
+                                clear: false,
+                                status: 'error',
+                                command,
+                                device: dev
+                            };
+                        }
+                    }
+                } else {
+                    try {
+                        const normPort = normalizeSwitchPortName(ifName);
+                        const normMac = normalizeMacAddress(macArg1);
+                        if (!normMac) throw new Error(`Invalid MAC address "${macArg1}".`);
+                        if (normMac === 'FF:FF:FF:FF:FF:FF' || normMac.startsWith('01:00:5E') || normMac.startsWith('33:33')) {
+                            throw new Error(`MAC address "${macArg1}" is a broadcast or multicast address and cannot be secure.`);
+                        }
+                        ensurePortSecurityState(dev, normPort);
+                        for (const [otherPort, otherCfg] of Object.entries(dev.switchports)) {
+                            if (otherPort !== normPort && otherCfg?.portSecurity?.secureMacs) {
+                                if (otherCfg.portSecurity.secureMacs.some((e) => e.mac === normMac)) {
+                                    throw new Error(`MAC address ${normMac} is already configured as secure on interface ${otherPort}.`);
+                                }
+                            }
+                        }
+                        const sec = dev.switchports[normPort].portSecurity;
+                        const existing = sec.secureMacs.find((e) => e.mac === normMac);
+                        if (!existing && sec.secureMacs.length >= sec.maxMacs) {
+                            throw new Error(`Maximum MAC addresses (${sec.maxMacs}) reached on port ${normPort}. Cannot add secure MAC.`);
+                        }
+                        pushHistory();
+                        addSwitchPortSecurityMac(dev, ifName, macArg1, false);
+                        render();
+                        return {
+                            success: true,
+                            output: '',
+                            clear: false,
+                            status: 'success',
+                            command,
+                            device: dev
+                        };
+                    } catch (err) {
+                        return {
+                            success: false,
+                            output: `% ${err.message}`,
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                }
+            }
+
+            return {
+                success: false,
+                output: `% Unrecognized port-security command: "${command}". Available: "switchport port-security", "switchport port-security maximum <1-1024>", "switchport port-security violation {protect|restrict|shutdown}", "switchport port-security mac-address <mac>", "switchport port-security mac-address sticky [mac]".`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
         }
 
         return {
@@ -18670,19 +19772,7 @@ function executeCliCommand(deviceId, rawInput) {
                 render();
             } else {
                 pushHistory();
-                const normPort = normalizeSwitchPortName(session.selectedInterface) || session.selectedInterface;
-                if (!dev.switchports) dev.switchports = {};
-                if (!dev.switchports[normPort]) {
-                    dev.switchports[normPort] = {
-                        port: normPort,
-                        name: normPort,
-                        mode: 'access',
-                        accessVlan: 1,
-                        nativeVlan: 1,
-                        allowedVlans: 'all'
-                    };
-                }
-                dev.switchports[normPort].status = 'down';
+                setSwitchPortOperState(dev, session.selectedInterface, 'SHUTDOWN');
                 render();
             }
         }
@@ -18984,9 +20074,16 @@ function executeCliCommand(deviceId, rawInput) {
                     render();
                 } else {
                     pushHistory();
-                    const normPort = normalizeSwitchPortName(session.selectedInterface) || session.selectedInterface;
-                    if (dev.switchports?.[normPort]) {
-                        dev.switchports[normPort].status = 'up';
+                    const operRes = setSwitchPortOperState(dev, session.selectedInterface, 'NO_SHUTDOWN');
+                    if (!operRes.success) {
+                        return {
+                            success: false,
+                            output: operRes.output || `% Interface ${session.selectedInterface} is in err-disabled state. Issue "shutdown" followed by "no shutdown" to re-enable.`,
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
                     }
                     render();
                 }
@@ -20235,6 +21332,196 @@ function executeCliCommand(deviceId, rawInput) {
             return {
                 success: false,
                 output: '% Incomplete or unrecognized command: no lldp [run | transmit | receive]',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
+        // no switchport port-security ...
+        if (sub1 === 'switchport' && (sub2 === 'port-security' || (sub2 === 'port' && tokens[3] === 'security'))) {
+            if (!isSwitch) {
+                return {
+                    success: false,
+                    output: "% 'no switchport' is a switch interface command.",
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (session.mode !== 'config-if' || !session.selectedInterface) {
+                return {
+                    success: false,
+                    output: '% "no switchport" commands must be executed inside interface configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            if (isSviName(session.selectedInterface)) {
+                return {
+                    success: false,
+                    output: '% Command rejected: Switchport commands are only valid on physical interfaces, not SVIs.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+
+            const ifName = session.selectedInterface;
+            const noOffset = (sub2 === 'port' && tokens[3] === 'security') ? 1 : 0;
+            const actionKw = tokens[3 + noOffset] || '';
+
+            // no switchport port-security (disable)
+            if (!actionKw) {
+                pushHistory();
+                setSwitchPortSecurityEnabled(dev, ifName, false);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+
+            // no switchport port-security maximum
+            if (actionKw === 'maximum' || actionKw === 'max') {
+                const normPort = normalizeSwitchPortName(ifName);
+                ensurePortSecurityState(dev, normPort);
+                const sec = dev.switchports[normPort].portSecurity;
+                if (1 < sec.secureMacs.length) {
+                    return {
+                        success: false,
+                        output: `% Cannot set maximum MAC addresses to 1 because ${sec.secureMacs.length} MAC addresses are already configured/learned on port ${normPort}.`,
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                pushHistory();
+                setSwitchPortSecurityMaximum(dev, ifName, 1);
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+
+            // no switchport port-security violation
+            if (actionKw === 'violation') {
+                pushHistory();
+                setSwitchPortSecurityViolation(dev, ifName, 'shutdown');
+                render();
+                return {
+                    success: true,
+                    output: '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+
+            // no switchport port-security mac-address [sticky] [mac]
+            if (actionKw === 'mac-address' || actionKw === 'mac') {
+                const macArg1 = tokens[4 + noOffset];
+                if (!macArg1) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: no switchport port-security mac-address <mac-address> [or sticky [mac-address]]',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                if (macArg1 === 'sticky') {
+                    const stickyMac = tokens[5 + noOffset];
+                    if (!stickyMac) {
+                        pushHistory();
+                        setSwitchPortSecuritySticky(dev, ifName, false);
+                        render();
+                        return {
+                            success: true,
+                            output: '',
+                            clear: false,
+                            status: 'success',
+                            command,
+                            device: dev
+                        };
+                    } else {
+                        const normPort = normalizeSwitchPortName(ifName);
+                        const normMac = normalizeMacAddress(stickyMac);
+                        ensurePortSecurityState(dev, normPort);
+                        const sec = dev.switchports[normPort].portSecurity;
+                        const idx = sec.secureMacs.findIndex((e) => e.mac === normMac && e.type === 'sticky');
+                        if (idx === -1) {
+                            return {
+                                success: false,
+                                output: `% Secure MAC address ${normMac || stickyMac} not found on port ${normPort}.`,
+                                clear: false,
+                                status: 'error',
+                                command,
+                                device: dev
+                            };
+                        }
+                        pushHistory();
+                        removeSwitchPortSecurityMac(dev, ifName, stickyMac, true);
+                        render();
+                        return {
+                            success: true,
+                            output: '',
+                            clear: false,
+                            status: 'success',
+                            command,
+                            device: dev
+                        };
+                    }
+                } else {
+                    const normPort = normalizeSwitchPortName(ifName);
+                    const normMac = normalizeMacAddress(macArg1);
+                    ensurePortSecurityState(dev, normPort);
+                    const sec = dev.switchports[normPort].portSecurity;
+                    const idx = sec.secureMacs.findIndex((e) => e.mac === normMac);
+                    if (idx === -1) {
+                        return {
+                            success: false,
+                            output: `% Secure MAC address ${normMac || macArg1} not found on port ${normPort}.`,
+                            clear: false,
+                            status: 'error',
+                            command,
+                            device: dev
+                        };
+                    }
+                    pushHistory();
+                    removeSwitchPortSecurityMac(dev, ifName, macArg1, false);
+                    render();
+                    return {
+                        success: true,
+                        output: '',
+                        clear: false,
+                        status: 'success',
+                        command,
+                        device: dev
+                    };
+                }
+            }
+
+            return {
+                success: false,
+                output: `% Unrecognized command: "no switchport ${tokens.slice(2).join(' ')}".`,
                 clear: false,
                 status: 'error',
                 command,
@@ -23191,6 +24478,72 @@ function executeCliCommand(deviceId, rawInput) {
             };
         }
 
+        // show port-security [interface <port>] [address]
+        if (sub1 === 'port-security' || (sub1 === 'port' && sub2 === 'security')) {
+            if (!isSwitch) {
+                return {
+                    success: false,
+                    output: `% 'show port-security' is a switch command.`,
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
+            }
+            const offset = (sub1 === 'port' && sub2 === 'security') ? 1 : 0;
+            const arg1 = tokens[2 + offset];
+            const arg2 = tokens[3 + offset];
+
+            if (!arg1) {
+                return {
+                    success: true,
+                    output: formatCliShowPortSecurity(dev),
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            if (arg1 === 'interface' || arg1 === 'int') {
+                if (!arg2) {
+                    return {
+                        success: false,
+                        output: '% Incomplete command: show port-security interface <port>',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                return {
+                    success: true,
+                    output: formatCliShowPortSecurityInterface(dev, arg2),
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            if (arg1 === 'address' || arg1 === 'addr') {
+                return {
+                    success: true,
+                    output: formatCliShowPortSecurityAddress(dev),
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
+            return {
+                success: false,
+                output: `% Incomplete or unrecognized command: show port-security [interface <port> | address]`,
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
         // show logging / show log
         if (sub1 === 'logging' || sub1 === 'log') {
             if (!isRouter) {
@@ -23239,7 +24592,7 @@ function executeCliCommand(deviceId, rawInput) {
         } else if (isSwitch) {
             return {
                 success: false,
-                output: `% Unrecognized show command: "${command}". Available: "show vlan brief", "show mac-address-table", "show interfaces", "show interfaces trunk", "show ip interface brief", "show ip route", "show spanning-tree".`,
+                output: `% Unrecognized show command: "${command}". Available: "show vlan brief", "show mac-address-table", "show port-security", "show interfaces", "show interfaces trunk", "show ip interface brief", "show ip route", "show spanning-tree", "show logging".`,
                 clear: false,
                 status: 'error',
                 command,

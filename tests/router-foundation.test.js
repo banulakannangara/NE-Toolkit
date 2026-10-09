@@ -39458,6 +39458,1066 @@ runTest('1595. Safety check: missing devices or broken connections do not crash 
     assert.strictEqual(outLldp, '% Device not found.');
 });
 
+// Phase 3B Port Security Tests (1596 - 1645)
+runTest('1596. Default port security state on access switchport', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    const cfg = getSwitchPortConfig(sw, 'Fa0/1');
+    assert.strictEqual(cfg.portSecurity.enabled, false);
+    assert.strictEqual(cfg.portSecurity.maxMacs, 1);
+    assert.strictEqual(cfg.portSecurity.violationMode, 'shutdown');
+    assert.strictEqual(cfg.portSecurity.sticky, false);
+    assert.strictEqual(cfg.portSecurity.errDisabled, false);
+    assert.strictEqual(cfg.portSecurity.violationCount, 0);
+    assert.strictEqual(Array.isArray(cfg.portSecurity.secureMacs), true);
+    assert.strictEqual(cfg.portSecurity.secureMacs.length, 0);
+});
+
+runTest('1597. CLI switchport port-security enables port security on access port', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    const res = executeCliCommand(sw, 'switchport port-security');
+    assert.strictEqual(res.success, true);
+    const cfg = getSwitchPortConfig(sw, 'Fa0/1');
+    assert.strictEqual(cfg.portSecurity.enabled, true);
+});
+
+runTest('1598. Enabling port security is rejected on trunk port', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport mode trunk');
+    const res = executeCliCommand(sw, 'switchport port-security');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('rejected'));
+    const cfg = getSwitchPortConfig(sw, 'Fa0/1');
+    assert.strictEqual(cfg.portSecurity.enabled, false);
+});
+
+runTest('1599. Changing access port with port security enabled to trunk mode is rejected', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    const res = executeCliCommand(sw, 'switchport mode trunk');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('rejected'));
+    const cfg = getSwitchPortConfig(sw, 'Fa0/1');
+    assert.strictEqual(cfg.mode, 'access');
+});
+
+runTest('1600. no switchport port-security disables port security and flushes dynamic secure MACs', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    addSwitchPortSecurityMac(sw, 'Fa0/1', '00:11:22:33:44:55', 'dynamic');
+    assert.strictEqual(sw.switchports['Fa0/1'].portSecurity.secureMacs.length, 1);
+    const res = executeCliCommand(sw, 'no switchport port-security');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(sw.switchports['Fa0/1'].portSecurity.enabled, false);
+    assert.strictEqual(sw.switchports['Fa0/1'].portSecurity.secureMacs.length, 0);
+});
+
+runTest('1601. Setting maximum MAC addresses with switchport port-security maximum <1-1024>', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    const res = executeCliCommand(sw, 'switchport port-security maximum 10');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.maxMacs, 10);
+});
+
+runTest('1602. Setting maximum below 1 or above 1024 is rejected', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    const res0 = executeCliCommand(sw, 'switchport port-security maximum 0');
+    assert.strictEqual(res0.success, false);
+    const res1025 = executeCliCommand(sw, 'switchport port-security maximum 1025');
+    assert.strictEqual(res1025.success, false);
+    const resInvalid = executeCliCommand(sw, 'switchport port-security maximum abc');
+    assert.strictEqual(resInvalid.success, false);
+});
+
+runTest('1603. Lowering maximum below current secure MAC address count is rejected', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security maximum 3');
+    executeCliCommand(sw, 'switchport port-security mac-address 00:00:00:00:00:01');
+    executeCliCommand(sw, 'switchport port-security mac-address 00:00:00:00:00:02');
+    const res = executeCliCommand(sw, 'switchport port-security maximum 1');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Cannot set maximum') || res.output.includes('rejected'));
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.maxMacs, 3);
+});
+
+runTest('1604. no switchport port-security maximum resets maximum to 1', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security maximum 5');
+    const res = executeCliCommand(sw, 'no switchport port-security maximum');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.maxMacs, 1);
+});
+
+runTest('1605. Setting violation modes: protect, restrict, shutdown', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security violation protect');
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.violationMode, 'protect');
+    executeCliCommand(sw, 'switchport port-security violation restrict');
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.violationMode, 'restrict');
+    executeCliCommand(sw, 'switchport port-security violation shutdown');
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.violationMode, 'shutdown');
+});
+
+runTest('1606. Invalid violation mode is rejected', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    const res = executeCliCommand(sw, 'switchport port-security violation drop');
+    assert.strictEqual(res.success, false);
+});
+
+runTest('1607. no switchport port-security violation resets violation mode to shutdown', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security violation restrict');
+    const res = executeCliCommand(sw, 'no switchport port-security violation');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.violationMode, 'shutdown');
+});
+
+runTest('1608. Static secure MAC configuration with switchport port-security mac-address <mac>', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    const res = executeCliCommand(sw, 'switchport port-security mac-address 00:11:22:33:44:55');
+    assert.strictEqual(res.success, true);
+    const sec = getSwitchPortConfig(sw, 'Fa0/1').portSecurity;
+    assert.strictEqual(sec.secureMacs.length, 1);
+    assert.strictEqual(sec.secureMacs[0].mac, '00:11:22:33:44:55');
+    assert.strictEqual(sec.secureMacs[0].type, 'static');
+    const mEntry = getSwitchRuntime(sw.id).macTable.find(e => e.mac === '00:11:22:33:44:55');
+    assert.ok(mEntry);
+    assert.strictEqual(mEntry.type, 'STATIC');
+});
+
+runTest('1609. Static secure MAC rejected if invalid MAC format', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    const res = executeCliCommand(sw, 'switchport port-security mac-address invalid-mac');
+    assert.strictEqual(res.success, false);
+});
+
+runTest('1610. Static secure MAC rejected if exceeding maximum', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security maximum 1');
+    executeCliCommand(sw, 'switchport port-security mac-address 00:11:22:33:44:01');
+    const res = executeCliCommand(sw, 'switchport port-security mac-address 00:11:22:33:44:02');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('Maximum') || res.output.includes('rejected'));
+});
+
+runTest('1611. Static secure MAC duplicate on same port is idempotent', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security mac-address 00:11:22:33:44:55');
+    const res = executeCliCommand(sw, 'switchport port-security mac-address 00:11:22:33:44:55');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.secureMacs.length, 1);
+});
+
+runTest('1612. Static secure MAC duplicate across different ports on same switch/VLAN is rejected', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security mac-address 00:11:22:33:44:55');
+    executeCliCommand(sw, 'interface Fa0/2');
+    const res = executeCliCommand(sw, 'switchport port-security mac-address 00:11:22:33:44:55');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('already configured'));
+});
+
+runTest('1613. Removing static secure MAC with no switchport port-security mac-address <mac>', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security mac-address 00:11:22:33:44:55');
+    const res = executeCliCommand(sw, 'no switchport port-security mac-address 00:11:22:33:44:55');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.secureMacs.length, 0);
+    const mEntry = getSwitchRuntime(sw.id).macTable.find(e => e.mac === '00:11:22:33:44:55');
+    assert.strictEqual(mEntry, undefined);
+});
+
+runTest('1614. Enabling sticky MAC with switchport port-security mac-address sticky', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    const res = executeCliCommand(sw, 'switchport port-security mac-address sticky');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.sticky, true);
+});
+
+runTest('1615. Configuring explicit sticky MAC with switchport port-security mac-address sticky <mac>', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    const res = executeCliCommand(sw, 'switchport port-security mac-address sticky 00:11:22:33:44:55');
+    assert.strictEqual(res.success, true);
+    const sec = getSwitchPortConfig(sw, 'Fa0/1').portSecurity;
+    assert.strictEqual(sec.sticky, true);
+    assert.strictEqual(sec.secureMacs.length, 1);
+    assert.strictEqual(sec.secureMacs[0].type, 'sticky');
+    assert.strictEqual(sec.secureMacs[0].mac, '00:11:22:33:44:55');
+});
+
+runTest('1616. no switchport port-security mac-address sticky disables sticky mode and removes sticky MACs', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security mac-address sticky 00:11:22:33:44:55');
+    const resMode = executeCliCommand(sw, 'no switchport port-security mac-address sticky');
+    assert.strictEqual(resMode.success, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.sticky, false);
+    const resMac = executeCliCommand(sw, 'no switchport port-security mac-address sticky 00:11:22:33:44:55');
+    assert.strictEqual(resMac.success, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.secureMacs.length, 0);
+});
+
+runTest('1617. Dynamic secure MAC learning: authorized host sends frame, dynamically learned up to max', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 200, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    addConnection('Switch0', 'PC1');
+    const sw = getDeviceById('Switch0');
+    const pc0 = getDeviceById('PC0');
+    const pc1 = getDeviceById('PC1');
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    const res = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(res.success, true);
+    const sec = getSwitchPortConfig(sw, 'Fa0/1').portSecurity;
+    assert.strictEqual(sec.secureMacs.length, 1);
+    assert.strictEqual(sec.secureMacs[0].mac, normalizeMacAddress(pc0.mac));
+    assert.strictEqual(sec.secureMacs[0].type, 'dynamic');
+});
+
+runTest('1618. Dynamic secure MAC converts to sticky when sticky mode is enabled', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 200, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    addConnection('Switch0', 'PC1');
+    const sw = getDeviceById('Switch0');
+    const pc0 = getDeviceById('PC0');
+    const pc1 = getDeviceById('PC1');
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'switchport port-security mac-address sticky');
+    simulateSendFrame(pc0, pc1);
+    const sec = getSwitchPortConfig(sw, 'Fa0/1').portSecurity;
+    assert.strictEqual(sec.secureMacs.length, 1);
+    assert.strictEqual(sec.secureMacs[0].mac, normalizeMacAddress(pc0.mac));
+    assert.strictEqual(sec.secureMacs[0].type, 'sticky');
+});
+
+runTest('1619. Violation Protect mode: unauthorized MAC drops frame silently, violation count does not increment', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 200, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    addConnection('Switch0', 'PC1');
+    const sw = getDeviceById('Switch0');
+    const pc0 = getDeviceById('PC0');
+    const pc1 = getDeviceById('PC1');
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'switchport port-security violation protect');
+    executeCliCommand(sw, 'switchport port-security mac-address 00:99:99:99:99:99');
+    const res = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(res.success, false);
+    const sec = getSwitchPortConfig(sw, 'Fa0/1').portSecurity;
+    assert.strictEqual(sec.violationCount, 0);
+    assert.strictEqual(sec.errDisabled, false);
+    assert.strictEqual(sw.switchports['Fa0/1'].status, 'up');
+});
+
+runTest('1620. Violation Restrict mode: unauthorized MAC drops frame, increments violation count, appends to securityLog', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 200, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    addConnection('Switch0', 'PC1');
+    const sw = getDeviceById('Switch0');
+    const pc0 = getDeviceById('PC0');
+    const pc1 = getDeviceById('PC1');
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'switchport port-security violation restrict');
+    executeCliCommand(sw, 'switchport port-security mac-address 00:99:99:99:99:99');
+    const res = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(res.success, false);
+    const sec = getSwitchPortConfig(sw, 'Fa0/1').portSecurity;
+    assert.strictEqual(sec.violationCount, 1);
+    assert.strictEqual(sec.errDisabled, false);
+    assert.strictEqual(sw.switchports['Fa0/1'].status, 'up');
+    const logs = getSwitchSecurityLog(sw.id);
+    assert.strictEqual(logs.length, 1);
+    assert.ok(logs[0].includes('PSEC'));
+});
+
+runTest('1621. Violation Shutdown mode: unauthorized MAC drops frame, increments violation count, transitions port to err-disabled', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 200, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    addConnection('Switch0', 'PC1');
+    const sw = getDeviceById('Switch0');
+    const pc0 = getDeviceById('PC0');
+    const pc1 = getDeviceById('PC1');
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'switchport port-security violation shutdown');
+    executeCliCommand(sw, 'switchport port-security mac-address 00:99:99:99:99:99');
+    const res = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(res.success, false);
+    const sec = getSwitchPortConfig(sw, 'Fa0/1').portSecurity;
+    assert.strictEqual(sec.violationCount, 1);
+    assert.strictEqual(sec.errDisabled, true);
+    assert.strictEqual(sw.switchports['Fa0/1'].status, 'down');
+    assert.strictEqual(getInterfaceOperStatus(sw, 'Fa0/1'), 'down');
+});
+
+runTest('1622. Err-disabled port status invariant: operStatus is down, errDisabled: true, status: down', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    setSwitchPortOperState(sw, 'Fa0/1', 'VIOLATION_SHUTDOWN');
+    const cfg = getSwitchPortConfig(sw, 'Fa0/1');
+    assert.strictEqual(cfg.portSecurity.errDisabled, true);
+    assert.strictEqual(cfg.status, 'down');
+    assert.strictEqual(cfg.adminDown, false);
+    assert.strictEqual(getInterfaceOperStatus(sw, 'Fa0/1'), 'down');
+});
+
+runTest('1623. Err-disabled port rejects frame transmission and ARP resolution', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 200, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    addConnection('Switch0', 'PC1');
+    const sw = getDeviceById('Switch0');
+    const pc0 = getDeviceById('PC0');
+    const pc1 = getDeviceById('PC1');
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+    setSwitchPortOperState(sw, 'Fa0/1', 'VIOLATION_SHUTDOWN');
+    const res = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(res.success, false);
+    assert.ok(res.reason.includes('down') || res.reason.includes('failed') || res.reason.includes('blocked') || res.reason.includes('physical'));
+});
+
+runTest('1624. Err-disabled port STP state is disabled/blocking', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 200, 100);
+    addConnection('Switch0', 'Switch1');
+    const sw0 = getDeviceById('Switch0');
+    recalculateTopologyStp();
+    setSwitchPortOperState(sw0, 'Fa0/1', 'VIOLATION_SHUTDOWN');
+    recalculateTopologyStp();
+    const stpPort = sw0.stp.ports['Fa0/1'];
+    assert.strictEqual(stpPort.role, 'disabled');
+    assert.strictEqual(stpPort.state, 'blocking');
+});
+
+runTest('1625. Err-disabled port topology discovery: CDP/LLDP neighbors suppressed on err-disabled port', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 200, 100);
+    addConnection('Switch0', 'Switch1');
+    const sw0 = getDeviceById('Switch0');
+    const sw1 = getDeviceById('Switch1');
+    assert.strictEqual(getDeviceNeighbors(sw0, 'cdp').length, 1);
+    setSwitchPortOperState(sw0, 'Fa0/1', 'VIOLATION_SHUTDOWN');
+    assert.strictEqual(getDeviceNeighbors(sw0, 'cdp').length, 0);
+    assert.strictEqual(getDeviceNeighbors(sw1, 'cdp').length, 0);
+});
+
+runTest('1626. Err-disabled recovery: no shutdown alone fails while errDisabled latch remains', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    setSwitchPortOperState(sw, 'Fa0/1', 'VIOLATION_SHUTDOWN');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    const res = executeCliCommand(sw, 'no shutdown');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('err-disabled'));
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.errDisabled, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').status, 'down');
+});
+
+runTest('1627. Err-disabled recovery: shutdown followed by no shutdown successfully recovers port', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    setSwitchPortOperState(sw, 'Fa0/1', 'VIOLATION_SHUTDOWN');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    const shutRes = executeCliCommand(sw, 'shutdown');
+    assert.strictEqual(shutRes.success, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').adminDown, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.errDisabled, false);
+    const noShutRes = executeCliCommand(sw, 'no shutdown');
+    assert.strictEqual(noShutRes.success, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').adminDown, false);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').status, 'up');
+});
+
+runTest('1628. CANONICAL_RECOVERY: Inspector action clears errDisabled and restores up status on non-adminDown port', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    setSwitchPortOperState(sw, 'Fa0/1', 'VIOLATION_SHUTDOWN');
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.errDisabled, true);
+    const res = setSwitchPortOperState(sw, 'Fa0/1', 'CANONICAL_RECOVERY');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.errDisabled, false);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').status, 'up');
+});
+
+runTest('1629. CANONICAL_RECOVERY: Rejects bringing port up if port is administratively down (adminDown: true)', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    setSwitchPortOperState(sw, 'Fa0/1', 'SHUTDOWN');
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').adminDown, true);
+    const res = setSwitchPortOperState(sw, 'Fa0/1', 'CANONICAL_RECOVERY');
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').status, 'down');
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').adminDown, true);
+});
+
+runTest('1630. Disabling port security on err-disabled port does not silently restore port to up state', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    setSwitchPortOperState(sw, 'Fa0/1', 'VIOLATION_SHUTDOWN');
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').status, 'down');
+    executeCliCommand(sw, 'no switchport port-security');
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.enabled, false);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').status, 'down');
+});
+
+runTest('1631. Dynamic secure MACs are flushed on link disconnect (removeSwitchMacEntriesForConnection)', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 200, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    addConnection('Switch0', 'PC1');
+    const connId = networkState.connections[0].id;
+    const sw = getDeviceById('Switch0');
+    const pc0 = getDeviceById('PC0');
+    const pc1 = getDeviceById('PC1');
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    simulateSendFrame(pc0, pc1);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.secureMacs.length, 1);
+    deleteConnection(connId);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.secureMacs.length, 0);
+});
+
+runTest('1632. Static and sticky secure MACs survive link disconnect and reconnection', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 200, 100);
+    addConnection('Switch0', 'PC0');
+    const connId = networkState.connections[0].id;
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'switchport port-security maximum 2');
+    executeCliCommand(sw, 'switchport port-security mac-address 00:11:22:33:44:55');
+    executeCliCommand(sw, 'switchport port-security mac-address sticky aa:bb:cc:dd:ee:ff');
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.secureMacs.length, 2);
+    deleteConnection(connId);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.secureMacs.length, 2);
+});
+
+runTest('1633. Static and sticky MAC entries in switch macTable are immune to MAC aging (ageSwitchMacTable)', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'switchport port-security mac-address 00:11:22:33:44:55');
+    const runtime = getSwitchRuntime(sw.id);
+    assert.strictEqual(runtime.macTable.length, 1);
+    ageSwitchMacTable(sw.id, 300, 1000000);
+    assert.strictEqual(runtime.macTable.length, 1);
+});
+
+runTest('1634. Dynamic learned MAC on unconstrained port ages out normally while secure static MAC remains', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 200, 100);
+    addConnection('Switch0', 'PC0');
+    const sw = getDeviceById('Switch0');
+    const pc0 = getDeviceById('PC0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'switchport port-security mac-address 00:11:22:33:44:55');
+    learnSwitchMac(sw.id, '66:77:88:99:aa:bb', pc0.id, 'Fa0/2', 1);
+    const runtime = getSwitchRuntime(sw.id);
+    assert.strictEqual(runtime.macTable.length, 2);
+    const future = Date.now() + 500000;
+    ageSwitchMacTable(sw.id, 300, future);
+    assert.strictEqual(runtime.macTable.length, 1);
+    assert.strictEqual(runtime.macTable[0].mac, '00:11:22:33:44:55');
+});
+
+runTest('1635. MLS routed egress learning does not trigger ingress port security violation', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 200, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    addConnection('Switch0', 'PC1');
+    const sw = getDeviceById('Switch0');
+    const pc0 = getDeviceById('PC0');
+    const pc1 = getDeviceById('PC1');
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'ip routing');
+    executeCliCommand(sw, 'interface Fa0/2');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'switchport port-security mac-address ' + normalizeMacAddress(pc1.mac));
+    const res = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/2').portSecurity.violationCount, 0);
+});
+
+runTest('1636. ARP request ingress triggers port security violation and drops frame when unauthorized', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 200, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    addConnection('Switch0', 'PC1');
+    const sw = getDeviceById('Switch0');
+    const pc0 = getDeviceById('PC0');
+    const pc1 = getDeviceById('PC1');
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'switchport port-security mac-address 00:00:00:00:00:99');
+    const arpRes = simulateArpResolution(pc0, pc1.ip);
+    assert.strictEqual(arpRes.success, false);
+    assert.ok(arpRes.reason.includes('port-security violation') || arpRes.reason.includes('Port security violation'));
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.errDisabled, true);
+});
+
+runTest('1637. ARP reply ingress triggers port security violation and drops frame when unauthorized', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 200, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    addConnection('Switch0', 'PC1');
+    const sw = getDeviceById('Switch0');
+    const pc0 = getDeviceById('PC0');
+    const pc1 = getDeviceById('PC1');
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'switchport port-security mac-address ' + normalizeMacAddress(pc0.mac));
+    executeCliCommand(sw, 'interface Fa0/2');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'switchport port-security mac-address 00:00:00:00:00:99');
+    const arpRes = simulateArpResolution(pc0, pc1.ip);
+    assert.strictEqual(arpRes.success, false);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/2').portSecurity.errDisabled, true);
+});
+
+runTest('1638. Multiple secure MACs: port configured with max 2 learns two distinct valid MACs and forwards for both', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'switchport port-security maximum 2');
+    const eval1 = evaluateSwitchPortSecurity(sw, 'Fa0/1', '00:11:11:11:11:11', 1);
+    assert.strictEqual(eval1.allowed, true);
+    const eval2 = evaluateSwitchPortSecurity(sw, 'Fa0/1', '00:22:22:22:22:22', 1);
+    assert.strictEqual(eval2.allowed, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.secureMacs.length, 2);
+});
+
+runTest('1639. Multiple secure MACs: third MAC on max 2 port triggers security violation', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'switchport port-security maximum 2');
+    evaluateSwitchPortSecurity(sw, 'Fa0/1', '00:11:11:11:11:11', 1);
+    evaluateSwitchPortSecurity(sw, 'Fa0/1', '00:22:22:22:22:22', 1);
+    const eval3 = evaluateSwitchPortSecurity(sw, 'Fa0/1', '00:33:33:33:33:33', 1);
+    assert.strictEqual(eval3.allowed, false);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.violationCount, 1);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.errDisabled, true);
+});
+
+runTest('1640. CLI show port-security tabular summary format', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'switchport port-security maximum 3');
+    executeCliCommand(sw, 'switchport port-security violation restrict');
+    executeCliCommand(sw, 'end');
+    const res = executeCliCommand(sw, 'show port-security');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Secure Port'));
+    assert.ok(res.output.includes('Fa0/1'));
+    assert.ok(res.output.includes('Restrict'));
+    assert.ok(res.output.includes('Total Addresses in System'));
+});
+
+runTest('1641. CLI show port-security interface <port> detailed status format', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'switchport port-security mac-address sticky');
+    executeCliCommand(sw, 'switchport port-security mac-address sticky 00:11:22:33:44:55');
+    executeCliCommand(sw, 'end');
+    const res = executeCliCommand(sw, 'show port-security interface Fa0/1');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Port Security              : Enabled'));
+    assert.ok(res.output.includes('Port Status                : Secure-up'));
+    assert.ok(res.output.includes('Sticky MAC Addresses       : 1'));
+    assert.ok(res.output.includes('Security Violation Count   : 0'));
+});
+
+runTest('1642. CLI show port-security address secure MAC address table format', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'switchport port-security mac-address 00:11:22:33:44:55');
+    executeCliCommand(sw, 'end');
+    const res = executeCliCommand(sw, 'show port-security address');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Secure Mac Address Table'));
+    assert.ok(res.output.includes('00:11:22:33:44:55'));
+    assert.ok(res.output.includes('SecureConfigured'));
+    assert.ok(res.output.includes('Fa0/1'));
+});
+
+runTest('1643. CLI show interfaces <port> switchport displays Port Security: Enabled and Disabled', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    const resOff = executeCliCommand(sw, 'show interfaces Fa0/1 switchport');
+    assert.ok(resOff.output.includes('Port Security: Disabled'));
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'end');
+    const resOn = executeCliCommand(sw, 'show interfaces Fa0/1 switchport');
+    assert.ok(resOn.output.includes('Port Security: Enabled'));
+});
+
+runTest('1644. Switch inspector UI renders PORT SECURITY table with status badges and Recover Port button', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'end');
+    let html = renderSwitchInspector(sw);
+    assert.ok(html.includes('PORT SECURITY'));
+    assert.ok(html.includes('SECURE-UP'));
+    assert.ok(!html.includes('recover-port-btn'));
+    setSwitchPortOperState(sw, 'Fa0/1', 'VIOLATION_SHUTDOWN');
+    html = renderSwitchInspector(sw);
+    assert.ok(html.includes('ERR-DISABLED'));
+    assert.ok(html.includes('recover-port-btn'));
+    assert.ok(html.includes('Recover Port'));
+});
+
+runTest('1645. Undo and redo history integration across port security configuration and canonical recovery', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.enabled, true);
+    undo();
+    const swUndo = getDeviceById('Switch0');
+    assert.strictEqual(getSwitchPortConfig(swUndo, 'Fa0/1').portSecurity.enabled, false);
+    redo();
+    const swRedo = getDeviceById('Switch0');
+    assert.strictEqual(getSwitchPortConfig(swRedo, 'Fa0/1').portSecurity.enabled, true);
+});
+
+runTest('1646. CANONICAL_RECOVERY when both adminDown and errDisabled are true preserves administrative shutdown', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    setSwitchPortOperState(sw, 'Fa0/1', 'VIOLATION_SHUTDOWN');
+    sw.switchports['Fa0/1'].adminDown = true;
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.errDisabled, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').adminDown, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').status, 'down');
+
+    const res = setSwitchPortOperState(sw, 'Fa0/1', 'CANONICAL_RECOVERY');
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.rejected, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.errDisabled, false);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').adminDown, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').status, 'down');
+    assert.strictEqual(getInterfaceOperStatus(sw, 'Fa0/1'), 'down');
+
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    const noShutRes = executeCliCommand(sw, 'no shutdown');
+    assert.strictEqual(noShutRes.success, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').adminDown, false);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').status, 'up');
+});
+
+runTest('1647. Cable disconnect flushes dynamic entries but preserves configured static and sticky secure bindings in macTable', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 200, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    addConnection('Switch0', 'PC1');
+    const sw = getDeviceById('Switch0');
+    const pc0 = getDeviceById('PC0');
+    const pc1 = getDeviceById('PC1');
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'switchport port-security maximum 3');
+    executeCliCommand(sw, 'switchport port-security mac-address 00:aa:bb:cc:dd:ee');
+    addSwitchPortSecurityMac(sw, 'Fa0/1', '00:11:22:33:44:55', true);
+
+    simulateSendFrame(pc0, pc1);
+    const secBefore = getSwitchPortConfig(sw, 'Fa0/1').portSecurity;
+    assert.strictEqual(secBefore.secureMacs.length, 3);
+    const runtime = getSwitchRuntime(sw.id);
+    assert.ok(runtime.macTable.some(e => e.mac === normalizeMacAddress('00:aa:bb:cc:dd:ee') && e.type === 'STATIC'));
+    assert.ok(runtime.macTable.some(e => e.mac === '00:11:22:33:44:55' && e.type === 'STATIC'));
+    assert.ok(runtime.macTable.some(e => e.mac === normalizeMacAddress(pc0.mac)));
+
+    const connFa01 = networkState.connections.find(c => c.source === 'Switch0' && c.target === 'PC0');
+    deleteConnection(connFa01.id);
+
+    const secAfter = getSwitchPortConfig(sw, 'Fa0/1').portSecurity;
+    assert.strictEqual(secAfter.secureMacs.length, 2);
+    assert.strictEqual(secAfter.secureMacs.some(e => e.type === 'dynamic'), false);
+
+    assert.ok(runtime.macTable.some(e => e.mac === normalizeMacAddress('00:aa:bb:cc:dd:ee') && e.type === 'STATIC'));
+    assert.ok(runtime.macTable.some(e => e.mac === '00:11:22:33:44:55' && e.type === 'STATIC'));
+    assert.strictEqual(runtime.macTable.some(e => e.mac === normalizeMacAddress(pc0.mac)), false);
+
+    addConnection('Switch0', 'PC0');
+    const evalSticky = evaluateSwitchPortSecurity(sw, 'Fa0/1', '00:11:22:33:44:55', 1);
+    assert.strictEqual(evalSticky.allowed, true);
+});
+
+runTest('1648. Rejected CLI port security commands do not create unnecessary undo history entries', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+
+    // Valid action 1: enable port security
+    executeCliCommand(sw, 'switchport port-security');
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').portSecurity.enabled, true);
+    const historyLenAfterValid1 = networkState.history.length;
+
+    // Invalid action: attempt to configure trunk mode on secured port (rejected)
+    const rejTrunk = executeCliCommand(sw, 'switchport mode trunk');
+    assert.strictEqual(rejTrunk.success, false);
+    assert.strictEqual(networkState.history.length, historyLenAfterValid1);
+
+    // Invalid action: maximum 0 (rejected)
+    const rejMax = executeCliCommand(sw, 'switchport port-security maximum 0');
+    assert.strictEqual(rejMax.success, false);
+    assert.strictEqual(networkState.history.length, historyLenAfterValid1);
+
+    // Invalid action: invalid violation mode (rejected)
+    const rejViol = executeCliCommand(sw, 'switchport port-security violation invalidMode');
+    assert.strictEqual(rejViol.success, false);
+    assert.strictEqual(networkState.history.length, historyLenAfterValid1);
+
+    // Undo should directly revert Valid Action 1 (disabling port security), not a failed command!
+    undo();
+    const swUndo = getDeviceById('Switch0');
+    assert.strictEqual(getSwitchPortConfig(swUndo, 'Fa0/1').portSecurity.enabled, false);
+});
+
+runTest('1649. Inspector Recover Port action does not push history when port is administratively down', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = getDeviceById('Switch0');
+    setSwitchPortOperState(sw, 'Fa0/1', 'SHUTDOWN');
+    const historyBefore = networkState.history.length;
+
+    // Simulate clicking Recover Port in Inspector on an adminDown port
+    const panel = {
+        querySelectorAll: (sel) => {
+            if (sel === '.recover-port-btn') {
+                return [{
+                    dataset: { port: 'Fa0/1', deviceId: sw.id },
+                    addEventListener: (event, handler) => {
+                        handler({ currentTarget: { dataset: { port: 'Fa0/1', deviceId: sw.id } } });
+                    }
+                }];
+            }
+            return [];
+        },
+        querySelector: () => null
+    };
+
+    // Trigger binding logic from renderPropertiesPanel
+    const recoverPortButtons = panel.querySelectorAll('.recover-port-btn');
+    recoverPortButtons.forEach((btn) => {
+        btn.addEventListener('click', (e) => {
+            const port = e.currentTarget?.dataset?.port;
+            const devId = e.currentTarget?.dataset?.deviceId || sw.id;
+            const targetSw = getSwitchDevice(devId);
+            if (targetSw && port) {
+                const normPort = normalizeSwitchPortName(port) || port;
+                const cfg = targetSw.switchports?.[normPort];
+                if (cfg && cfg.adminDown) {
+                    const res = setSwitchPortOperState(targetSw, port, 'CANONICAL_RECOVERY');
+                    return;
+                }
+                pushHistory();
+                setSwitchPortOperState(targetSw, port, 'CANONICAL_RECOVERY');
+            }
+        });
+    });
+
+    // History stack must NOT have grown because recovery was rejected
+    assert.strictEqual(networkState.history.length, historyBefore);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').adminDown, true);
+    assert.strictEqual(getSwitchPortConfig(sw, 'Fa0/1').status, 'down');
+});
+
+runTest('1650. End-to-end sticky-MAC lifecycle: ingress learning, STATIC forwarding type, aging immunity, and disconnect/reconnect survival', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 200, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    addConnection('Switch0', 'PC1');
+
+    const sw = getDeviceById('Switch0');
+    const pc0 = getDeviceById('PC0');
+    const pc1 = getDeviceById('PC1');
+    pc0.ip = '192.168.1.10';
+    pc0.subnetMask = '255.255.255.0';
+    pc1.ip = '192.168.1.20';
+    pc1.subnetMask = '255.255.255.0';
+
+    // 1. Enable port-security and sticky learning on Fa0/1; Fa0/2 remains standard unconstrained access port
+    executeCliCommand(sw, 'configure terminal');
+    executeCliCommand(sw, 'interface Fa0/1');
+    executeCliCommand(sw, 'switchport port-security');
+    executeCliCommand(sw, 'switchport port-security mac-address sticky');
+
+    const secBefore = getSwitchPortConfig(sw, 'Fa0/1').portSecurity;
+    assert.strictEqual(secBefore.enabled, true);
+    assert.strictEqual(secBefore.sticky, true);
+    assert.strictEqual(secBefore.secureMacs.length, 0);
+
+    // 2. Send actual ingress traffic from PC0 to PC1 through normal forwarding path
+    const sendRes = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes.success, true);
+
+    // Verify PC0's MAC was learned as sticky in secureMacs
+    const secAfter = getSwitchPortConfig(sw, 'Fa0/1').portSecurity;
+    assert.strictEqual(secAfter.secureMacs.length, 1);
+    assert.strictEqual(secAfter.secureMacs[0].mac, normalizeMacAddress(pc0.mac));
+    assert.strictEqual(secAfter.secureMacs[0].type, 'sticky');
+
+    // 3. Inspect runtime.macTable and confirm PC0's entry has type: 'STATIC'
+    const runtime = getSwitchRuntime(sw.id);
+    const stickyEntry = runtime.macTable.find(e => e.mac === normalizeMacAddress(pc0.mac));
+    assert.ok(stickyEntry, 'PC0 MAC should be present in switch MAC table');
+    assert.strictEqual(stickyEntry.port, 'Fa0/1');
+    assert.strictEqual(stickyEntry.type, 'STATIC', 'Sticky secure MAC in forwarding table must have type STATIC');
+
+    // 4. Confirm genuinely dynamic non-sticky entry for PC1 on Fa0/2
+    const dynamicEntry = runtime.macTable.find(e => e.mac === normalizeMacAddress(pc1.mac));
+    assert.ok(dynamicEntry, 'PC1 dynamic MAC should be present in switch MAC table');
+    assert.strictEqual(dynamicEntry.port, 'Fa0/2');
+    assert.strictEqual(dynamicEntry.type, 'DYNAMIC', 'Standard learned MAC on unconstrained port must be DYNAMIC');
+
+    // 5. Advance simulated time past 300s dynamic aging interval and invoke ageSwitchMacTable
+    const futureTime = Date.now() + 400000;
+    const removedCount = ageSwitchMacTable(sw.id, 300, futureTime);
+    assert.strictEqual(removedCount, 1, 'Only the dynamic non-sticky entry should be aged out');
+
+    // 6. Confirm sticky forwarding entry survives aging, while dynamic entry expires
+    assert.ok(runtime.macTable.some(e => e.mac === normalizeMacAddress(pc0.mac) && e.type === 'STATIC'));
+    assert.strictEqual(runtime.macTable.some(e => e.mac === normalizeMacAddress(pc1.mac)), false);
+
+    // 7. Disconnect sticky host cable
+    const connFa01 = networkState.connections.find(c => c.source === 'Switch0' && c.target === 'PC0');
+    assert.ok(connFa01);
+    deleteConnection(connFa01.id);
+
+    // 8. Confirm configured sticky secure binding survives, no duplicates or stale dynamic entries
+    const secDisconnected = getSwitchPortConfig(sw, 'Fa0/1').portSecurity;
+    assert.strictEqual(secDisconnected.secureMacs.length, 1);
+    assert.strictEqual(secDisconnected.secureMacs[0].type, 'sticky');
+    const stickyInTableAfterDisconnect = runtime.macTable.filter(e => e.mac === normalizeMacAddress(pc0.mac));
+    assert.strictEqual(stickyInTableAfterDisconnect.length, 1);
+    assert.strictEqual(stickyInTableAfterDisconnect[0].type, 'STATIC');
+
+    // Reconnect sticky host cable
+    addConnection('Switch0', 'PC0');
+
+    // 9. Send subsequent traffic and verify forwarding succeeds after reconnection
+    const sendRes2 = simulateSendFrame(pc0, pc1);
+    assert.strictEqual(sendRes2.success, true);
+    assert.strictEqual(secDisconnected.violationCount, 0);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
