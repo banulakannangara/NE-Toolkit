@@ -1122,6 +1122,8 @@ function getStpPortIndicatorState(sw, portName) {
     if (!sw || sw.type !== 'switch' || !portName) return null;
     ensureSwitchStpState(sw);
     const operStatus = getInterfaceOperStatus(sw, portName);
+    const isPf = Boolean(sw.switchports?.[portName]?.portfast);
+    const isPfEff = isPortfastEffective(sw, portName);
     if (operStatus === 'down') {
         const cfg = sw.switchports?.[portName];
         const isErrDisabled = Boolean(cfg?.portSecurity?.errDisabled);
@@ -1129,7 +1131,9 @@ function getStpPortIndicatorState(sw, portName) {
             state: isErrDisabled ? 'err-disabled' : 'down',
             role: sw.stp?.ports?.[portName]?.role || 'disabled',
             color: '#ef4444',
-            classModifier: 'down'
+            classModifier: 'down',
+            portfast: isPf,
+            portfastEffective: isPfEff
         };
     }
     const stpPort = sw.stp?.ports?.[portName];
@@ -1138,14 +1142,18 @@ function getStpPortIndicatorState(sw, portName) {
             state: 'blocking',
             role: stpPort.role || 'alternate',
             color: '#f59e0b',
-            classModifier: 'blocking'
+            classModifier: 'blocking',
+            portfast: isPf,
+            portfastEffective: isPfEff
         };
     }
     return {
         state: 'forwarding',
         role: stpPort?.role || 'designated',
         color: '#22c55e',
-        classModifier: 'forwarding'
+        classModifier: 'forwarding',
+        portfast: isPf,
+        portfastEffective: isPfEff
     };
 }
 
@@ -5354,13 +5362,13 @@ function renderSwitchInspector(selected) {
 
     const isRoot = targetSw.stp?.rootBridgeId === targetSw.stp?.bridgeId;
     const stpPortRows = sortedPortNames.map((pName) => {
+        const cfg = targetSw.switchports?.[pName];
         const pStp = targetSw.stp?.ports?.[pName] || { role: 'disabled', state: 'blocking', cost: 19 };
         const roleLabel = pStp.role === 'root' ? 'Root' : pStp.role === 'designated' ? 'Desg' : pStp.role === 'alternate' ? 'Altn' : 'Disabled';
         const isFwd = pStp.state === 'forwarding';
         const operStatus = getInterfaceOperStatus(targetSw, pName);
         let stateBadge;
         if (operStatus === 'down') {
-            const cfg = targetSw.switchports?.[pName];
             const downText = cfg?.portSecurity?.errDisabled ? 'ERR-DISABLED' : (cfg?.adminDown ? 'ADMIN DOWN' : 'DOWN');
             stateBadge = `<span class="status-badge status-down">${escapeHtml(downText)}</span>`;
         } else if (isFwd) {
@@ -5385,9 +5393,16 @@ function renderSwitchInspector(selected) {
                 }
             }
         }
+        let pfBadge = '';
+        if (cfg?.portfast) {
+            const eff = isPortfastEffective(targetSw, pName);
+            pfBadge = eff
+                ? ' <span class="status-badge" style="background:#0284c7;color:#fff;font-size:10px;padding:1px 4px;margin-left:4px;">PortFast</span>'
+                : ' <span class="status-badge" style="background:#64748b;color:#fff;font-size:10px;padding:1px 4px;margin-left:4px;" title="Ineffective">PortFast (ineff)</span>';
+        }
         return `
             <tr>
-                <td>${escapeHtml(pName)}</td>
+                <td>${escapeHtml(pName)}${pfBadge}</td>
                 <td>${escapeHtml(roleLabel)}</td>
                 <td>${stateBadge}</td>
                 <td>${escapeHtml(String(pStp.cost || 19))}</td>
@@ -6842,6 +6857,68 @@ function setSwitchPortStpPriority(switchOrId, portName, priority) {
     return sw.switchports[normPort];
 }
 
+function getPortfastIneffectiveReason(switchOrId, portName) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return 'switch not found';
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) return 'invalid port';
+    const cfg = sw.switchports?.[normPort];
+    if (!cfg || !cfg.portfast) return 'portfast not enabled';
+
+    if (getInterfaceOperStatus(sw, normPort) === 'down') {
+        return cfg.portSecurity?.errDisabled ? 'port err-disabled' : (cfg.adminDown ? 'port administratively down' : 'port down');
+    }
+    if (cfg.mode === 'trunk') {
+        return 'port is in trunk mode';
+    }
+
+    const runtime = getSwitchRuntime(sw.id);
+    const connId = Object.keys(runtime.ports || {}).find(cId => runtime.ports[cId] === normPort);
+    if (!connId) return 'port not connected';
+
+    const conn = getConnectionById(connId);
+    if (!conn) return 'port not connected';
+
+    const neighborId = conn.source === sw.id ? conn.target : conn.source;
+    const neighborDev = getDeviceById(neighborId);
+    if (!neighborDev) return 'port not connected';
+
+    if (neighborDev.type === 'switch') {
+        return 'connected to switch';
+    }
+
+    return null;
+}
+
+function isPortfastEffective(switchOrId, portName) {
+    return getPortfastIneffectiveReason(switchOrId, portName) === null;
+}
+
+function setSwitchPortPortfast(switchOrId, portName, enable) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) throw new Error('Switch not found.');
+    ensureSwitchVlanState(sw);
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) throw new Error(`Invalid switch port "${portName}".`);
+
+    ensurePortSecurityState(sw, normPort);
+    const cfg = sw.switchports[normPort];
+    cfg.portfast = Boolean(enable);
+
+    recalculateTopologyStp();
+
+    if (cfg.portfast) {
+        const warnings = [
+            '%Warning: spanning-tree portfast should only be enabled on ports connected to a single\n host. Connecting hubs, concentrators, switches, bridges, etc... to this\n interface  when portfast is enabled, can cause temporary bridging loops.\n Use with CAUTION'
+        ];
+        if (cfg.mode === 'trunk') {
+            warnings.push(`%Portfast has been configured on ${normPort} but will only\n have effect when the interface is in a non-trunking mode.`);
+        }
+        return warnings.join('\n\n');
+    }
+    return '';
+}
+
 function recalculateTopologyStp() {
     const switches = (networkState.devices || []).filter(d => d && d.type === 'switch');
     if (switches.length === 0) return;
@@ -7000,12 +7077,15 @@ function recalculateTopologyStp() {
             ]);
 
             allPortNames.forEach(portName => {
+                const isPortfastConfigured = Boolean(sw.switchports?.[portName]?.portfast);
                 if (getInterfaceOperStatus(sw, portName) === 'down') {
                     sw.stp.ports[portName] = {
                         role: 'disabled',
                         state: 'blocking',
                         cost: getSwitchPortCost(sw, portName),
-                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY
+                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY,
+                        edge: false,
+                        portfast: isPortfastConfigured
                     };
                     return;
                 }
@@ -7015,7 +7095,9 @@ function recalculateTopologyStp() {
                         role: 'root',
                         state: 'forwarding',
                         cost: getSwitchPortCost(sw, portName),
-                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY
+                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY,
+                        edge: false,
+                        portfast: isPortfastConfigured
                     };
                     return;
                 }
@@ -7026,7 +7108,9 @@ function recalculateTopologyStp() {
                         role: 'disabled',
                         state: 'blocking',
                         cost: getSwitchPortCost(sw, portName),
-                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY
+                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY,
+                        edge: false,
+                        portfast: isPortfastConfigured
                     };
                     return;
                 }
@@ -7037,7 +7121,9 @@ function recalculateTopologyStp() {
                         role: 'disabled',
                         state: 'blocking',
                         cost: getSwitchPortCost(sw, portName),
-                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY
+                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY,
+                        edge: false,
+                        portfast: isPortfastConfigured
                     };
                     return;
                 }
@@ -7050,17 +7136,22 @@ function recalculateTopologyStp() {
                         role: 'disabled',
                         state: 'blocking',
                         cost: getSwitchPortCost(sw, portName),
-                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY
+                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY,
+                        edge: false,
+                        portfast: isPortfastConfigured
                     };
                     return;
                 }
 
                 if (neighborDev.type !== 'switch') {
+                    const isEdge = isPortfastEffective(sw, portName);
                     sw.stp.ports[portName] = {
                         role: 'designated',
                         state: 'forwarding',
                         cost: getSwitchPortCost(sw, portName),
-                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY
+                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY,
+                        edge: isEdge,
+                        portfast: isPortfastConfigured
                     };
                     return;
                 }
@@ -7073,7 +7164,9 @@ function recalculateTopologyStp() {
                         role: 'designated',
                         state: 'forwarding',
                         cost: getSwitchPortCost(sw, portName),
-                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY
+                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY,
+                        edge: false,
+                        portfast: isPortfastConfigured
                     };
                     return;
                 }
@@ -7099,14 +7192,18 @@ function recalculateTopologyStp() {
                         role: 'designated',
                         state: 'forwarding',
                         cost: getSwitchPortCost(sw, portName),
-                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY
+                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY,
+                        edge: false,
+                        portfast: isPortfastConfigured
                     };
                 } else {
                     sw.stp.ports[portName] = {
                         role: 'alternate',
                         state: 'blocking',
                         cost: getSwitchPortCost(sw, portName),
-                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY
+                        portPriority: sw.switchports?.[portName]?.stpPortPriority || DEFAULT_PORT_PRIORITY,
+                        edge: false,
+                        portfast: isPortfastConfigured
                     };
                 }
             });
@@ -7434,6 +7531,7 @@ function ensurePortSecurityState(sw, portName) {
     if (typeof cfg.portSecurity.sticky !== 'boolean') cfg.portSecurity.sticky = false;
     if (typeof cfg.portSecurity.violationCount !== 'number') cfg.portSecurity.violationCount = 0;
     if (typeof cfg.portSecurity.errDisabled !== 'boolean') cfg.portSecurity.errDisabled = false;
+    if (typeof cfg.portfast !== 'boolean') cfg.portfast = false;
 
     // Keep status synchronized with canonical invariants:
     // Port must not be considered operational if either adminDown or errDisabled is true
@@ -7471,6 +7569,7 @@ function getSwitchPortConfig(switchOrId, portName) {
                 lastViolationMac: null,
                 errDisabled: false
             },
+            portfast: false,
             stpCost: normPort.toLowerCase().startsWith('gi') ? DEFAULT_PORT_COST_GI : DEFAULT_PORT_COST_FA,
             stpPortPriority: DEFAULT_PORT_PRIORITY
         };
@@ -7488,6 +7587,7 @@ function getSwitchPortConfig(switchOrId, portName) {
         status: cfg.status || 'up',
         adminDown: Boolean(cfg.adminDown),
         portSecurity: cfg.portSecurity,
+        portfast: Boolean(cfg.portfast),
         stpCost: typeof cfg.stpCost === 'number' && cfg.stpCost > 0 ? cfg.stpCost : (normPort.toLowerCase().startsWith('gi') ? DEFAULT_PORT_COST_GI : DEFAULT_PORT_COST_FA),
         stpPortPriority: typeof cfg.stpPortPriority === 'number' ? cfg.stpPortPriority : DEFAULT_PORT_PRIORITY
     };
@@ -15713,6 +15813,12 @@ function formatCliSwitchInterfaceSwitchport(switchOrId, portName) {
     const accessVlanName = sw.vlans[cfg.accessVlan || 1]?.name || 'default';
     const nativeVlanName = sw.vlans[cfg.nativeVlan || 1]?.name || 'default';
 
+    const isPfEffective = isPortfastEffective(sw, normPort);
+    let pfDisplay = 'Disabled';
+    if (cfg.portfast) {
+        pfDisplay = isPfEffective ? 'Enabled' : `Enabled (ineffective: ${getPortfastIneffectiveReason(sw, normPort)})`;
+    }
+
     const lines = [
         `Name: ${normPort}`,
         `Switchport: Enabled`,
@@ -15720,7 +15826,8 @@ function formatCliSwitchInterfaceSwitchport(switchOrId, portName) {
         `Operational Mode: ${isTrunk ? 'trunk' : 'static access'}`,
         `Administrative Native VLAN tagging: disabled`,
         `Trunking VLANs Enabled: ${isTrunk ? (cfg.allowedVlans === 'all' ? 'ALL' : formatAllowedVlans(cfg.allowedVlans)) : 'ALL'}`,
-        `Port Security: ${cfg.portSecurity?.enabled ? 'Enabled' : 'Disabled'}`
+        `Port Security: ${cfg.portSecurity?.enabled ? 'Enabled' : 'Disabled'}`,
+        `PortFast: ${pfDisplay}`
     ];
     return lines.join('\n');
 }
@@ -16024,7 +16131,7 @@ function formatCliSwitchSpanningTree(switchOrId) {
             const costStr = String(portInfo.cost || 19).padEnd(10, ' ');
             const portNum = parseInt(pName.replace(/\D/g, ''), 10) || 1;
             const prioNbrStr = `${portInfo.portPriority || 128}.${portNum}`.padEnd(9, ' ');
-            const typeStr = 'P2p';
+            const typeStr = portInfo.edge ? 'P2p Edge' : 'P2p';
             lines.push(`${portStr}${roleStr}${stsStr}${costStr}${prioNbrStr}${typeStr}`);
         });
     }
@@ -16116,8 +16223,19 @@ function formatCliSwitchSpanningTreeInterface(switchOrId, portName) {
         '   Link type is point-to-point by default'
     ];
 
+    const cfg = sw.switchports?.[normPort];
+    if (cfg?.portfast) {
+        if (isPortfastEffective(sw, normPort)) {
+            lines.push('   The port is in the portfast mode');
+        } else {
+            const ineffReason = getPortfastIneffectiveReason(sw, normPort);
+            lines.push(`   The port is in the portfast mode (ineffective: ${ineffReason})`);
+        }
+    } else {
+        lines.push('   The port is not in the portfast mode');
+    }
+
     if (operStatus === 'down') {
-        const cfg = sw.switchports?.[normPort];
         const downReason = cfg?.portSecurity?.errDisabled ? 'err-disabled' : (cfg?.adminDown ? 'administratively down' : 'down');
         lines.push(`   Operational status is down (${downReason})`);
     } else if (!connId) {
@@ -21432,6 +21550,29 @@ function executeCliCommand(deviceId, rawInput) {
                         device: dev
                     };
                 }
+                if (sub2 === 'portfast') {
+                    pushHistory();
+                    setSwitchPortPortfast(dev, portName, false);
+                    render();
+                    return {
+                        success: true,
+                        output: '',
+                        clear: false,
+                        status: 'success',
+                        command,
+                        device: dev
+                    };
+                }
+            }
+            if (sub2 === 'portfast') {
+                return {
+                    success: false,
+                    output: '% "no spanning-tree portfast" must be executed in interface configuration mode.',
+                    clear: false,
+                    status: 'error',
+                    command,
+                    device: dev
+                };
             }
             if (session.mode !== 'config') {
                 return {
@@ -22141,9 +22282,45 @@ function executeCliCommand(deviceId, rawInput) {
                     };
                 }
             }
+            if (tokens[1] === 'portfast') {
+                const subArg = tokens[2];
+                if (subArg && subArg !== 'disable') {
+                    return {
+                        success: false,
+                        output: '% Incomplete or unrecognized command: spanning-tree portfast [disable]',
+                        clear: false,
+                        status: 'error',
+                        command,
+                        device: dev
+                    };
+                }
+                const enable = subArg !== 'disable';
+                pushHistory();
+                const warningMsg = setSwitchPortPortfast(dev, portName, enable);
+                render();
+                return {
+                    success: true,
+                    output: enable ? warningMsg : '',
+                    clear: false,
+                    status: 'success',
+                    command,
+                    device: dev
+                };
+            }
             return {
                 success: false,
-                output: '% Incomplete or unrecognized spanning-tree interface command. Available: "spanning-tree cost <cost>", "spanning-tree port-priority <priority>".',
+                output: '% Incomplete or unrecognized spanning-tree interface command. Available: "spanning-tree cost <cost>", "spanning-tree port-priority <priority>", "spanning-tree portfast [disable]".',
+                clear: false,
+                status: 'error',
+                command,
+                device: dev
+            };
+        }
+
+        if (tokens[1] === 'portfast') {
+            return {
+                success: false,
+                output: '% "spanning-tree portfast" must be executed in interface configuration mode.',
                 clear: false,
                 status: 'error',
                 command,

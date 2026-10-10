@@ -41096,6 +41096,719 @@ runTest('1676. Switch CLI: show spanning-tree interface on configured but discon
     assert.ok(res.output.includes('Operational status is down (not connected)'));
 });
 
+// 1677. PortFast helper: setSwitchPortPortfast enables portfast and returns Cisco warning message
+runTest('1677. PortFast helper: setSwitchPortPortfast enables portfast and returns Cisco warning message', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    const warn = setSwitchPortPortfast(sw, 'Fa0/1', true);
+    assert.strictEqual(sw.switchports['Fa0/1'].portfast, true);
+    assert.ok(warn.includes('portfast should only be enabled on ports connected to a single'));
+    assert.ok(warn.includes('Use with CAUTION'));
+});
+
+// 1678. PortFast helper: setSwitchPortPortfast on trunk port notes ineffective status in warning
+runTest('1678. PortFast helper: setSwitchPortPortfast on trunk port notes ineffective status in warning', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    setSwitchPortMode(sw, 'Fa0/1', 'trunk');
+    const warn = setSwitchPortPortfast(sw, 'Fa0/1', true);
+    assert.strictEqual(sw.switchports['Fa0/1'].portfast, true);
+    assert.ok(warn.includes('non-trunking mode'));
+});
+
+// 1679. PortFast helper: setSwitchPortPortfast with false disables portfast
+runTest('1679. PortFast helper: setSwitchPortPortfast with false disables portfast', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    setSwitchPortPortfast(sw, 'Fa0/1', true);
+    assert.strictEqual(sw.switchports['Fa0/1'].portfast, true);
+    const out = setSwitchPortPortfast(sw, 'Fa0/1', false);
+    assert.strictEqual(sw.switchports['Fa0/1'].portfast, false);
+    assert.strictEqual(out, '');
+});
+
+// 1680. isPortfastEffective: returns true on access port with portfast enabled
+runTest('1680. isPortfastEffective: returns true on access port with portfast enabled', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    const sw = networkState.devices[0];
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 1);
+    setSwitchPortPortfast(sw, 'Fa0/1', true);
+    assert.strictEqual(isPortfastEffective(sw, 'Fa0/1'), true);
+});
+
+// 1681. isPortfastEffective: returns false on trunk port even if portfast is true
+runTest('1681. isPortfastEffective: returns false on trunk port even if portfast is true', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    setSwitchPortMode(sw, 'Fa0/1', 'trunk');
+    setSwitchPortPortfast(sw, 'Fa0/1', true);
+    assert.strictEqual(sw.switchports['Fa0/1'].portfast, true);
+    assert.strictEqual(isPortfastEffective(sw, 'Fa0/1'), false);
+});
+
+// 1682. isPortfastEffective: returns false when portfast is not enabled
+runTest('1682. isPortfastEffective: returns false when portfast is not enabled', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 1);
+    assert.strictEqual(isPortfastEffective(sw, 'Fa0/1'), false);
+});
+
+// 1683. Switch CLI: spanning-tree portfast in config-if enables PortFast and returns warning
+runTest('1683. Switch CLI: spanning-tree portfast in config-if enables PortFast and returns warning', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/2');
+    const res = executeCliCommand('Switch0', 'spanning-tree portfast');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('portfast should only be enabled on ports connected to a single'));
+    const sw = networkState.devices[0];
+    assert.strictEqual(sw.switchports['Fa0/2'].portfast, true);
+});
+
+// 1684. Switch CLI: no spanning-tree portfast in config-if disables PortFast
+runTest('1684. Switch CLI: no spanning-tree portfast in config-if disables PortFast', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/2');
+    executeCliCommand('Switch0', 'spanning-tree portfast');
+    const sw = networkState.devices[0];
+    assert.strictEqual(sw.switchports['Fa0/2'].portfast, true);
+
+    const res = executeCliCommand('Switch0', 'no spanning-tree portfast');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(sw.switchports['Fa0/2'].portfast, false);
+});
+
+// 1685. Switch CLI: spanning-tree portfast disable in config-if disables PortFast
+runTest('1685. Switch CLI: spanning-tree portfast disable in config-if disables PortFast', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/2');
+    executeCliCommand('Switch0', 'spanning-tree portfast');
+    const sw = networkState.devices[0];
+    assert.strictEqual(sw.switchports['Fa0/2'].portfast, true);
+
+    const res = executeCliCommand('Switch0', 'spanning-tree portfast disable');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(sw.switchports['Fa0/2'].portfast, false);
+});
+
+// 1686. Switch CLI: spanning-tree portfast rejected outside interface configuration mode
+runTest('1686. Switch CLI: spanning-tree portfast rejected outside interface configuration mode', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    const res = executeCliCommand('Switch0', 'spanning-tree portfast');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('must be executed in interface configuration mode'));
+});
+
+// 1687. Switch CLI: spanning-tree portfast with invalid arguments returns error
+runTest('1687. Switch CLI: spanning-tree portfast with invalid arguments returns error', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    const res = executeCliCommand('Switch0', 'spanning-tree portfast bogus');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('% Incomplete or unrecognized command: spanning-tree portfast [disable]'));
+});
+
+// 1688. Switch CLI: show spanning-tree interface shows portfast mode and Type: P2p Edge on access port
+runTest('1688. Switch CLI: show spanning-tree interface shows portfast mode and Type: P2p Edge on access port', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    executeCliCommand('Switch0', 'spanning-tree portfast');
+
+    recalculateTopologyStp();
+
+    const res = executeCliCommand('Switch0', 'show spanning-tree interface Fa0/1');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('The port is in the portfast mode'));
+
+    const resAll = executeCliCommand('Switch0', 'show spanning-tree');
+    assert.ok(resAll.output.includes('P2p Edge'));
+});
+
+// 1689. Switch CLI: show spanning-tree interface shows not in portfast mode and Type: P2p when disabled
+runTest('1689. Switch CLI: show spanning-tree interface shows not in portfast mode and Type: P2p when disabled', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+
+    recalculateTopologyStp();
+
+    const res = executeCliCommand('Switch0', 'show spanning-tree interface Fa0/1');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('The port is not in the portfast mode'));
+
+    const resAll = executeCliCommand('Switch0', 'show spanning-tree');
+    assert.ok(resAll.output.includes('P2p'));
+    assert.ok(!resAll.output.includes('P2p Edge'));
+});
+
+// 1690. Switch CLI: show spanning-tree interface on trunk port with portfast shows ineffective warning and non-edge
+runTest('1690. Switch CLI: show spanning-tree interface on trunk port with portfast shows ineffective warning and non-edge', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    addConnection('Switch0', 'Switch1');
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    executeCliCommand('Switch0', 'switchport mode trunk');
+    executeCliCommand('Switch0', 'spanning-tree portfast');
+
+    recalculateTopologyStp();
+
+    const res = executeCliCommand('Switch0', 'show spanning-tree interface Fa0/1');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('The port is in the portfast mode (ineffective: port is in trunk mode)'));
+
+    const resAll = executeCliCommand('Switch0', 'show spanning-tree');
+    assert.ok(resAll.output.includes('P2p'));
+    assert.ok(!resAll.output.includes('P2p Edge'));
+});
+
+// 1691. Switch CLI: show spanning-tree summary displays Portfast default status
+runTest('1691. Switch CLI: show spanning-tree summary displays Portfast default status', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const res = executeCliCommand('Switch0', 'show spanning-tree summary');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Portfast Default             is disabled'));
+});
+
+// 1692. Switch CLI: show spanning-tree detail includes portfast state and Edge designation
+runTest('1692. Switch CLI: show spanning-tree detail includes portfast state and Edge designation', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    executeCliCommand('Switch0', 'spanning-tree portfast');
+
+    recalculateTopologyStp();
+
+    const res = executeCliCommand('Switch0', 'show spanning-tree detail');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('The port is in the portfast mode'));
+});
+
+// 1693. Switch CLI: do show spanning-tree interface and detail work from interface config mode
+runTest('1693. Switch CLI: do show spanning-tree interface and detail work from interface config mode', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    executeCliCommand('Switch0', 'spanning-tree portfast');
+
+    const resIf = executeCliCommand('Switch0', 'do show spanning-tree interface Fa0/1');
+    assert.strictEqual(resIf.success, true);
+    assert.ok(resIf.output.includes('The port is in the portfast mode'));
+
+    const resDet = executeCliCommand('Switch0', 'do show spanning-tree detail');
+    assert.strictEqual(resDet.success, true);
+    assert.ok(resDet.output.includes('The port is in the portfast mode'));
+});
+
+// 1694. State transition: access port with portfast switched to trunk mode becomes ineffective, then access becomes effective
+runTest('1694. State transition: access port with portfast switched to trunk mode becomes ineffective, then access becomes effective', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    const sw = networkState.devices[0];
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 1);
+    setSwitchPortPortfast(sw, 'Fa0/1', true);
+    assert.strictEqual(isPortfastEffective(sw, 'Fa0/1'), true);
+
+    setSwitchPortMode(sw, 'Fa0/1', 'trunk');
+    assert.strictEqual(isPortfastEffective(sw, 'Fa0/1'), false);
+
+    setSwitchPortMode(sw, 'Fa0/1', 'access');
+    assert.strictEqual(isPortfastEffective(sw, 'Fa0/1'), true);
+});
+
+// 1695. getStpPortIndicatorState exposes portfast: true and portfastEffective: true on access port
+runTest('1695. getStpPortIndicatorState exposes portfast: true and portfastEffective: true on access port', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    const sw = networkState.devices[0];
+    setSwitchPortPortfast(sw, 'Fa0/1', true);
+
+    recalculateTopologyStp();
+
+    const ind = getStpPortIndicatorState(sw, 'Fa0/1');
+    assert.strictEqual(ind.portfast, true);
+    assert.strictEqual(ind.portfastEffective, true);
+    assert.strictEqual(ind.state, 'forwarding');
+    assert.strictEqual(ind.color, '#22c55e');
+});
+
+// 1696. getStpPortIndicatorState on trunk port exposes portfast: true and portfastEffective: false
+runTest('1696. getStpPortIndicatorState on trunk port exposes portfast: true and portfastEffective: false', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    addConnection('Switch0', 'Switch1');
+    const sw = networkState.devices[0];
+    setSwitchPortMode(sw, 'Fa0/1', 'trunk');
+    setSwitchPortPortfast(sw, 'Fa0/1', true);
+
+    recalculateTopologyStp();
+
+    const ind = getStpPortIndicatorState(sw, 'Fa0/1');
+    assert.strictEqual(ind.portfast, true);
+    assert.strictEqual(ind.portfastEffective, false);
+});
+
+// 1697. Switch Inspector UI: renders PortFast badge when effective and PortFast (ineff) when ineffective
+runTest('1697. Switch Inspector UI: renders PortFast badge when effective and PortFast (ineff) when ineffective', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    const sw = networkState.devices[0];
+    setSwitchPortAccessVlan(sw, 'Fa0/1', 1);
+    setSwitchPortPortfast(sw, 'Fa0/1', true);
+
+    setSwitchPortMode(sw, 'Fa0/2', 'trunk');
+    setSwitchPortPortfast(sw, 'Fa0/2', true);
+
+    const html = renderSwitchInspector(sw);
+    assert.ok(html.includes('PortFast</span>'));
+    assert.ok(html.includes('PortFast (ineff)</span>'));
+});
+
+// 1698. Undo and redo history integration: spanning-tree portfast creates undo point
+runTest('1698. Undo and redo history integration: spanning-tree portfast creates undo point', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    executeCliCommand('Switch0', 'spanning-tree portfast');
+
+    assert.strictEqual(sw.switchports['Fa0/1'].portfast, true);
+
+    undo();
+    const swAfterUndo = networkState.devices[0];
+    assert.strictEqual(Boolean(swAfterUndo.switchports['Fa0/1']?.portfast), false);
+
+    redo();
+    const swAfterRedo = networkState.devices[0];
+    assert.strictEqual(swAfterRedo.switchports['Fa0/1'].portfast, true);
+});
+
+// 1699. STP recalculation: PortFast access port connected to PC transitions immediately to designated forwarding
+runTest('1699. STP recalculation: PortFast access port connected to PC transitions immediately to designated forwarding', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    const sw = networkState.devices[0];
+    setSwitchPortPortfast(sw, 'Fa0/1', true);
+
+    recalculateTopologyStp();
+
+    const stpPort = sw.stp.ports['Fa0/1'];
+    assert.strictEqual(stpPort.role, 'designated');
+    assert.strictEqual(stpPort.state, 'forwarding');
+});
+
+// 1700. Multiple switches with mix of PortFast edge ports and inter-switch trunks maintain stable spanning tree topology
+runTest('1700. Multiple switches with mix of PortFast edge ports and inter-switch trunks maintain stable spanning tree topology', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Sw0
+    addDevice('switch', 300, 100); // Sw1
+    addDevice('pc', 100, 300);     // PC0
+    addDevice('pc', 300, 300);     // PC1
+
+    addConnection('Switch0', 'Switch1'); // Inter-switch trunk
+    addConnection('Switch0', 'PC0');     // Edge port on Sw0
+    addConnection('Switch1', 'PC1');     // Edge port on Sw1
+
+    const [sw0, sw1] = networkState.devices;
+    setSwitchPortMode(sw0, 'Fa0/1', 'trunk');
+    setSwitchPortMode(sw1, 'Fa0/1', 'trunk');
+
+    setSwitchPortPortfast(sw0, 'Fa0/2', true);
+    setSwitchPortPortfast(sw1, 'Fa0/2', true);
+
+    recalculateTopologyStp();
+
+    // Verify Sw0 portfast state
+    assert.strictEqual(isPortfastEffective(sw0, 'Fa0/2'), true);
+    assert.strictEqual(sw0.stp.ports['Fa0/2'].state, 'forwarding');
+
+    // Verify Sw1 portfast state
+    assert.strictEqual(isPortfastEffective(sw1, 'Fa0/2'), true);
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].state, 'forwarding');
+
+    // Verify inter-switch link
+    assert.strictEqual(isPortfastEffective(sw0, 'Fa0/1'), false);
+    assert.strictEqual(isPortfastEffective(sw1, 'Fa0/1'), false);
+});
+
+// 1701. Safety invariant: PortFast on administratively shutdown port remains role disabled and state blocking
+runTest('1701. Safety invariant: PortFast on administratively shutdown port remains role disabled and state blocking', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    executeCliCommand('Switch0', 'spanning-tree portfast');
+    executeCliCommand('Switch0', 'shutdown');
+
+    recalculateTopologyStp();
+
+    const sw = networkState.devices[0];
+    const stpPort = sw.stp.ports['Fa0/1'];
+    assert.strictEqual(stpPort.role, 'disabled');
+    assert.strictEqual(stpPort.state, 'blocking');
+    assert.strictEqual(stpPort.edge, false);
+    assert.strictEqual(stpPort.portfast, true);
+
+    const ind = getStpPortIndicatorState(sw, 'Fa0/1');
+    assert.strictEqual(ind.state, 'down');
+    assert.strictEqual(ind.color, '#ef4444');
+});
+
+// 1702. Safety invariant: PortFast on err-disabled port remains role disabled and state blocking
+runTest('1702. Safety invariant: PortFast on err-disabled port remains role disabled and state blocking', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    const sw = networkState.devices[0];
+    setSwitchPortPortfast(sw, 'Fa0/1', true);
+
+    sw.switchports['Fa0/1'].status = 'down';
+    sw.switchports['Fa0/1'].portSecurity = {
+        enabled: true,
+        maxMacs: 1,
+        action: 'shutdown',
+        sticky: false,
+        secureMacs: [],
+        violationCount: 1,
+        lastViolationMac: '00:11:22:33:44:55',
+        errDisabled: true
+    };
+
+    recalculateTopologyStp();
+
+    const stpPort = sw.stp.ports['Fa0/1'];
+    assert.strictEqual(stpPort.role, 'disabled');
+    assert.strictEqual(stpPort.state, 'blocking');
+    assert.strictEqual(stpPort.edge, false);
+    assert.strictEqual(stpPort.portfast, true);
+
+    const ind = getStpPortIndicatorState(sw, 'Fa0/1');
+    assert.strictEqual(ind.state, 'err-disabled');
+    assert.strictEqual(ind.color, '#ef4444');
+});
+
+// 1703. Safety invariant: PortFast on unconnected port remains role disabled and state blocking
+runTest('1703. Safety invariant: PortFast on unconnected port remains role disabled and state blocking', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+    setSwitchPortPortfast(sw, 'Fa0/1', true);
+
+    recalculateTopologyStp();
+
+    const stpPort = sw.stp.ports['Fa0/1'];
+    assert.strictEqual(stpPort.role, 'disabled');
+    assert.strictEqual(stpPort.state, 'blocking');
+    assert.strictEqual(stpPort.edge, false);
+    assert.strictEqual(stpPort.portfast, true);
+});
+
+// 1704. Safety invariant: PortFast on redundant switch-to-switch link never forces alternate blocking port to forwarding
+runTest('1704. Safety invariant: PortFast on redundant switch-to-switch link never forces alternate blocking port to forwarding', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1');
+    addConnection('Switch0', 'Switch1');
+
+    setSwitchPortPortfast(sw0, 'Fa0/1', true);
+    setSwitchPortPortfast(sw0, 'Fa0/2', true);
+    setSwitchPortPortfast(sw1, 'Fa0/1', true);
+    setSwitchPortPortfast(sw1, 'Fa0/2', true);
+
+    recalculateTopologyStp();
+
+    assert.strictEqual(sw1.stp.ports['Fa0/1'].role, 'root');
+    assert.strictEqual(sw1.stp.ports['Fa0/1'].state, 'forwarding');
+    assert.strictEqual(sw1.stp.ports['Fa0/1'].edge, false);
+
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].role, 'alternate');
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].state, 'blocking');
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].edge, false);
+
+    const ind = getStpPortIndicatorState(sw1, 'Fa0/2');
+    assert.strictEqual(ind.state, 'blocking');
+    assert.strictEqual(ind.color, '#f59e0b');
+
+    const res = executeCliCommand('Switch1', 'show spanning-tree');
+    assert.ok(res.output.includes('Fa0/1            Root FWD'));
+    assert.ok(res.output.includes('Fa0/2            Altn BLK'));
+    assert.ok(!res.output.includes('P2p Edge'));
+});
+
+// 1705. Configuration persistence: PortFast configuration survives JSON serialization and clone
+runTest('1705. Configuration persistence: PortFast configuration survives JSON serialization and clone', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    const sw = networkState.devices[0];
+    setSwitchPortPortfast(sw, 'Fa0/1', true);
+    assert.strictEqual(sw.switchports['Fa0/1'].portfast, true);
+
+    const serialized = JSON.stringify(networkState);
+    const parsedState = JSON.parse(serialized);
+    const parsedSw = parsedState.devices[0];
+
+    assert.strictEqual(parsedSw.switchports['Fa0/1'].portfast, true);
+    assert.strictEqual(isPortfastEffective(parsedSw, 'Fa0/1'), true);
+});
+
+// 1706. PortFast eligibility: getPortfastIneffectiveReason and isPortfastEffective across all invalid states
+runTest('1706. PortFast eligibility: getPortfastIneffectiveReason and isPortfastEffective across all invalid states', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    addDevice('pc', 100, 300);
+
+    const [sw0, sw1] = networkState.devices;
+
+    // Fa0/1: connected to PC (operational access)
+    addConnection('Switch0', 'PC0');
+    setSwitchPortPortfast(sw0, 'Fa0/1', true);
+    assert.strictEqual(isPortfastEffective(sw0, 'Fa0/1'), true);
+    assert.strictEqual(getPortfastIneffectiveReason(sw0, 'Fa0/1'), null);
+
+    // Fa0/2: connected to Switch1
+    addConnection('Switch0', 'Switch1');
+    setSwitchPortPortfast(sw0, 'Fa0/2', true);
+    assert.strictEqual(isPortfastEffective(sw0, 'Fa0/2'), false);
+    assert.strictEqual(getPortfastIneffectiveReason(sw0, 'Fa0/2'), 'connected to switch');
+
+    // Fa0/3: connected to PC1 but administratively down
+    addDevice('pc', 200, 300); // PC1
+    addConnection('Switch0', 'PC1');
+    setSwitchPortPortfast(sw0, 'Fa0/3', true);
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/3');
+    executeCliCommand('Switch0', 'shutdown');
+    assert.strictEqual(isPortfastEffective(sw0, 'Fa0/3'), false);
+    assert.strictEqual(getPortfastIneffectiveReason(sw0, 'Fa0/3'), 'port administratively down');
+
+    // Fa0/4: connected to PC2 but err-disabled
+    addDevice('pc', 300, 300); // PC2
+    addConnection('Switch0', 'PC2');
+    setSwitchPortPortfast(sw0, 'Fa0/4', true);
+    sw0.switchports['Fa0/4'].status = 'down';
+    sw0.switchports['Fa0/4'].portSecurity = {
+        enabled: true,
+        maxMacs: 1,
+        action: 'shutdown',
+        sticky: false,
+        secureMacs: [],
+        violationCount: 1,
+        lastViolationMac: '00:11:22:33:44:55',
+        errDisabled: true
+    };
+    assert.strictEqual(isPortfastEffective(sw0, 'Fa0/4'), false);
+    assert.strictEqual(getPortfastIneffectiveReason(sw0, 'Fa0/4'), 'port err-disabled');
+
+    // Fa0/5: unconnected
+    setSwitchPortPortfast(sw0, 'Fa0/5', true);
+    assert.strictEqual(isPortfastEffective(sw0, 'Fa0/5'), false);
+    assert.strictEqual(getPortfastIneffectiveReason(sw0, 'Fa0/5'), 'port not connected');
+});
+
+// 1707. Inspector UI and SVG indicator metadata accurately present PortFast as ineffective when not operational edge
+runTest('1707. Inspector UI and SVG indicator metadata accurately present PortFast as ineffective when not operational edge', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    addDevice('pc', 100, 300);
+
+    const [sw0, sw1] = networkState.devices;
+    addConnection('Switch0', 'PC0');     // Fa0/1 -> PC
+    addConnection('Switch0', 'Switch1'); // Fa0/2 -> Switch
+
+    setSwitchPortPortfast(sw0, 'Fa0/1', true);
+    setSwitchPortPortfast(sw0, 'Fa0/2', true);
+    setSwitchPortPortfast(sw0, 'Fa0/3', true); // unconnected
+
+    recalculateTopologyStp();
+
+    // Inspector HTML badges
+    const html = renderSwitchInspector(sw0);
+    assert.ok(html.includes('Fa0/1 <span class="status-badge" style="background:#0284c7;color:#fff;font-size:10px;padding:1px 4px;margin-left:4px;">PortFast</span>'));
+    assert.ok(html.includes('Fa0/2 <span class="status-badge" style="background:#64748b;color:#fff;font-size:10px;padding:1px 4px;margin-left:4px;" title="Ineffective">PortFast (ineff)</span>'));
+    assert.ok(html.includes('Fa0/3 <span class="status-badge" style="background:#64748b;color:#fff;font-size:10px;padding:1px 4px;margin-left:4px;" title="Ineffective">PortFast (ineff)</span>'));
+
+    // SVG indicator states
+    const indFa1 = getStpPortIndicatorState(sw0, 'Fa0/1');
+    assert.strictEqual(indFa1.portfast, true);
+    assert.strictEqual(indFa1.portfastEffective, true);
+
+    const indFa2 = getStpPortIndicatorState(sw0, 'Fa0/2');
+    assert.strictEqual(indFa2.portfast, true);
+    assert.strictEqual(indFa2.portfastEffective, false);
+
+    const indFa3 = getStpPortIndicatorState(sw0, 'Fa0/3');
+    assert.strictEqual(indFa3.portfast, true);
+    assert.strictEqual(indFa3.portfastEffective, false);
+});
+
+// 1708. CLI error-message precedence: spanning-tree portfast and no spanning-tree portfast outside config-if
+runTest('1708. CLI error-message precedence: spanning-tree portfast and no spanning-tree portfast outside config-if', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+
+    // In global configuration mode:
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    const resNoCfg = executeCliCommand('Switch0', 'no spanning-tree portfast');
+    assert.strictEqual(resNoCfg.success, false);
+    assert.strictEqual(resNoCfg.output, '% "no spanning-tree portfast" must be executed in interface configuration mode.');
+
+    const resYesCfg = executeCliCommand('Switch0', 'spanning-tree portfast');
+    assert.strictEqual(resYesCfg.success, false);
+    assert.strictEqual(resYesCfg.output, '% "spanning-tree portfast" must be executed in interface configuration mode.');
+
+    // In privileged exec mode:
+    executeCliCommand('Switch0', 'exit');
+    const resNoExec = executeCliCommand('Switch0', 'no spanning-tree portfast');
+    assert.strictEqual(resNoExec.success, false);
+    assert.strictEqual(resNoExec.output, '% "no spanning-tree portfast" must be executed in interface configuration mode.');
+
+    const resYesExec = executeCliCommand('Switch0', 'spanning-tree portfast');
+    assert.strictEqual(resYesExec.success, false);
+    assert.strictEqual(resYesExec.output, '% "spanning-tree portfast" must be executed in interface configuration mode.');
+
+    // In user exec mode:
+    executeCliCommand('Switch0', 'disable');
+    const resNoUser = executeCliCommand('Switch0', 'no spanning-tree portfast');
+    assert.strictEqual(resNoUser.success, false);
+    assert.strictEqual(resNoUser.output, '% "no spanning-tree portfast" must be executed in interface configuration mode.');
+
+    const resYesUser = executeCliCommand('Switch0', 'spanning-tree portfast');
+    assert.strictEqual(resYesUser.success, false);
+    assert.strictEqual(resYesUser.output, '% "spanning-tree portfast" must be executed in interface configuration mode.');
+});
+
+// 1709. Dynamic access/trunk transitions on switch-to-switch link preserve loop prevention and ineffective status
+runTest('1709. Dynamic access/trunk transitions on switch-to-switch link preserve loop prevention and ineffective status', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root Bridge)
+    addDevice('switch', 300, 100); // Switch1 (Non-root)
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Link 1: Fa0/1 <-> Fa0/1
+    addConnection('Switch0', 'Switch1'); // Link 2: Fa0/2 <-> Fa0/2
+
+    executeCliCommand('Switch1', 'enable');
+    executeCliCommand('Switch1', 'configure terminal');
+    executeCliCommand('Switch1', 'interface Fa0/2');
+    executeCliCommand('Switch1', 'spanning-tree portfast');
+
+    recalculateTopologyStp();
+
+    // Step 1: Inter-switch link in default access mode
+    assert.strictEqual(sw1.stp.ports['Fa0/1'].role, 'root');
+    assert.strictEqual(sw1.stp.ports['Fa0/1'].state, 'forwarding');
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].role, 'alternate');
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].state, 'blocking');
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].edge, false);
+    assert.strictEqual(isPortfastEffective(sw1, 'Fa0/2'), false);
+    assert.strictEqual(getPortfastIneffectiveReason(sw1, 'Fa0/2'), 'connected to switch');
+
+    const cliStp1 = executeCliCommand('Switch1', 'show spanning-tree');
+    assert.ok(cliStp1.output.includes('Fa0/2            Altn BLK'));
+    assert.ok(!cliStp1.output.includes('P2p Edge'));
+
+    const cliDetail1 = executeCliCommand('Switch1', 'show spanning-tree interface Fa0/2');
+    assert.ok(cliDetail1.output.includes('The port is in the portfast mode (ineffective: connected to switch)'));
+
+    const cliSwp1 = executeCliCommand('Switch1', 'show interfaces Fa0/2 switchport');
+    assert.ok(cliSwp1.output.includes('PortFast: Enabled (ineffective: connected to switch)'));
+
+    // Step 2: Transition Fa0/2 to trunk mode while cables remain connected
+    executeCliCommand('Switch1', 'switchport mode trunk');
+    recalculateTopologyStp();
+
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].role, 'alternate');
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].state, 'blocking');
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].edge, false);
+    assert.strictEqual(isPortfastEffective(sw1, 'Fa0/2'), false);
+    assert.strictEqual(getPortfastIneffectiveReason(sw1, 'Fa0/2'), 'port is in trunk mode');
+
+    const cliDetail2 = executeCliCommand('Switch1', 'show spanning-tree interface Fa0/2');
+    assert.ok(cliDetail2.output.includes('The port is in the portfast mode (ineffective: port is in trunk mode)'));
+
+    const cliSwp2 = executeCliCommand('Switch1', 'show interfaces Fa0/2 switchport');
+    assert.ok(cliSwp2.output.includes('PortFast: Enabled (ineffective: port is in trunk mode)'));
+
+    // Step 3: Transition Fa0/2 back to access mode
+    executeCliCommand('Switch1', 'switchport mode access');
+    recalculateTopologyStp();
+
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].role, 'alternate');
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].state, 'blocking');
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].edge, false);
+    assert.strictEqual(isPortfastEffective(sw1, 'Fa0/2'), false);
+    assert.strictEqual(getPortfastIneffectiveReason(sw1, 'Fa0/2'), 'connected to switch');
+
+    const cliDetail3 = executeCliCommand('Switch1', 'show spanning-tree interface Fa0/2');
+    assert.ok(cliDetail3.output.includes('The port is in the portfast mode (ineffective: connected to switch)'));
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
