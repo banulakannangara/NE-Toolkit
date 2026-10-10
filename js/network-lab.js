@@ -7211,6 +7211,119 @@ function recalculateTopologyStp() {
     });
 }
 
+const BPDU_PROTOCOL_ID = 0;
+const BPDU_PROTOCOL_VERSION = 0;
+const BPDU_TYPE_CONFIG = 0;
+const DEFAULT_BPDU_MESSAGE_AGE = 0;
+const DEFAULT_BPDU_MAX_AGE = 20;
+const DEFAULT_BPDU_HELLO_TIME = 2;
+const DEFAULT_BPDU_FORWARD_DELAY = 15;
+
+/**
+ * Creates a deterministic IEEE 802.1D Configuration BPDU data object
+ * for a switch port using the currently converged STP state.
+ *
+ * PROTOCOL & ELIGIBILITY MODEL:
+ * 1. Conforms to IEEE 802.1D Configuration BPDU specifications:
+ *    - protocolId: 0 (IEEE 802.1D STP)
+ *    - protocolVersion: 0 (STP)
+ *    - bpduType: 0 (Configuration BPDU, 0x00)
+ *    - flags: { topologyChange: false, topologyChangeAck: false, tc: false, tca: false }
+ *    - rootBridgeId: Learned Root Bridge ID (or self if Root Bridge)
+ *    - rootPathCost: Accumulated Root Path Cost to Root (0 if Root Bridge)
+ *    - senderBridgeId: Sending switch's Bridge ID (priority.mac)
+ *    - senderPortId: Sending switch's Port ID (priority.portNum, e.g. 128.1)
+ *    - messageAge: 0
+ *    - maxAge: 20
+ *    - helloTime: 2
+ *    - forwardDelay: 15
+ *
+ * 2. Generation Eligibility Rules:
+ *    - Device must exist and be of type 'switch'.
+ *    - STP must be enabled on the switch (sw.stp.enabled !== false).
+ *    - Port must be a valid switchport name on the switch.
+ *    - Interface operStatus must not be 'down' (respects administrative shutdown and err-disabled state).
+ *    - Port must be physically connected to a cable in the topology.
+ *    - Port role must be 'designated'. In IEEE 802.1D, Configuration BPDUs are generated and
+ *      propagated onto LAN segments only by designated ports. Root ports and alternate/blocking ports
+ *      receive and process BPDUs rather than generating Configuration BPDUs.
+ *    - PortFast does NOT suppress BPDU generation; designated ports with PortFast enabled
+ *      continue to generate Configuration BPDUs.
+ *
+ * 3. Intentional Simplifications & Scope:
+ *    - Derives all values from converged graph state without re-running root election.
+ *    - Flags currently default to false (dynamic TCN propagation is modeled separately).
+ *    - Pure, deterministic, and non-mutating: does NOT alter STP state, topology, MAC tables,
+ *      simulation state, or undo/redo history.
+ *
+ * @param {string|Object} switchOrId - Switch device or device ID/name
+ * @param {string} portName - Port name (e.g., 'Fa0/1', 'GigabitEthernet0/1')
+ * @returns {Object|null} Deterministic BPDU object or null if ineligible
+ */
+function createBpdu(switchOrId, portName) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return null;
+    if (sw.stp && sw.stp.enabled === false) return null;
+
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) return null;
+
+    // Respect administrative shutdown and err-disabled state
+    if (getInterfaceOperStatus(sw, normPort) === 'down') return null;
+
+    // Must be physically cabled
+    const runtime = getSwitchRuntime(sw.id);
+    const connId = Object.keys(runtime.ports || {}).find(cId => runtime.ports[cId] === normPort);
+    if (!connId || !getConnectionById(connId)) return null;
+
+    // In IEEE 802.1D, only designated ports generate and transmit Configuration BPDUs
+    const stpPort = sw.stp?.ports?.[normPort];
+    if (!stpPort || stpPort.role !== 'designated') return null;
+
+    const portNum = parseInt(normPort.replace(/\D/g, ''), 10) || 1;
+    const portPrio = sw.switchports?.[normPort]?.stpPortPriority || DEFAULT_PORT_PRIORITY;
+
+    const rootBridgeId = sw.stp.rootBridgeId || sw.stp.bridgeId || formatBridgeId(DEFAULT_STP_PRIORITY, sw.mac);
+    const rootPathCost = typeof sw.stp.rootCost === 'number' ? sw.stp.rootCost : 0;
+    const senderBridgeId = sw.stp.bridgeId || formatBridgeId(sw.stp.priority, sw.mac);
+    const senderPortId = `${portPrio}.${portNum}`;
+
+    return {
+        protocolId: BPDU_PROTOCOL_ID,
+        protocolIdentifier: BPDU_PROTOCOL_ID,
+        protocolVersion: BPDU_PROTOCOL_VERSION,
+        bpduType: BPDU_TYPE_CONFIG,
+        flags: {
+            topologyChange: false,
+            topologyChangeAck: false,
+            tc: false,
+            tca: false
+        },
+        rootBridgeId,
+        rootPathCost,
+        senderBridgeId,
+        senderPortId,
+        portName: normPort,
+        messageAge: DEFAULT_BPDU_MESSAGE_AGE,
+        maxAge: DEFAULT_BPDU_MAX_AGE,
+        helloTime: DEFAULT_BPDU_HELLO_TIME,
+        forwardDelay: DEFAULT_BPDU_FORWARD_DELAY
+    };
+}
+
+/**
+ * Formats a concise human-readable summary of a BPDU object.
+ *
+ * @param {Object|null} bpdu
+ * @returns {string} Human-readable BPDU summary or 'No BPDU'
+ */
+function formatBpduSummary(bpdu) {
+    if (!bpdu || typeof bpdu !== 'object') {
+        return 'No BPDU';
+    }
+    return `BPDU (Root: ${bpdu.rootBridgeId}, Cost: ${bpdu.rootPathCost}, Bridge: ${bpdu.senderBridgeId}, Port: ${bpdu.senderPortId})`;
+}
+
 function ensureSwitchVlanState(sw) {
     if (!sw || sw.type !== 'switch') return;
     ensureSwitchStpState(sw);

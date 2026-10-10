@@ -41809,6 +41809,317 @@ runTest('1709. Dynamic access/trunk transitions on switch-to-switch link preserv
     assert.ok(cliDetail3.output.includes('The port is in the portfast mode (ineffective: connected to switch)'));
 });
 
+// 1710. Root bridge BPDU fields: self-root identity, zero root cost, sender bridge identity, timers, and formatBpduSummary
+runTest('1710. Root bridge BPDU fields: self-root identity, zero root cost, sender bridge identity, timers, and formatBpduSummary', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root Bridge)
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    const bpdu = createBpdu('Switch0', 'Fa0/1');
+    assert.ok(bpdu !== null, 'Root bridge designated port must generate a BPDU');
+    assert.strictEqual(bpdu.protocolId, 0);
+    assert.strictEqual(bpdu.protocolIdentifier, 0);
+    assert.strictEqual(bpdu.protocolVersion, 0);
+    assert.strictEqual(bpdu.bpduType, 0);
+    assert.deepStrictEqual(bpdu.flags, {
+        topologyChange: false,
+        topologyChangeAck: false,
+        tc: false,
+        tca: false
+    });
+    assert.strictEqual(bpdu.rootBridgeId, sw0.stp.bridgeId);
+    assert.strictEqual(bpdu.rootPathCost, 0);
+    assert.strictEqual(bpdu.senderBridgeId, sw0.stp.bridgeId);
+    assert.strictEqual(bpdu.senderPortId, '128.1');
+    assert.strictEqual(bpdu.portName, 'Fa0/1');
+    assert.strictEqual(bpdu.messageAge, 0);
+    assert.strictEqual(bpdu.maxAge, 20);
+    assert.strictEqual(bpdu.helloTime, 2);
+    assert.strictEqual(bpdu.forwardDelay, 15);
+
+    // Also accepts switch object directly and case-insensitive port name
+    const bpduObj = createBpdu(sw0, 'fa0/1');
+    assert.deepStrictEqual(bpduObj, bpdu);
+
+    const summary = formatBpduSummary(bpdu);
+    assert.strictEqual(
+        summary,
+        'BPDU (Root: ' + sw0.stp.bridgeId + ', Cost: 0, Bridge: ' + sw0.stp.bridgeId + ', Port: 128.1)'
+    );
+});
+
+// 1711. Non-root designated-port BPDU fields: learned root ID and accumulated root path cost
+runTest('1711. Non-root designated-port BPDU fields: learned root ID and accumulated root path cost', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root Bridge)
+    addDevice('switch', 300, 100); // Switch1
+    addDevice('switch', 500, 100); // Switch2
+    const [sw0, sw1, sw2] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+    sw2.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Link 1: Sw0 Fa0/1 <-> Sw1 Fa0/1 (Cost 19)
+    addConnection('Switch1', 'Switch2'); // Link 2: Sw1 Fa0/2 <-> Sw2 Fa0/1 (Cost 19)
+    recalculateTopologyStp();
+
+    assert.strictEqual(sw1.stp.rootBridgeId, sw0.stp.bridgeId);
+    assert.strictEqual(sw1.stp.rootCost, 19);
+    assert.strictEqual(sw1.stp.ports['Fa0/1'].role, 'root');
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].role, 'designated');
+
+    const bpduSw1Fa2 = createBpdu('Switch1', 'Fa0/2');
+    assert.ok(bpduSw1Fa2 !== null, 'Non-root designated port must generate a BPDU');
+    assert.strictEqual(bpduSw1Fa2.rootBridgeId, sw0.stp.bridgeId, 'Must advertise learned Root Bridge ID');
+    assert.strictEqual(bpduSw1Fa2.rootPathCost, 19, 'Must advertise switch accumulated root cost');
+    assert.strictEqual(bpduSw1Fa2.senderBridgeId, sw1.stp.bridgeId, 'Sender must be Switch1');
+    assert.strictEqual(bpduSw1Fa2.senderPortId, '128.2', 'Sender port ID must be 128.2');
+    assert.strictEqual(bpduSw1Fa2.portName, 'Fa0/2');
+
+    const summary = formatBpduSummary(bpduSw1Fa2);
+    assert.strictEqual(
+        summary,
+        'BPDU (Root: ' + sw0.stp.bridgeId + ', Cost: 19, Bridge: ' + sw1.stp.bridgeId + ', Port: 128.2)'
+    );
+});
+
+// 1712. Sender bridge and custom port priority identity formatting
+runTest('1712. Sender bridge and custom port priority identity formatting', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    setSwitchPortStpPriority('Switch0', 'Fa0/1', 64);
+    recalculateTopologyStp();
+
+    const bpdu = createBpdu('Switch0', 'Fa0/1');
+    assert.ok(bpdu !== null);
+    assert.strictEqual(bpdu.senderPortId, '64.1', 'Port ID must reflect configured port priority 64');
+    assert.strictEqual(bpdu.senderBridgeId, sw0.stp.bridgeId);
+});
+
+// 1713. Ineligible port roles: root ports and alternate blocking ports return null
+runTest('1713. Ineligible port roles: root ports and alternate blocking ports return null', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root Bridge)
+    addDevice('switch', 300, 100); // Switch1
+    addDevice('switch', 200, 300); // Switch2
+    const [sw0, sw1, sw2] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+    sw2.stpPriority = 32768;
+
+    // Triangle topology
+    addConnection('Switch0', 'Switch1'); // Sw0 Fa0/1 <-> Sw1 Fa0/1
+    addConnection('Switch0', 'Switch2'); // Sw0 Fa0/2 <-> Sw2 Fa0/1
+    addConnection('Switch1', 'Switch2'); // Sw1 Fa0/2 <-> Sw2 Fa0/2
+    recalculateTopologyStp();
+
+    // Sw1 Fa0/1 is root port -> cannot generate Configuration BPDU
+    assert.strictEqual(sw1.stp.ports['Fa0/1'].role, 'root');
+    assert.strictEqual(createBpdu('Switch1', 'Fa0/1'), null);
+
+    // Identify which port on the redundant link became alternate blocking
+    const sw1Fa2Role = sw1.stp.ports['Fa0/2'].role;
+    const sw2Fa2Role = sw2.stp.ports['Fa0/2'].role;
+    assert.ok(
+        (sw1Fa2Role === 'designated' && sw2Fa2Role === 'alternate') ||
+        (sw1Fa2Role === 'alternate' && sw2Fa2Role === 'designated'),
+        'One end must be designated and the other alternate'
+    );
+
+    const [altSwitch, altPort] = sw1Fa2Role === 'alternate'
+        ? ['Switch1', 'Fa0/2']
+        : ['Switch2', 'Fa0/2'];
+
+    assert.strictEqual(
+        createBpdu(altSwitch, altPort),
+        null,
+        'Alternate/blocking port must return null for createBpdu'
+    );
+
+    // formatBpduSummary handles null/invalid cleanly
+    assert.strictEqual(formatBpduSummary(null), 'No BPDU');
+    assert.strictEqual(formatBpduSummary(undefined), 'No BPDU');
+    assert.strictEqual(formatBpduSummary({}), 'BPDU (Root: undefined, Cost: undefined, Bridge: undefined, Port: undefined)');
+});
+
+// 1714. Ineligible physical and operational states: administrative shutdown, err-disabled, and disconnected ports
+runTest('1714. Ineligible physical and operational states: administrative shutdown, err-disabled, and disconnected ports', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('switch', 300, 100); // Switch1
+    addDevice('pc', 100, 300);     // PC0
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    assert.ok(createBpdu('Switch0', 'Fa0/1') !== null);
+
+    // 1. Administratively shutdown port
+    ensurePortSecurityState(sw0, 'Fa0/1');
+    sw0.switchports['Fa0/1'].adminDown = true;
+    recalculateTopologyStp();
+    assert.strictEqual(createBpdu('Switch0', 'Fa0/1'), null, 'Admin down port must return null');
+
+    // 2. Err-disabled port
+    sw0.switchports['Fa0/1'].adminDown = false;
+    sw0.switchports['Fa0/1'].portSecurity.errDisabled = true;
+    recalculateTopologyStp();
+    assert.strictEqual(createBpdu('Switch0', 'Fa0/1'), null, 'Err-disabled port must return null');
+
+    // 3. Port disconnected (no cable connected to Fa0/3)
+    sw0.switchports['Fa0/1'].portSecurity.errDisabled = false;
+    recalculateTopologyStp();
+    assert.strictEqual(createBpdu('Switch0', 'Fa0/3'), null, 'Disconnected port must return null');
+
+    // 4. Missing / invalid switch and device types
+    assert.strictEqual(createBpdu('NoSuchSwitch', 'Fa0/1'), null, 'Nonexistent switch must return null');
+    assert.strictEqual(createBpdu('PC0', 'eth0'), null, 'Non-switch device must return null');
+    assert.strictEqual(createBpdu(null, 'Fa0/1'), null, 'Null switch must return null');
+    assert.strictEqual(createBpdu('Switch0', ''), null, 'Empty port name must return null');
+    assert.strictEqual(createBpdu('Switch0', 'InvalidInterfaceName'), null, 'Invalid port name must return null');
+
+    // 5. Switch with STP disabled
+    sw0.stp.enabled = false;
+    assert.strictEqual(createBpdu('Switch0', 'Fa0/1'), null, 'Switch with disabled STP must return null');
+});
+
+// 1715. PortFast designated access ports remain eligible to generate BPDUs
+runTest('1715. PortFast designated access ports remain eligible to generate BPDUs', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('pc', 300, 100);     // PC0
+    const [sw0] = networkState.devices;
+    sw0.stpPriority = 4096;
+
+    addConnection('Switch0', 'PC0'); // Fa0/1 <-> eth0
+    setSwitchPortPortfast('Switch0', 'Fa0/1', true);
+    recalculateTopologyStp();
+
+    assert.strictEqual(sw0.stp.ports['Fa0/1'].role, 'designated');
+    assert.strictEqual(sw0.stp.ports['Fa0/1'].state, 'forwarding');
+    assert.strictEqual(sw0.stp.ports['Fa0/1'].edge, true);
+    assert.strictEqual(isPortfastEffective(sw0, 'Fa0/1'), true);
+
+    // PortFast does NOT suppress BPDU generation; designated edge ports still send BPDUs
+    const bpdu = createBpdu('Switch0', 'Fa0/1');
+    assert.ok(bpdu !== null, 'Designated PortFast port must generate BPDU');
+    assert.strictEqual(bpdu.rootBridgeId, sw0.stp.bridgeId);
+    assert.strictEqual(bpdu.rootPathCost, 0);
+    assert.strictEqual(bpdu.senderBridgeId, sw0.stp.bridgeId);
+    assert.strictEqual(bpdu.senderPortId, '128.1');
+    assert.strictEqual(bpdu.portName, 'Fa0/1');
+});
+
+// 1716. Immutability and determinism: repeated generation produces identical output with zero state mutation
+runTest('1716. Immutability and determinism: repeated generation produces identical output with zero state mutation', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1');
+    recalculateTopologyStp();
+
+    // Snapshot simulator state
+    const stpSnapshot0 = JSON.stringify(sw0.stp);
+    const stpSnapshot1 = JSON.stringify(sw1.stp);
+    const deviceCount = networkState.devices.length;
+    const connectionCount = networkState.connections.length;
+    const historyLen = (networkState.history || []).length;
+    const macTableCount = Object.keys(networkState.switchRuntime[sw0.id]?.macTable || {}).length;
+
+    const bpdu1 = createBpdu('Switch0', 'Fa0/1');
+    const bpdu2 = createBpdu('Switch0', 'Fa0/1');
+    const bpdu3 = createBpdu('Switch0', 'Fa0/1');
+
+    // Deterministic value equality across calls
+    assert.deepStrictEqual(bpdu1, bpdu2);
+    assert.deepStrictEqual(bpdu2, bpdu3);
+
+    // Fresh object reference returned each time (pure function)
+    assert.notStrictEqual(bpdu1, bpdu2);
+
+    // Verify absolutely zero mutation of STP, topology, MAC table, or undo history
+    assert.strictEqual(JSON.stringify(sw0.stp), stpSnapshot0, 'sw0.stp must not mutate');
+    assert.strictEqual(JSON.stringify(sw1.stp), stpSnapshot1, 'sw1.stp must not mutate');
+    assert.strictEqual(networkState.devices.length, deviceCount, 'Devices must not change');
+    assert.strictEqual(networkState.connections.length, connectionCount, 'Connections must not change');
+    assert.strictEqual((networkState.history || []).length, historyLen, 'Undo history must not change');
+    assert.strictEqual(
+        Object.keys(networkState.switchRuntime[sw0.id]?.macTable || {}).length,
+        macTableCount,
+        'MAC table must not change'
+    );
+});
+
+// 1717. Existing PortFast, redundant-link blocking, and STP convergence invariants remain intact
+runTest('1717. Existing PortFast, redundant-link blocking, and STP convergence invariants remain intact', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('switch', 300, 100); // Switch1
+    addDevice('switch', 200, 300); // Switch2
+    const [sw0, sw1, sw2] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+    sw2.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Sw0 Fa0/1 <-> Sw1 Fa0/1
+    addConnection('Switch0', 'Switch2'); // Sw0 Fa0/2 <-> Sw2 Fa0/1
+    addConnection('Switch1', 'Switch2'); // Sw1 Fa0/2 <-> Sw2 Fa0/2
+
+    recalculateTopologyStp();
+
+    // Verify root bridge role and root cost
+    assert.strictEqual(sw0.stp.rootBridgeId, sw0.stp.bridgeId);
+    assert.strictEqual(sw0.stp.rootCost, 0);
+
+    // Verify redundant link blocking invariant
+    const blockingPorts = [
+        sw0.stp.ports['Fa0/1']?.state,
+        sw0.stp.ports['Fa0/2']?.state,
+        sw1.stp.ports['Fa0/1']?.state,
+        sw1.stp.ports['Fa0/2']?.state,
+        sw2.stp.ports['Fa0/1']?.state,
+        sw2.stp.ports['Fa0/2']?.state
+    ].filter(s => s === 'blocking');
+
+    assert.strictEqual(blockingPorts.length, 1, 'Exactly one port must be blocking to prevent L2 loop');
+
+    // Generating BPDUs must not disturb any STP roles or states
+    const bpduSw0Fa1 = createBpdu('Switch0', 'Fa0/1');
+    const bpduSw0Fa2 = createBpdu('Switch0', 'Fa0/2');
+    assert.ok(bpduSw0Fa1 !== null);
+    assert.ok(bpduSw0Fa2 !== null);
+
+    const blockingPortsAfter = [
+        sw0.stp.ports['Fa0/1']?.state,
+        sw0.stp.ports['Fa0/2']?.state,
+        sw1.stp.ports['Fa0/1']?.state,
+        sw1.stp.ports['Fa0/2']?.state,
+        sw2.stp.ports['Fa0/1']?.state,
+        sw2.stp.ports['Fa0/2']?.state
+    ].filter(s => s === 'blocking');
+
+    assert.strictEqual(blockingPortsAfter.length, 1, 'STP blocking invariant must remain unchanged');
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
