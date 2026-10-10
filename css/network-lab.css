@@ -2156,3 +2156,35 @@ body {
     font-family: monospace;
     font-size: 11px;
 }
+
+/* ==========================================
+   V5.17 PHASE 3C-1 — STP VISUALIZATION & STATUS
+   ========================================== */
+.status-badge.status-blocking {
+    background: rgba(245, 158, 11, 0.16);
+    color: #fbbf24;
+    border: 1px solid rgba(245, 158, 11, 0.38);
+}
+
+.stp-indicator {
+    pointer-events: none;
+    transition: fill 0.2s ease, stroke 0.2s ease;
+}
+
+.stp-indicator--forwarding {
+    fill: #22c55e;
+    stroke: #0f172a;
+    stroke-width: 1.5;
+}
+
+.stp-indicator--blocking {
+    fill: #f59e0b;
+    stroke: #0f172a;
+    stroke-width: 1.5;
+}
+
+.stp-indicator--down {
+    fill: #ef4444;
+    stroke: #0f172a;
+    stroke-width: 1.5;
+}

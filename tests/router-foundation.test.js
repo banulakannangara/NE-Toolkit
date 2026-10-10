@@ -77,6 +77,9 @@ class MockElement {
 
     setAttribute(name, val) {
         this.attributes[name] = String(val);
+        if (name === 'class') {
+            this.className = val;
+        }
     }
 
     getAttribute(name) {
@@ -114,7 +117,7 @@ class MockElement {
     }
 
     click() {
-        this.dispatchEvent({ type: 'click' });
+        this.dispatchEvent({ type: 'click', stopPropagation: () => {}, preventDefault: () => {} });
     }
 
     querySelector(selector) {
@@ -40516,6 +40519,581 @@ runTest('1650. End-to-end sticky-MAC lifecycle: ingress learning, STATIC forward
     const sendRes2 = simulateSendFrame(pc0, pc1);
     assert.strictEqual(sendRes2.success, true);
     assert.strictEqual(secDisconnected.violationCount, 0);
+});
+
+// ==========================================
+// V5.17 PHASE 3C-1: STP OPERATIONAL INSPECTION, CLI & CANVAS VISUALIZATION TESTS
+// ==========================================
+
+// 1651. Switch CLI: show spanning-tree interface <port> on Root Bridge designated forwarding port
+runTest('1651. Switch CLI: show spanning-tree interface <port> on Root Bridge designated forwarding port', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    recalculateTopologyStp();
+
+    const res = executeCliCommand('Switch0', 'show spanning-tree interface Fa0/1');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('VLAN0001'));
+    assert.ok(res.output.includes('Spanning tree enabled protocol ieee'));
+    assert.ok(res.output.includes('Port 1 (Fa0/1) of VLAN0001 is designated forwarding'));
+    assert.ok(res.output.includes('Port path cost 19, Port priority 128, Port Identifier 128.1.'));
+    assert.ok(res.output.includes('Designated root has priority 32768'));
+    assert.ok(res.output.includes('Designated bridge has priority 32768'));
+    assert.ok(res.output.includes('Designated port id is 128.1, designated path cost 0'));
+    assert.ok(res.output.includes('Timers: message age 0, forward delay 0, hold 0 (fixed defaults)'));
+    assert.ok(res.output.includes('Number of transitions to forwarding state: 1'));
+    assert.ok(res.output.includes('Link type is point-to-point by default'));
+});
+
+// 1652. Switch CLI: show spanning-tree interface <port> on non-root switch root forwarding port
+runTest('1652. Switch CLI: show spanning-tree interface <port> on non-root switch root forwarding port', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('switch', 300, 100); // Switch1 (Non-root)
+    const [sw0, sw1] = networkState.devices;
+
+    setSwitchStpPriority(sw0, 4096);
+    addConnection(sw0.id, sw1.id); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    const res = executeCliCommand('Switch1', 'show spanning-tree interface Fa0/1');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Port 1 (Fa0/1) of VLAN0001 is root forwarding'));
+    assert.ok(res.output.includes('Port path cost 19'));
+    assert.ok(res.output.includes('Designated root has priority 4096'));
+    assert.ok(res.output.includes('address ' + sw0.mac));
+    assert.ok(res.output.includes('Designated bridge has priority 4096'));
+    assert.ok(res.output.includes('designated path cost 0'));
+    assert.ok(res.output.includes('Number of transitions to forwarding state: 1'));
+});
+
+// 1653. Switch CLI: show spanning-tree interface <port> on non-root switch alternate blocking port
+runTest('1653. Switch CLI: show spanning-tree interface <port> on non-root switch alternate blocking port', () => {
+    resetLab();
+    addDevice('switch', 200, 50);  // Switch0 (Root)
+    addDevice('switch', 50, 250);  // Switch1
+    addDevice('switch', 350, 250); // Switch2
+    const [sw0, sw1, sw2] = networkState.devices;
+
+    sw0.mac = '00:00:00:00:00:01';
+    sw1.mac = '00:00:00:00:00:02';
+    sw2.mac = '00:00:00:00:00:03';
+
+    addConnection(sw0.id, sw1.id);
+    addConnection(sw0.id, sw2.id);
+    addConnection(sw1.id, sw2.id); // Sw1 Fa0/2 <-> Sw2 Fa0/2 (Sw2 side is blocked)
+
+    recalculateTopologyStp();
+
+    const res = executeCliCommand('Switch2', 'show spanning-tree interface Fa0/2');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Port 2 (Fa0/2) of VLAN0001 is alternate blocking'));
+    assert.ok(res.output.includes('Designated bridge has priority 32768, address ' + sw1.mac));
+    assert.ok(res.output.includes('designated path cost 19'));
+    assert.ok(res.output.includes('Number of transitions to forwarding state: 0'));
+});
+
+// 1654. Switch CLI: show spanning-tree interface <port> on administratively shutdown port reports down status
+runTest('1654. Switch CLI: show spanning-tree interface <port> on administratively shutdown port reports down status', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    addConnection('Switch0', 'Switch1');
+
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    executeCliCommand('Switch0', 'shutdown');
+
+    const res = executeCliCommand('Switch0', 'show spanning-tree interface Fa0/1');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Port 1 (Fa0/1) of VLAN0001 is disabled blocking'));
+    assert.ok(res.output.includes('Operational status is down (administratively down)'));
+});
+
+// 1655. Switch CLI: show spanning-tree interface <port> on err-disabled port reports err-disabled down status
+runTest('1655. Switch CLI: show spanning-tree interface <port> on err-disabled port reports err-disabled down status', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const [sw, pc] = networkState.devices;
+    addConnection(sw.id, pc.id);
+
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    executeCliCommand('Switch0', 'switchport port-security');
+    executeCliCommand('Switch0', 'switchport port-security mac-address 00:11:22:33:44:55');
+
+    // Transmit unauthorized frame to trigger shutdown violation
+    const unauthorizedFrame = { sourceMac: pc.mac, destinationMac: 'FF:FF:FF:FF:FF:FF', events: [] };
+    simulatePathTransmission(unauthorizedFrame, pc, sw, [pc.id, sw.id]);
+
+    const res = executeCliCommand('Switch0', 'show spanning-tree interface Fa0/1');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Operational status is down (err-disabled)'));
+    assert.ok(res.output.includes('blocking'));
+});
+
+// 1656. Switch CLI: show spanning-tree interface rejects missing interface parameter
+runTest('1656. Switch CLI: show spanning-tree interface rejects missing interface parameter', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+
+    const res = executeCliCommand('Switch0', 'show spanning-tree interface');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('% Incomplete command: show spanning-tree interface <interface>'));
+});
+
+// 1657. Switch CLI: show spanning-tree interface rejects invalid interface syntax
+runTest('1657. Switch CLI: show spanning-tree interface rejects invalid interface syntax', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+
+    const res = executeCliCommand('Switch0', 'show spanning-tree interface fooBar');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('% Invalid interface "fooBar".'));
+});
+
+// 1658. Switch CLI: show spanning-tree interface on unconfigured and unconnected port
+runTest('1658. Switch CLI: show spanning-tree interface on unconfigured and unconnected port', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+
+    const res = executeCliCommand('Switch0', 'show spanning-tree interface Fa0/40');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('% No spanning tree instance exists for interface Fa0/40.'));
+});
+
+// 1659. Switch CLI: show spanning-tree summary tabular role and state counts on 3-switch triangle
+runTest('1659. Switch CLI: show spanning-tree summary tabular role and state counts on 3-switch triangle', () => {
+    resetLab();
+    addDevice('switch', 200, 50);  // Switch0 (Root)
+    addDevice('switch', 50, 250);  // Switch1
+    addDevice('switch', 350, 250); // Switch2
+    const [sw0, sw1, sw2] = networkState.devices;
+
+    sw0.mac = '00:00:00:00:00:01';
+    sw1.mac = '00:00:00:00:00:02';
+    sw2.mac = '00:00:00:00:00:03';
+
+    addConnection(sw0.id, sw1.id);
+    addConnection(sw0.id, sw2.id);
+    addConnection(sw1.id, sw2.id);
+
+    recalculateTopologyStp();
+
+    // Root switch Sw0: 2 forwarding ports (both designated)
+    const resRoot = executeCliCommand('Switch0', 'show spanning-tree summary');
+    assert.strictEqual(resRoot.success, true);
+    assert.ok(resRoot.output.includes('Root bridge for: VLAN0001'));
+    assert.ok(resRoot.output.includes('EtherChannel misconfig guard is disabled'));
+    assert.ok(resRoot.output.includes('PVST Simulation              is disabled'));
+    assert.ok(resRoot.output.includes('Blocking Listening Learning Forwarding STP Active'));
+    assert.ok(/VLAN0001\\s+0\\s+0\\s+0\\s+2\\s+2/.test(resRoot.output));
+
+    // Non-root switch Sw2: 1 root port (forwarding), 1 alternate port (blocking)
+    const resSw2 = executeCliCommand('Switch2', 'show spanning-tree summary');
+    assert.strictEqual(resSw2.success, true);
+    assert.ok(resSw2.output.includes('Root bridge for: none'));
+    assert.ok(/VLAN0001\\s+1\\s+0\\s+0\\s+1\\s+2/.test(resSw2.output));
+});
+
+// 1660. Switch CLI: show spanning-tree detail displays timers, truthful TCN semantics, and port blocks
+runTest('1660. Switch CLI: show spanning-tree detail displays timers, truthful TCN semantics, and port blocks', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+    recalculateTopologyStp();
+
+    const res = executeCliCommand('Switch0', 'show spanning-tree detail');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('VLAN0001 is executing the ieee compatible Spanning Tree protocol'));
+    assert.ok(res.output.includes('Configured hello time 2, max age 20, forward delay 15 (fixed defaults)'));
+    assert.ok(res.output.includes('This bridge is the root'));
+    assert.ok(res.output.includes('Topology change flag not set, detected flag not set'));
+    assert.ok(res.output.includes('Number of topology changes: 0 (instantaneous graph recalculation; TCN exchange not modeled in CST)'));
+    assert.ok(res.output.includes('Port 1 (Fa0/1) of VLAN0001 is designated forwarding'));
+});
+
+// 1661. Switch CLI: show spanning-tree vlan 1 displays root and port table, other VLANs report non-existence
+runTest('1661. Switch CLI: show spanning-tree vlan 1 displays root and port table, other VLANs report non-existence', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+
+    const res1 = executeCliCommand('Switch0', 'show spanning-tree vlan 1');
+    assert.strictEqual(res1.success, true);
+    assert.ok(res1.output.includes('Spanning tree enabled protocol ieee'));
+
+    const res99 = executeCliCommand('Switch0', 'show spanning-tree vlan 99');
+    assert.strictEqual(res99.success, false);
+    assert.ok(res99.output.includes('% Spanning tree instance for VLAN 99 does not exist.'));
+});
+
+// 1662. Switch CLI: do show spanning-tree interface/summary/detail in configuration modes
+runTest('1662. Switch CLI: do show spanning-tree interface/summary/detail in configuration modes', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    addConnection('Switch0', 'PC0');
+
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+
+    const resSum = executeCliCommand('Switch0', 'do show spanning-tree summary');
+    assert.strictEqual(resSum.success, true);
+    assert.ok(resSum.output.includes('Root bridge for: VLAN0001'));
+
+    const resInt = executeCliCommand('Switch0', 'do show spanning-tree interface Fa0/1');
+    assert.strictEqual(resInt.success, true);
+    assert.ok(resInt.output.includes('designated forwarding'));
+
+    const resDet = executeCliCommand('Switch0', 'do show spanning-tree detail');
+    assert.strictEqual(resDet.success, true);
+    assert.ok(resDet.output.includes('VLAN0001 is executing the ieee compatible'));
+});
+
+// 1663. Switch CLI: rejected show spanning-tree on router device
+runTest('1663. Switch CLI: rejected show spanning-tree on router device', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+
+    const res = executeCliCommand('Router0', 'show spanning-tree');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes("% 'show spanning-tree' is a switch command."));
+});
+
+// 1664. Switch CLI: unrecognized show spanning-tree sub-command reports available syntax
+runTest('1664. Switch CLI: unrecognized show spanning-tree sub-command reports available syntax', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+
+    const res = executeCliCommand('Switch0', 'show spanning-tree bogusCommand');
+    assert.strictEqual(res.success, false);
+    assert.ok(res.output.includes('% Unrecognized command: "show spanning-tree bogusCommand"'));
+    assert.ok(res.output.includes('Available: "show spanning-tree", "show spanning-tree interface <port>", "show spanning-tree summary", "show spanning-tree detail"'));
+});
+
+// 1665. Canvas SVG indicators: renderConnections generates circle markers for switch-to-switch links
+runTest('1665. Canvas SVG indicators: renderConnections generates circle markers for switch-to-switch links', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    addConnection('Switch0', 'Switch1');
+
+    renderConnections();
+
+    const svg = document.getElementById('connectionLayer');
+    const lines = svg.children.filter(c => c.tagName === 'LINE');
+    const circles = svg.children.filter(c => c.tagName === 'CIRCLE');
+
+    assert.strictEqual(lines.length, 1);
+    assert.strictEqual(circles.length, 2);
+
+    const sw0Circle = circles.find(c => c.getAttribute('data-device-id') === 'Switch0');
+    const sw1Circle = circles.find(c => c.getAttribute('data-device-id') === 'Switch1');
+
+    assert.ok(sw0Circle);
+    assert.strictEqual(sw0Circle.getAttribute('data-port'), 'Fa0/1');
+    assert.strictEqual(sw0Circle.getAttribute('data-stp-state'), 'forwarding');
+    assert.strictEqual(sw0Circle.getAttribute('fill'), '#22c55e');
+
+    assert.ok(sw1Circle);
+    assert.strictEqual(sw1Circle.getAttribute('data-port'), 'Fa0/1');
+    assert.strictEqual(sw1Circle.getAttribute('data-stp-state'), 'forwarding');
+    assert.strictEqual(sw1Circle.getAttribute('fill'), '#22c55e');
+});
+
+// 1666. Canvas SVG indicators: 3-switch triangle redundant link correctly marks designated as green and alternate as amber
+runTest('1666. Canvas SVG indicators: 3-switch triangle redundant link correctly marks designated as green and alternate as amber', () => {
+    resetLab();
+    addDevice('switch', 200, 50);  // Sw0 (Root)
+    addDevice('switch', 50, 250);  // Sw1
+    addDevice('switch', 350, 250); // Sw2
+    const [sw0, sw1, sw2] = networkState.devices;
+
+    sw0.mac = '00:00:00:00:00:01';
+    sw1.mac = '00:00:00:00:00:02';
+    sw2.mac = '00:00:00:00:00:03';
+
+    addConnection(sw0.id, sw1.id);
+    addConnection(sw0.id, sw2.id);
+    addConnection(sw1.id, sw2.id); // Conn 2: Sw1 Fa0/2 <-> Sw2 Fa0/2
+
+    renderConnections();
+
+    const svg = document.getElementById('connectionLayer');
+    const circles = svg.children.filter(c => c.tagName === 'CIRCLE');
+
+    // Exactly 6 circle markers across 3 switch-to-switch connections (2 per link)
+    assert.strictEqual(circles.length, 6);
+
+    // On redundant link between Sw1 and Sw2:
+    const sw1Port2Marker = circles.find(c => c.getAttribute('data-device-id') === 'Switch1' && c.getAttribute('data-port') === 'Fa0/2');
+    const sw2Port2Marker = circles.find(c => c.getAttribute('data-device-id') === 'Switch2' && c.getAttribute('data-port') === 'Fa0/2');
+
+    assert.ok(sw1Port2Marker);
+    assert.strictEqual(sw1Port2Marker.getAttribute('data-stp-state'), 'forwarding');
+    assert.strictEqual(sw1Port2Marker.getAttribute('fill'), '#22c55e');
+    assert.ok(sw1Port2Marker.classList.contains('stp-indicator--forwarding'));
+
+    assert.ok(sw2Port2Marker);
+    assert.strictEqual(sw2Port2Marker.getAttribute('data-stp-state'), 'blocking');
+    assert.strictEqual(sw2Port2Marker.getAttribute('data-stp-role'), 'alternate');
+    assert.strictEqual(sw2Port2Marker.getAttribute('fill'), '#f59e0b');
+    assert.ok(sw2Port2Marker.classList.contains('stp-indicator--blocking'));
+});
+
+// 1667. Canvas SVG indicators: end-host (PC, Server, Router) connection has marker only at switch end
+runTest('1667. Canvas SVG indicators: end-host (PC, Server, Router) connection has marker only at switch end', () => {
+    resetLab();
+    addDevice('switch', 200, 200);
+    addDevice('pc', 50, 100);
+    addDevice('server', 350, 100);
+    addDevice('router', 200, 350);
+    const [sw, pc, srv, rtr] = networkState.devices;
+
+    addConnection(sw.id, pc.id);
+    addConnection(sw.id, srv.id);
+    addConnection(sw.id, rtr.id);
+
+    renderConnections();
+
+    const svg = document.getElementById('connectionLayer');
+    const circles = svg.children.filter(c => c.tagName === 'CIRCLE');
+
+    // Exactly 3 markers, all for Switch0
+    assert.strictEqual(circles.length, 3);
+    assert.ok(circles.every(c => c.getAttribute('data-device-id') === 'Switch0'));
+
+    // Zero markers for PC0, Server0, or Router0
+    assert.strictEqual(circles.some(c => c.getAttribute('data-device-id') === pc.id), false);
+    assert.strictEqual(circles.some(c => c.getAttribute('data-device-id') === srv.id), false);
+    assert.strictEqual(circles.some(c => c.getAttribute('data-device-id') === rtr.id), false);
+});
+
+// 1668. Canvas SVG indicators: connection between two non-switch devices has zero STP markers
+runTest('1668. Canvas SVG indicators: connection between two non-switch devices has zero STP markers', () => {
+    resetLab();
+    addDevice('router', 100, 100);
+    addDevice('router', 300, 100);
+    addConnection('Router0', 'Router1');
+
+    renderConnections();
+
+    const svg = document.getElementById('connectionLayer');
+    const lines = svg.children.filter(c => c.tagName === 'LINE');
+    const circles = svg.children.filter(c => c.tagName === 'CIRCLE');
+
+    assert.strictEqual(lines.length, 1);
+    assert.strictEqual(circles.length, 0);
+});
+
+// 1669. Canvas SVG indicators: administratively shutdown switchport transitions marker to red down
+runTest('1669. Canvas SVG indicators: administratively shutdown switchport transitions marker to red down', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    addConnection('Switch0', 'Switch1');
+
+    // Before shutdown: forwarding (green)
+    renderConnections();
+    let svg = document.getElementById('connectionLayer');
+    let sw0Marker = svg.children.find(c => c.getAttribute('data-device-id') === 'Switch0');
+    assert.strictEqual(sw0Marker.getAttribute('fill'), '#22c55e');
+
+    // Shutdown Switch0 Fa0/1
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    executeCliCommand('Switch0', 'shutdown');
+
+    renderConnections();
+    svg = document.getElementById('connectionLayer');
+    sw0Marker = svg.children.find(c => c.getAttribute('data-device-id') === 'Switch0');
+    assert.strictEqual(sw0Marker.getAttribute('fill'), '#ef4444');
+    assert.strictEqual(sw0Marker.getAttribute('data-stp-state'), 'down');
+    assert.ok(sw0Marker.classList.contains('stp-indicator--down'));
+});
+
+// 1670. Canvas SVG indicators: port-security err-disabled switchport transitions marker to red err-disabled
+runTest('1670. Canvas SVG indicators: port-security err-disabled switchport transitions marker to red err-disabled', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const [sw, pc] = networkState.devices;
+    addConnection(sw.id, pc.id);
+
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    executeCliCommand('Switch0', 'switchport port-security');
+    executeCliCommand('Switch0', 'switchport port-security mac-address 00:AA:BB:CC:DD:EE');
+
+    // Violation frame
+    const unauthorizedFrame = { sourceMac: pc.mac, destinationMac: 'FF:FF:FF:FF:FF:FF', events: [] };
+    simulatePathTransmission(unauthorizedFrame, pc, sw, [pc.id, sw.id]);
+
+    renderConnections();
+    const svg = document.getElementById('connectionLayer');
+    const marker = svg.children.find(c => c.getAttribute('data-device-id') === 'Switch0');
+    assert.ok(marker);
+    assert.strictEqual(marker.getAttribute('fill'), '#ef4444');
+    assert.strictEqual(marker.getAttribute('data-stp-state'), 'err-disabled');
+    assert.ok(marker.classList.contains('stp-indicator--down'));
+});
+
+// 1671. Canvas SVG indicators: recovering err-disabled port restores marker to green forwarding
+runTest('1671. Canvas SVG indicators: recovering err-disabled port restores marker to green forwarding', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('pc', 300, 100);
+    const [sw, pc] = networkState.devices;
+    addConnection(sw.id, pc.id);
+
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    executeCliCommand('Switch0', 'switchport port-security');
+    executeCliCommand('Switch0', 'switchport port-security mac-address 00:AA:BB:CC:DD:EE');
+
+    const unauthorizedFrame = { sourceMac: pc.mac, destinationMac: 'FF:FF:FF:FF:FF:FF', events: [] };
+    simulatePathTransmission(unauthorizedFrame, pc, sw, [pc.id, sw.id]);
+
+    // Recover port via CLI shutdown followed by no shutdown
+    executeCliCommand('Switch0', 'shutdown');
+    executeCliCommand('Switch0', 'no shutdown');
+
+    renderConnections();
+    const svg = document.getElementById('connectionLayer');
+    const marker = svg.children.find(c => c.getAttribute('data-device-id') === 'Switch0');
+    assert.strictEqual(marker.getAttribute('fill'), '#22c55e');
+    assert.strictEqual(marker.getAttribute('data-stp-state'), 'forwarding');
+});
+
+// 1672. Canvas SVG indicators: deleting link removes SVG indicators cleanly without orphans
+runTest('1672. Canvas SVG indicators: deleting link removes SVG indicators cleanly without orphans', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    addConnection('Switch0', 'Switch1');
+
+    renderConnections();
+    let svg = document.getElementById('connectionLayer');
+    assert.strictEqual(svg.children.filter(c => c.tagName === 'CIRCLE').length, 2);
+
+    deleteConnection(networkState.connections[0].id);
+    renderConnections();
+    svg = document.getElementById('connectionLayer');
+    assert.strictEqual(svg.children.length, 0);
+});
+
+// 1673. Canvas SVG indicators: dynamic reconvergence on link failure updates former blocking marker to green forwarding
+runTest('1673. Canvas SVG indicators: dynamic reconvergence on link failure updates former blocking marker to green forwarding', () => {
+    resetLab();
+    addDevice('switch', 200, 50);  // Sw0 (Root)
+    addDevice('switch', 50, 250);  // Sw1
+    addDevice('switch', 350, 250); // Sw2
+    const [sw0, sw1, sw2] = networkState.devices;
+
+    sw0.mac = '00:00:00:00:00:01';
+    sw1.mac = '00:00:00:00:00:02';
+    sw2.mac = '00:00:00:00:00:03';
+
+    addConnection(sw0.id, sw1.id);
+    addConnection(sw0.id, sw2.id); // conn1
+    addConnection(sw1.id, sw2.id); // conn2
+
+    renderConnections();
+    let svg = document.getElementById('connectionLayer');
+    let sw2Port2 = svg.children.find(c => c.getAttribute('data-device-id') === 'Switch2' && c.getAttribute('data-port') === 'Fa0/2');
+    assert.strictEqual(sw2Port2.getAttribute('data-stp-state'), 'blocking');
+    assert.strictEqual(sw2Port2.getAttribute('fill'), '#f59e0b');
+
+    // Break active root link Sw0 <-> Sw2
+    deleteConnection(networkState.connections[1].id);
+    renderConnections();
+
+    svg = document.getElementById('connectionLayer');
+    sw2Port2 = svg.children.find(c => c.getAttribute('data-device-id') === 'Switch2' && c.getAttribute('data-port') === 'Fa0/2');
+    assert.ok(sw2Port2);
+    // After failure, Sw2 reconverges through Sw1: Fa0/2 becomes Root / Forwarding
+    assert.strictEqual(sw2Port2.getAttribute('data-stp-state'), 'forwarding');
+    assert.strictEqual(sw2Port2.getAttribute('fill'), '#22c55e');
+    assert.ok(sw2Port2.classList.contains('stp-indicator--forwarding'));
+});
+
+// 1674. Canvas SVG indicators: pointer-events are disabled and line selection remains fully functional
+runTest('1674. Canvas SVG indicators: pointer-events are disabled and line selection remains fully functional', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    addConnection('Switch0', 'Switch1');
+
+    renderConnections();
+    const svg = document.getElementById('connectionLayer');
+    const circles = svg.children.filter(c => c.tagName === 'CIRCLE');
+    assert.strictEqual(circles.length, 2);
+    assert.ok(circles.every(c => c.getAttribute('pointer-events') === 'none'));
+
+    // Clicking line selects connection
+    const line = svg.children.find(c => c.tagName === 'LINE');
+    assert.ok(line);
+    line.click();
+    assert.strictEqual(networkState.selectedConnectionId, networkState.connections[0].id);
+});
+
+// 1675. Switch Inspector UI: renders FORWARDING (status-up), BLOCKING (status-blocking), and DOWN (status-down) badges
+runTest('1675. Switch Inspector UI: renders FORWARDING (status-up), BLOCKING (status-blocking), and DOWN (status-down) badges', () => {
+    resetLab();
+    addDevice('switch', 200, 50);  // Sw0
+    addDevice('switch', 50, 250);  // Sw1
+    addDevice('switch', 350, 250); // Sw2
+    const [sw0, sw1, sw2] = networkState.devices;
+
+    sw0.mac = '00:00:00:00:00:01';
+    sw1.mac = '00:00:00:00:00:02';
+    sw2.mac = '00:00:00:00:00:03';
+
+    addConnection(sw0.id, sw1.id);
+    addConnection(sw0.id, sw2.id);
+    addConnection(sw1.id, sw2.id);
+
+    // Shutdown a port on Sw2 to verify DOWN badge
+    setSwitchPortAccessVlan(sw2, 'Fa0/3', 1);
+    sw2.switchports['Fa0/3'].adminDown = true;
+    sw2.switchports['Fa0/3'].status = 'down';
+
+    const html = renderSwitchInspector(sw2);
+    assert.ok(html.includes('FORWARDING'));
+    assert.ok(html.includes('BLOCKING'));
+    assert.ok(html.includes('ADMIN DOWN'));
+    assert.ok(html.includes('status-badge status-up'));
+    assert.ok(html.includes('status-badge status-blocking status-down'));
+    assert.ok(html.includes('status-badge status-down'));
+});
+
+// 1676. Switch CLI: show spanning-tree interface on configured but disconnected port reports not connected status
+runTest('1676. Switch CLI: show spanning-tree interface on configured but disconnected port reports not connected status', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    const sw = networkState.devices[0];
+
+    // Configure Fa0/1 without attaching any cable
+    executeCliCommand('Switch0', 'enable');
+    executeCliCommand('Switch0', 'configure terminal');
+    executeCliCommand('Switch0', 'interface Fa0/1');
+    executeCliCommand('Switch0', 'switchport mode access');
+
+    recalculateTopologyStp();
+
+    const res = executeCliCommand('Switch0', 'show spanning-tree interface Fa0/1');
+    assert.strictEqual(res.success, true);
+    assert.ok(res.output.includes('Port 1 (Fa0/1) of VLAN0001 is disabled blocking'));
+    assert.ok(res.output.includes('Operational status is down (not connected)'));
 });
 
 console.log('----------------------------------------------------');
