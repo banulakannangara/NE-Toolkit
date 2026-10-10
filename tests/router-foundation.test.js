@@ -42120,6 +42120,466 @@ runTest('1717. Existing PortFast, redundant-link blocking, and STP convergence i
     assert.strictEqual(blockingPortsAfter.length, 1, 'STP blocking invariant must remain unchanged');
 });
 
+// 1718. Two-switch direct link: designated-port transmission and reception at peer root port
+runTest('1718. Two-switch direct link: designated-port transmission and reception at peer root port', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root Bridge)
+    addDevice('switch', 300, 100); // Switch1 (Non-root)
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    const result = transmitBpdu('Switch0', 'Fa0/1');
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.transmission.eligible, true);
+    assert.strictEqual(result.transmission.sourceDeviceId, sw0.id);
+    assert.strictEqual(result.transmission.sourceDeviceName, 'Switch0');
+    assert.strictEqual(result.transmission.sourcePort, 'Fa0/1');
+    assert.strictEqual(result.transmission.bpdu.rootBridgeId, sw0.stp.bridgeId);
+    assert.strictEqual(result.transmission.bpdu.rootPathCost, 0);
+    assert.strictEqual(result.transmission.bpdu.senderBridgeId, sw0.stp.bridgeId);
+    assert.strictEqual(result.transmission.bpdu.senderPortId, '128.1');
+
+    assert.strictEqual(result.reception.eligible, true);
+    assert.strictEqual(result.reception.status, 'accepted');
+    assert.strictEqual(result.reception.reason, null);
+    assert.strictEqual(result.reception.targetDeviceId, sw1.id);
+    assert.strictEqual(result.reception.targetDeviceName, 'Switch1');
+    assert.strictEqual(result.reception.targetPort, 'Fa0/1');
+    assert.strictEqual(result.reception.targetDeviceType, 'switch');
+    assert.strictEqual(result.reception.details.portRole, 'root');
+    assert.strictEqual(result.reception.details.portState, 'forwarding');
+    assert.strictEqual(result.reception.details.rootBridgeId, sw0.stp.bridgeId);
+    assert.strictEqual(result.reception.details.rootPathCost, 0);
+    assert.strictEqual(result.reception.details.senderBridgeId, sw0.stp.bridgeId);
+    assert.strictEqual(result.reception.details.senderPortId, '128.1');
+});
+
+// 1719. Reverse transmission attempt from non-root switch root port is ineligible
+runTest('1719. Reverse transmission attempt from non-root switch root port is ineligible', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root Bridge)
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    assert.strictEqual(sw1.stp.ports['Fa0/1'].role, 'root');
+
+    const result = transmitBpdu('Switch1', 'Fa0/1');
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.transmission.eligible, false);
+    assert.strictEqual(result.transmission.reason, 'port-not-designated');
+    assert.strictEqual(result.transmission.bpdu, null);
+    assert.strictEqual(result.reception, null);
+});
+
+// 1720. Triangle topology: BPDU is received on alternate/blocking port without changing its blocking state
+runTest('1720. Triangle topology: BPDU is received on alternate/blocking port without changing its blocking state', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root Bridge)
+    addDevice('switch', 300, 100); // Switch1
+    addDevice('switch', 200, 300); // Switch2
+    const [sw0, sw1, sw2] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+    sw2.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Sw0 Fa0/1 <-> Sw1 Fa0/1
+    addConnection('Switch0', 'Switch2'); // Sw0 Fa0/2 <-> Sw2 Fa0/1
+    addConnection('Switch1', 'Switch2'); // Sw1 Fa0/2 <-> Sw2 Fa0/2
+    recalculateTopologyStp();
+
+    const sw1Fa2Role = sw1.stp.ports['Fa0/2'].role;
+    const desigSw = sw1Fa2Role === 'designated' ? 'Switch1' : 'Switch2';
+    const altSw = sw1Fa2Role === 'alternate' ? sw1 : sw2;
+    const altSwName = desigSw === 'Switch1' ? 'Switch2' : 'Switch1';
+
+    assert.strictEqual(altSw.stp.ports['Fa0/2'].role, 'alternate');
+    assert.strictEqual(altSw.stp.ports['Fa0/2'].state, 'blocking');
+
+    const result = transmitBpdu(desigSw, 'Fa0/2');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.transmission.eligible, true);
+    assert.strictEqual(result.transmission.bpdu.rootPathCost, 19);
+
+    assert.strictEqual(result.reception.eligible, true);
+    assert.strictEqual(result.reception.status, 'accepted');
+    assert.strictEqual(result.reception.targetDeviceName, altSwName);
+    assert.strictEqual(result.reception.targetPort, 'Fa0/2');
+    assert.strictEqual(result.reception.details.portRole, 'alternate');
+    assert.strictEqual(result.reception.details.portState, 'blocking');
+
+    // Invariant check: port role and state remain strictly alternate/blocking
+    assert.strictEqual(altSw.stp.ports['Fa0/2'].role, 'alternate');
+    assert.strictEqual(altSw.stp.ports['Fa0/2'].state, 'blocking');
+});
+
+// 1721. Host and router peers: transmission and endpoint reception outcomes
+runTest('1721. Host and router peers: transmission and endpoint reception outcomes', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('pc', 300, 100);     // PC0
+    addDevice('router', 100, 300); // Router0
+    const [sw0, pc0, r0] = networkState.devices;
+    sw0.stpPriority = 4096;
+
+    addConnection('Switch0', 'PC0');     // Sw0 Fa0/1 <-> PC0 FastEthernet0
+    addConnection('Switch0', 'Router0'); // Sw0 Fa0/2 <-> Router0 GigabitEthernet0/0
+    setSwitchPortPortfast('Switch0', 'Fa0/1', true);
+    recalculateTopologyStp();
+
+    // Transmit toward PC
+    const resPc = transmitBpdu('Switch0', 'Fa0/1');
+    assert.strictEqual(resPc.success, false);
+    assert.strictEqual(resPc.transmission.eligible, true);
+    assert.strictEqual(resPc.transmission.sourcePort, 'Fa0/1');
+    assert.strictEqual(resPc.reception.targetDeviceId, pc0.id);
+    assert.strictEqual(resPc.reception.targetDeviceName, 'PC0');
+    assert.strictEqual(resPc.reception.targetDeviceType, 'pc');
+    assert.strictEqual(resPc.reception.eligible, false);
+    assert.strictEqual(resPc.reception.status, 'ignored');
+    assert.strictEqual(resPc.reception.reason, 'endpoint-is-pc');
+
+    // Transmit toward Router
+    const resRouter = transmitBpdu('Switch0', 'Fa0/2');
+    assert.strictEqual(resRouter.success, false);
+    assert.strictEqual(resRouter.transmission.eligible, true);
+    assert.strictEqual(resRouter.transmission.sourcePort, 'Fa0/2');
+    assert.strictEqual(resRouter.reception.targetDeviceId, r0.id);
+    assert.strictEqual(resRouter.reception.targetDeviceName, 'Router0');
+    assert.strictEqual(resRouter.reception.targetDeviceType, 'router');
+    assert.strictEqual(resRouter.reception.eligible, false);
+    assert.strictEqual(resRouter.reception.status, 'dropped');
+    assert.strictEqual(resRouter.reception.reason, 'endpoint-is-router');
+});
+
+// 1722. Receiving interface administratively shut down and err-disabled
+runTest('1722. Receiving interface administratively shut down and err-disabled', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    // 1. Admin down on Switch1
+    ensurePortSecurityState(sw1, 'Fa0/1');
+    sw1.switchports['Fa0/1'].adminDown = true;
+    recalculateTopologyStp();
+
+    const resAdmin = transmitBpdu('Switch0', 'Fa0/1');
+    assert.strictEqual(resAdmin.success, false);
+    assert.strictEqual(resAdmin.transmission.eligible, true);
+    assert.strictEqual(resAdmin.reception.eligible, false);
+    assert.strictEqual(resAdmin.reception.status, 'dropped');
+    assert.strictEqual(resAdmin.reception.reason, 'admin-down');
+
+    // 2. Err-disabled on Switch1
+    sw1.switchports['Fa0/1'].adminDown = false;
+    sw1.switchports['Fa0/1'].portSecurity.errDisabled = true;
+    recalculateTopologyStp();
+
+    const resErr = transmitBpdu('Switch0', 'Fa0/1');
+    assert.strictEqual(resErr.success, false);
+    assert.strictEqual(resErr.transmission.eligible, true);
+    assert.strictEqual(resErr.reception.eligible, false);
+    assert.strictEqual(resErr.reception.status, 'dropped');
+    assert.strictEqual(resErr.reception.reason, 'err-disabled');
+});
+
+// 1723. Receiving switch with STP disabled
+runTest('1723. Receiving switch with STP disabled', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1');
+    recalculateTopologyStp();
+
+    sw1.stp.enabled = false;
+
+    const res = transmitBpdu('Switch0', 'Fa0/1');
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.transmission.eligible, true);
+    assert.strictEqual(res.reception.eligible, false);
+    assert.strictEqual(res.reception.status, 'dropped');
+    assert.strictEqual(res.reception.reason, 'stp-disabled');
+
+    const validBpdu = createBpdu('Switch0', 'Fa0/1');
+    const directRx = receiveBpdu('Switch1', 'Fa0/1', validBpdu);
+    assert.strictEqual(directRx.eligible, false);
+    assert.strictEqual(directRx.status, 'dropped');
+    assert.strictEqual(directRx.reason, 'stp-disabled');
+});
+
+// 1724. Disconnected or invalid transmitting interface and missing device
+runTest('1724. Disconnected or invalid transmitting interface and missing device', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0] = networkState.devices;
+    sw0.stpPriority = 4096;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    // 1. Unconnected interface
+    const resDisconn = transmitBpdu('Switch0', 'Fa0/3');
+    assert.strictEqual(resDisconn.success, false);
+    assert.strictEqual(resDisconn.transmission.eligible, false);
+    assert.strictEqual(resDisconn.transmission.reason, 'port-not-connected');
+    assert.strictEqual(resDisconn.reception, null);
+
+    // 2. Invalid interface name
+    const resInvalid = transmitBpdu('Switch0', 'GigabitEthernet99/99');
+    assert.strictEqual(resInvalid.success, false);
+    assert.strictEqual(resInvalid.transmission.eligible, false);
+    assert.strictEqual(resInvalid.transmission.reason, 'invalid-port');
+
+    // 3. Nonexistent switch
+    const resMissing = transmitBpdu('NoSuchSwitch', 'Fa0/1');
+    assert.strictEqual(resMissing.success, false);
+    assert.strictEqual(resMissing.transmission.eligible, false);
+    assert.strictEqual(resMissing.transmission.reason, 'switch-not-found');
+});
+
+// 1725. Malformed BPDU payloads rejected by receiveBpdu() across all fields
+runTest('1725. Malformed BPDU payloads rejected by receiveBpdu() across all fields', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    const validBpdu = createBpdu('Switch0', 'Fa0/1');
+    assert.ok(validBpdu !== null);
+
+    // Baseline: valid BPDU accepted
+    const resOk = receiveBpdu('Switch1', 'Fa0/1', validBpdu);
+    assert.strictEqual(resOk.eligible, true);
+    assert.strictEqual(resOk.status, 'accepted');
+    assert.strictEqual(resOk.reason, null);
+
+    // 1. Non-object payload
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', null).reason, 'payload-not-an-object');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', 'string').reason, 'payload-not-an-object');
+
+    // 2. Invalid protocol identifier
+    const badProto = Object.assign({}, validBpdu, { protocolId: 1, protocolIdentifier: 1 });
+    const resProto = receiveBpdu('Switch1', 'Fa0/1', badProto);
+    assert.strictEqual(resProto.eligible, true);
+    assert.strictEqual(resProto.status, 'dropped');
+    assert.strictEqual(resProto.reason, 'invalid-protocol-id');
+
+    // 3. Invalid protocol version
+    const badVer = Object.assign({}, validBpdu, { protocolVersion: 1 });
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', badVer).reason, 'invalid-protocol-version');
+
+    // 4. Invalid BPDU type
+    const badType = Object.assign({}, validBpdu, { bpduType: 128 });
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', badType).reason, 'invalid-bpdu-type');
+
+    // 5. Invalid root bridge ID
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { rootBridgeId: '' })).reason, 'invalid-root-bridge-id');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { rootBridgeId: 'not-a-bid' })).reason, 'invalid-root-bridge-id');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { rootBridgeId: '999999.00:11:22:33:44:55' })).reason, 'invalid-root-bridge-id');
+
+    // 6. Invalid root path cost
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { rootPathCost: -1 })).reason, 'invalid-root-path-cost');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { rootPathCost: '19' })).reason, 'invalid-root-path-cost');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { rootPathCost: 1.5 })).reason, 'invalid-root-path-cost');
+
+    // 7. Invalid sender bridge ID
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { senderBridgeId: 'bad' })).reason, 'invalid-sender-bridge-id');
+
+    // 8. Invalid sender port ID
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { senderPortId: 'bad' })).reason, 'invalid-sender-port-id');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { senderPortId: '128.0' })).reason, 'invalid-sender-port-id');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { senderPortId: '999.1' })).reason, 'invalid-sender-port-id');
+
+    // 9. Invalid flags
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { flags: null })).reason, 'invalid-flags');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { flags: {} })).reason, 'invalid-flags');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { flags: { topologyChange: 'yes' } })).reason, 'invalid-flags');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { flags: { tc: 1 } })).reason, 'invalid-flags');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { flags: { topologyChangeAck: null } })).reason, 'invalid-flags');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { flags: { tca: 0 } })).reason, 'invalid-flags');
+
+    // 10. Contradictory flag aliases
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { flags: { topologyChange: true, tc: false } })).reason, 'contradictory-flags');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { flags: { topologyChange: false, tc: true } })).reason, 'contradictory-flags');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { flags: { topologyChangeAck: true, tca: false } })).reason, 'contradictory-flags');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { flags: { topologyChangeAck: false, tca: true } })).reason, 'contradictory-flags');
+
+    // 11. Valid matching and single flag aliases
+    const resMatch = receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { flags: { topologyChange: true, tc: true, topologyChangeAck: false, tca: false } }));
+    assert.strictEqual(resMatch.status, 'accepted');
+    const resSingleLong = receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { flags: { topologyChange: true } }));
+    assert.strictEqual(resSingleLong.status, 'accepted');
+    const resSingleShort = receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { flags: { tc: false } }));
+    assert.strictEqual(resSingleShort.status, 'accepted');
+
+    // 12. Invalid timer values and expiration
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { messageAge: -1 })).reason, 'invalid-message-age');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { maxAge: 0 })).reason, 'invalid-max-age');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { helloTime: 0 })).reason, 'invalid-hello-time');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { forwardDelay: -5 })).reason, 'invalid-forward-delay');
+
+    // 13. Expired BPDU: messageAge >= maxAge
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { messageAge: 20, maxAge: 20 })).reason, 'message-age-exceeds-max-age');
+    assert.strictEqual(receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { messageAge: 25, maxAge: 20 })).reason, 'message-age-exceeds-max-age');
+
+    // 14. Valid message age below max age
+    const resValidAge = receiveBpdu('Switch1', 'Fa0/1', Object.assign({}, validBpdu, { messageAge: 5, maxAge: 20 }));
+    assert.strictEqual(resValidAge.status, 'accepted');
+
+    // 15. Canonical createBpdu() output passes validation
+    const resCanon = receiveBpdu('Switch1', 'Fa0/1', validBpdu);
+    assert.strictEqual(resCanon.status, 'accepted');
+});
+
+// 1726. Determinism, immutability, and zero side effects
+runTest('1726. Determinism, immutability, and zero side effects', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    // Snapshot simulator state
+    const stp0Snap = JSON.stringify(sw0.stp);
+    const stp1Snap = JSON.stringify(sw1.stp);
+    const devCount = networkState.devices.length;
+    const connCount = networkState.connections.length;
+    const histLen = (networkState.history || []).length;
+    const macLen0 = Object.keys(networkState.switchRuntime[sw0.id]?.macTable || {}).length;
+    const macLen1 = Object.keys(networkState.switchRuntime[sw1.id]?.macTable || {}).length;
+    const evtLen = (networkState.simulationRuntime?.events || []).length;
+
+    const res1 = transmitBpdu('Switch0', 'Fa0/1');
+    const res2 = transmitBpdu('Switch0', 'Fa0/1');
+
+    assert.strictEqual(res1.success, true);
+    assert.deepStrictEqual(res1, res2);
+
+    // Verify zero mutations
+    assert.strictEqual(JSON.stringify(sw0.stp), stp0Snap, 'sw0.stp must not mutate');
+    assert.strictEqual(JSON.stringify(sw1.stp), stp1Snap, 'sw1.stp must not mutate');
+    assert.strictEqual(networkState.devices.length, devCount, 'Devices must not change');
+    assert.strictEqual(networkState.connections.length, connCount, 'Connections must not change');
+    assert.strictEqual((networkState.history || []).length, histLen, 'History must not change');
+    assert.strictEqual(Object.keys(networkState.switchRuntime[sw0.id]?.macTable || {}).length, macLen0, 'MAC table must not change');
+    assert.strictEqual(Object.keys(networkState.switchRuntime[sw1.id]?.macTable || {}).length, macLen1, 'MAC table must not change');
+    assert.strictEqual((networkState.simulationRuntime?.events || []).length, evtLen, 'Events must not change');
+});
+
+// 1727. PortFast and redundant-link blocking invariants preserved alongside transmission and reception
+runTest('1727. PortFast and redundant-link blocking invariants preserved alongside transmission and reception', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('switch', 300, 100); // Switch1
+    addDevice('switch', 200, 300); // Switch2
+    addDevice('pc', 100, 300);     // PC0
+    const [sw0, sw1, sw2, pc0] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+    sw2.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Sw0 Fa0/1 <-> Sw1 Fa0/1
+    addConnection('Switch0', 'Switch2'); // Sw0 Fa0/2 <-> Sw2 Fa0/1
+    addConnection('Switch1', 'Switch2'); // Sw1 Fa0/2 <-> Sw2 Fa0/2
+    addConnection('Switch0', 'PC0');     // Sw0 Fa0/3 <-> PC0 eth0
+
+    setSwitchPortPortfast('Switch0', 'Fa0/3', true);
+    recalculateTopologyStp();
+
+    assert.strictEqual(sw0.stp.ports['Fa0/3'].edge, true);
+    assert.strictEqual(isPortfastEffective(sw0, 'Fa0/3'), true);
+
+    // One redundant link blocked
+    const blockingCountBefore = [
+        sw0.stp.ports['Fa0/1']?.state,
+        sw0.stp.ports['Fa0/2']?.state,
+        sw1.stp.ports['Fa0/1']?.state,
+        sw1.stp.ports['Fa0/2']?.state,
+        sw2.stp.ports['Fa0/1']?.state,
+        sw2.stp.ports['Fa0/2']?.state
+    ].filter(s => s === 'blocking').length;
+    assert.strictEqual(blockingCountBefore, 1);
+
+    // Transmit across all active links
+    transmitBpdu('Switch0', 'Fa0/1');
+    transmitBpdu('Switch0', 'Fa0/2');
+    transmitBpdu('Switch0', 'Fa0/3');
+    transmitBpdu('Switch1', 'Fa0/2');
+
+    const blockingCountAfter = [
+        sw0.stp.ports['Fa0/1']?.state,
+        sw0.stp.ports['Fa0/2']?.state,
+        sw1.stp.ports['Fa0/1']?.state,
+        sw1.stp.ports['Fa0/2']?.state,
+        sw2.stp.ports['Fa0/1']?.state,
+        sw2.stp.ports['Fa0/2']?.state
+    ].filter(s => s === 'blocking').length;
+    assert.strictEqual(blockingCountAfter, 1);
+    assert.strictEqual(sw0.stp.ports['Fa0/3'].edge, true);
+    assert.strictEqual(isPortfastEffective(sw0, 'Fa0/3'), true);
+});
+
+// 1728. Defensive peer-port resolution: missing peer-port mapping fails delivery without mutating runtime ports
+runTest('1728. Defensive peer-port resolution: missing peer-port mapping fails delivery without mutating runtime ports', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    const runtime1 = networkState.switchRuntime[sw1.id];
+    const connId = Object.keys(runtime1.ports || {})[0];
+    assert.ok(connId);
+
+    // Simulate corrupted/unmapped runtime state on receiving switch
+    delete runtime1.ports[connId];
+    const portCountBefore = Object.keys(runtime1.ports).length;
+
+    const res = transmitBpdu('Switch0', 'Fa0/1');
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.transmission.eligible, true);
+    assert.strictEqual(res.reception.eligible, false);
+    assert.strictEqual(res.reception.status, 'dropped');
+    assert.strictEqual(res.reception.reason, 'peer-port-unmapped');
+
+    // Verify runtime.ports was NOT mutated by allocating a fallback port
+    assert.strictEqual(Object.keys(runtime1.ports).length, portCountBefore);
+    assert.strictEqual(runtime1.ports[connId], undefined);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {

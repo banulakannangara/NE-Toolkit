@@ -7324,6 +7324,516 @@ function formatBpduSummary(bpdu) {
     return `BPDU (Root: ${bpdu.rootBridgeId}, Cost: ${bpdu.rootPathCost}, Bridge: ${bpdu.senderBridgeId}, Port: ${bpdu.senderPortId})`;
 }
 
+/**
+ * Validates whether a string matches canonical Bridge ID format (${priority}.${mac}).
+ */
+function isValidBridgeIdString(str) {
+    if (!str || typeof str !== 'string') return false;
+    const dotIndex = str.indexOf('.');
+    if (dotIndex <= 0) return false;
+    const prioStr = str.slice(0, dotIndex);
+    const macStr = str.slice(dotIndex + 1);
+    const prio = parseInt(prioStr, 10);
+    if (isNaN(prio) || prio < 0 || prio > 65535 || String(prio) !== prioStr) return false;
+    if (!macStr || !macStr.includes(':')) return false;
+    return true;
+}
+
+/**
+ * Validates whether a string matches canonical Port ID format (${priority}.${portNumber}).
+ */
+function isValidPortIdString(str) {
+    if (!str || typeof str !== 'string') return false;
+    const parts = str.split('.');
+    if (parts.length !== 2) return false;
+    const prio = parseInt(parts[0], 10);
+    const portNum = parseInt(parts[1], 10);
+    if (isNaN(prio) || prio < 0 || prio > 255 || String(prio) !== parts[0]) return false;
+    if (isNaN(portNum) || portNum < 1 || String(portNum) !== parts[1]) return false;
+    return true;
+}
+
+/**
+ * Validates that a Configuration BPDU payload contains all required IEEE 802.1D fields
+ * with correct types and valid ranges.
+ */
+function validateBpduPayload(bpdu) {
+    if (!bpdu || typeof bpdu !== 'object') {
+        return { valid: false, reason: 'payload-not-an-object' };
+    }
+    const protoId = bpdu.protocolId !== undefined ? bpdu.protocolId : bpdu.protocolIdentifier;
+    if (protoId !== BPDU_PROTOCOL_ID) {
+        return { valid: false, reason: 'invalid-protocol-id' };
+    }
+    if (bpdu.protocolVersion !== BPDU_PROTOCOL_VERSION) {
+        return { valid: false, reason: 'invalid-protocol-version' };
+    }
+    if (bpdu.bpduType !== BPDU_TYPE_CONFIG) {
+        return { valid: false, reason: 'invalid-bpdu-type' };
+    }
+    if (!isValidBridgeIdString(bpdu.rootBridgeId)) {
+        return { valid: false, reason: 'invalid-root-bridge-id' };
+    }
+    if (typeof bpdu.rootPathCost !== 'number' || isNaN(bpdu.rootPathCost) || bpdu.rootPathCost < 0 || !Number.isInteger(bpdu.rootPathCost)) {
+        return { valid: false, reason: 'invalid-root-path-cost' };
+    }
+    if (!isValidBridgeIdString(bpdu.senderBridgeId)) {
+        return { valid: false, reason: 'invalid-sender-bridge-id' };
+    }
+    if (!isValidPortIdString(bpdu.senderPortId)) {
+        return { valid: false, reason: 'invalid-sender-port-id' };
+    }
+    if (!bpdu.flags || typeof bpdu.flags !== 'object') {
+        return { valid: false, reason: 'invalid-flags' };
+    }
+    const flags = bpdu.flags;
+    const hasTcLong = flags.topologyChange !== undefined;
+    const hasTcShort = flags.tc !== undefined;
+    const hasTcaLong = flags.topologyChangeAck !== undefined;
+    const hasTcaShort = flags.tca !== undefined;
+
+    if (!hasTcLong && !hasTcShort && !hasTcaLong && !hasTcaShort) {
+        return { valid: false, reason: 'invalid-flags' };
+    }
+    if (hasTcLong && typeof flags.topologyChange !== 'boolean') {
+        return { valid: false, reason: 'invalid-flags' };
+    }
+    if (hasTcShort && typeof flags.tc !== 'boolean') {
+        return { valid: false, reason: 'invalid-flags' };
+    }
+    if (hasTcaLong && typeof flags.topologyChangeAck !== 'boolean') {
+        return { valid: false, reason: 'invalid-flags' };
+    }
+    if (hasTcaShort && typeof flags.tca !== 'boolean') {
+        return { valid: false, reason: 'invalid-flags' };
+    }
+    if (hasTcLong && hasTcShort && flags.topologyChange !== flags.tc) {
+        return { valid: false, reason: 'contradictory-flags' };
+    }
+    if (hasTcaLong && hasTcaShort && flags.topologyChangeAck !== flags.tca) {
+        return { valid: false, reason: 'contradictory-flags' };
+    }
+
+    if (typeof bpdu.messageAge !== 'number' || isNaN(bpdu.messageAge) || !Number.isFinite(bpdu.messageAge) || bpdu.messageAge < 0) {
+        return { valid: false, reason: 'invalid-message-age' };
+    }
+    if (typeof bpdu.maxAge !== 'number' || isNaN(bpdu.maxAge) || !Number.isFinite(bpdu.maxAge) || bpdu.maxAge <= 0) {
+        return { valid: false, reason: 'invalid-max-age' };
+    }
+    if (bpdu.messageAge >= bpdu.maxAge) {
+        return { valid: false, reason: 'message-age-exceeds-max-age' };
+    }
+    if (typeof bpdu.helloTime !== 'number' || isNaN(bpdu.helloTime) || !Number.isFinite(bpdu.helloTime) || bpdu.helloTime <= 0) {
+        return { valid: false, reason: 'invalid-hello-time' };
+    }
+    if (typeof bpdu.forwardDelay !== 'number' || isNaN(bpdu.forwardDelay) || !Number.isFinite(bpdu.forwardDelay) || bpdu.forwardDelay <= 0) {
+        return { valid: false, reason: 'invalid-forward-delay' };
+    }
+    return { valid: true, reason: null };
+}
+
+/**
+ * Validates and processes the link-level reception of an incoming IEEE 802.1D Configuration BPDU
+ * on a specified switch port.
+ *
+ * RECEPTION ELIGIBILITY & CONSTRAINTS:
+ * 1. Independent of port role: Root, alternate/blocking, designated, and PortFast ports are all
+ *    eligible receivers when their interface and STP state permit it.
+ * 2. Receiving device must exist, be a switch, have STP enabled, be physically cabled, and be
+ *    operationally up (not administratively shut down or err-disabled).
+ * 3. Validates BPDU payload structure, types, and value ranges thoroughly.
+ * 4. Critical restriction: Does NOT modify sw.stp.rootBridgeId, STP port roles or states,
+ *    topology connections, switchport config, MAC tables, or undo history.
+ *
+ * @param {string|Object} switchOrId - Target switch device or device ID/name
+ * @param {string} portName - Target interface name (e.g., 'Fa0/1')
+ * @param {Object} bpdu - Incoming BPDU payload
+ * @param {Object} [context={}] - Optional transmission context (connectionId, senderDeviceId, etc.)
+ * @returns {Object} Structured reception outcome
+ */
+function receiveBpdu(switchOrId, portName, bpdu, context = {}) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) {
+        return {
+            eligible: false,
+            status: 'dropped',
+            reason: 'switch-not-found',
+            targetDeviceId: null,
+            targetDeviceName: null,
+            targetPort: portName,
+            details: null
+        };
+    }
+    if (sw.type !== 'switch') {
+        return {
+            eligible: false,
+            status: 'dropped',
+            reason: 'not-a-switch',
+            targetDeviceId: sw.id,
+            targetDeviceName: sw.name,
+            targetPort: portName,
+            details: null
+        };
+    }
+    if (sw.stp && sw.stp.enabled === false) {
+        return {
+            eligible: false,
+            status: 'dropped',
+            reason: 'stp-disabled',
+            targetDeviceId: sw.id,
+            targetDeviceName: sw.name,
+            targetPort: portName,
+            details: null
+        };
+    }
+
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) {
+        return {
+            eligible: false,
+            status: 'dropped',
+            reason: 'invalid-port',
+            targetDeviceId: sw.id,
+            targetDeviceName: sw.name,
+            targetPort: portName,
+            details: null
+        };
+    }
+
+    // Must be physically connected
+    const runtime = getSwitchRuntime(sw.id);
+    const connId = Object.keys(runtime.ports || {}).find(cId => runtime.ports[cId] === normPort);
+    if (!connId || !getConnectionById(connId)) {
+        return {
+            eligible: false,
+            status: 'dropped',
+            reason: 'port-not-connected',
+            targetDeviceId: sw.id,
+            targetDeviceName: sw.name,
+            targetPort: normPort,
+            details: null
+        };
+    }
+
+    // Respect administrative shutdown and err-disabled state
+    if (getInterfaceOperStatus(sw, normPort) === 'down') {
+        const cfg = sw.switchports?.[normPort];
+        const downReason = cfg?.portSecurity?.errDisabled
+            ? 'err-disabled'
+            : (cfg?.adminDown ? 'admin-down' : 'port-down');
+        return {
+            eligible: false,
+            status: 'dropped',
+            reason: downReason,
+            targetDeviceId: sw.id,
+            targetDeviceName: sw.name,
+            targetPort: normPort,
+            details: null
+        };
+    }
+
+    // Context validation (if context specifies connectionId or senderDeviceId)
+    if (context && typeof context === 'object') {
+        if (context.connectionId && context.connectionId !== connId) {
+            return {
+                eligible: false,
+                status: 'dropped',
+                reason: 'connection-mismatch',
+                targetDeviceId: sw.id,
+                targetDeviceName: sw.name,
+                targetPort: normPort,
+                details: null
+            };
+        }
+        if (context.senderDeviceId) {
+            const conn = getConnectionById(connId);
+            const expectedPeerId = conn.source === sw.id ? conn.target : conn.source;
+            if (context.senderDeviceId !== expectedPeerId) {
+                return {
+                    eligible: false,
+                    status: 'dropped',
+                    reason: 'sender-mismatch',
+                    targetDeviceId: sw.id,
+                    targetDeviceName: sw.name,
+                    targetPort: normPort,
+                    details: null
+                };
+            }
+        }
+    }
+
+    // Interface is fully eligible! Now validate the BPDU payload.
+    const payloadValidation = validateBpduPayload(bpdu);
+    if (!payloadValidation.valid) {
+        return {
+            eligible: true,
+            status: 'dropped',
+            reason: payloadValidation.reason,
+            targetDeviceId: sw.id,
+            targetDeviceName: sw.name,
+            targetPort: normPort,
+            details: {
+                validationError: payloadValidation.reason
+            }
+        };
+    }
+
+    // Port role information for details
+    const stpPort = sw.stp?.ports?.[normPort] || null;
+    const localRole = stpPort?.role || 'disabled';
+    const localState = stpPort?.state || 'blocking';
+
+    return {
+        eligible: true,
+        status: 'accepted',
+        reason: null,
+        targetDeviceId: sw.id,
+        targetDeviceName: sw.name,
+        targetPort: normPort,
+        details: {
+            portRole: localRole,
+            portState: localState,
+            rootBridgeId: bpdu.rootBridgeId,
+            rootPathCost: bpdu.rootPathCost,
+            senderBridgeId: bpdu.senderBridgeId,
+            senderPortId: bpdu.senderPortId,
+            portfast: Boolean(sw.switchports?.[normPort]?.portfast),
+            portfastEffective: isPortfastEffective(sw, normPort)
+        }
+    };
+}
+
+/**
+ * Deterministically generates an outbound BPDU on a switch port and delivers it
+ * to the immediately connected adjacent link endpoint across a single physical link.
+ *
+ * RULES & BEHAVIOR:
+ * 1. Generates outbound BPDU via createBpdu(). If generation is ineligible, returns
+ *    structured failure without attempting link traversal.
+ * 2. Resolves the active cable connection and adjacent endpoint.
+ * 3. Delivers strictly single-hop to that immediate adjacent endpoint without flooding or recursion.
+ * 4. For a switch peer, invokes receiveBpdu(). For a host or router peer, returns an explicit
+ *    ignored or dropped reception outcome.
+ * 5. Returns separate transmission and reception outcomes. Does not mutate topology, STP convergence,
+ *    MAC tables, or simulation runtime events.
+ *
+ * @param {string|Object} switchOrId - Transmitting switch device or ID/name
+ * @param {string} portName - Transmitting switchport name (e.g., 'Fa0/1')
+ * @param {Object} [options={}] - Optional transmission options
+ * @returns {Object} Structured exchange result
+ */
+function transmitBpdu(switchOrId, portName, options = {}) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) {
+        return {
+            success: false,
+            connectionId: null,
+            transmission: {
+                sourceDeviceId: null,
+                sourceDeviceName: null,
+                sourcePort: portName,
+                bpdu: null,
+                eligible: false,
+                reason: 'switch-not-found'
+            },
+            reception: null
+        };
+    }
+
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) {
+        return {
+            success: false,
+            connectionId: null,
+            transmission: {
+                sourceDeviceId: sw.id,
+                sourceDeviceName: sw.name,
+                sourcePort: portName,
+                bpdu: null,
+                eligible: false,
+                reason: 'invalid-port'
+            },
+            reception: null
+        };
+    }
+
+    // Generate outbound BPDU through existing createBpdu() helper
+    const bpdu = createBpdu(sw, normPort);
+    if (!bpdu) {
+        let ineligReason = 'ineligible-tx';
+        if (sw.stp && sw.stp.enabled === false) {
+            ineligReason = 'stp-disabled';
+        } else if (getInterfaceOperStatus(sw, normPort) === 'down') {
+            const cfg = sw.switchports?.[normPort];
+            ineligReason = cfg?.portSecurity?.errDisabled ? 'err-disabled' : (cfg?.adminDown ? 'admin-down' : 'port-down');
+        } else {
+            const runtime = getSwitchRuntime(sw.id);
+            const connId = Object.keys(runtime.ports || {}).find(cId => runtime.ports[cId] === normPort);
+            if (!connId || !getConnectionById(connId)) {
+                ineligReason = 'port-not-connected';
+            } else {
+                const stpPort = sw.stp?.ports?.[normPort];
+                if (!stpPort || stpPort.role !== 'designated') {
+                    ineligReason = 'port-not-designated';
+                }
+            }
+        }
+
+        return {
+            success: false,
+            connectionId: null,
+            transmission: {
+                sourceDeviceId: sw.id,
+                sourceDeviceName: sw.name,
+                sourcePort: normPort,
+                bpdu: null,
+                eligible: false,
+                reason: ineligReason
+            },
+            reception: null
+        };
+    }
+
+    // Resolve exact active cable connection and adjacent endpoint
+    const runtime = getSwitchRuntime(sw.id);
+    const connId = Object.keys(runtime.ports || {}).find(cId => runtime.ports[cId] === normPort);
+    const conn = connId ? getConnectionById(connId) : null;
+    if (!conn) {
+        return {
+            success: false,
+            connectionId: null,
+            transmission: {
+                sourceDeviceId: sw.id,
+                sourceDeviceName: sw.name,
+                sourcePort: normPort,
+                bpdu,
+                eligible: true,
+                reason: null
+            },
+            reception: {
+                targetDeviceId: null,
+                targetDeviceName: null,
+                targetPort: null,
+                eligible: false,
+                status: 'dropped',
+                reason: 'connection-lost',
+                details: null
+            }
+        };
+    }
+
+    const neighborId = conn.source === sw.id ? conn.target : conn.source;
+    const neighborDev = getDeviceById(neighborId);
+    if (!neighborDev) {
+        return {
+            success: false,
+            connectionId: connId,
+            transmission: {
+                sourceDeviceId: sw.id,
+                sourceDeviceName: sw.name,
+                sourcePort: normPort,
+                bpdu,
+                eligible: true,
+                reason: null
+            },
+            reception: {
+                targetDeviceId: neighborId,
+                targetDeviceName: null,
+                targetPort: null,
+                eligible: false,
+                status: 'dropped',
+                reason: 'neighbor-not-found',
+                details: null
+            }
+        };
+    }
+
+    // If neighbor is an end host or router
+    if (neighborDev.type !== 'switch') {
+        const targetPort = getDevicePortLabel(neighborDev, connId);
+        const receptionOutcome = {
+            targetDeviceId: neighborDev.id,
+            targetDeviceName: neighborDev.name,
+            targetPort: targetPort,
+            targetDeviceType: neighborDev.type,
+            eligible: false,
+            status: neighborDev.type === 'router' ? 'dropped' : 'ignored',
+            reason: `endpoint-is-${neighborDev.type}`,
+            details: null
+        };
+
+        return {
+            success: false,
+            connectionId: connId,
+            transmission: {
+                sourceDeviceId: sw.id,
+                sourceDeviceName: sw.name,
+                sourcePort: normPort,
+                bpdu,
+                eligible: true,
+                reason: null
+            },
+            reception: receptionOutcome
+        };
+    }
+
+    // Defensive read: non-mutating resolution of pre-assigned switch interface
+    const peerRuntime = getSwitchRuntime(neighborDev.id);
+    const targetPort = peerRuntime?.ports?.[connId] || null;
+    if (!targetPort) {
+        return {
+            success: false,
+            connectionId: connId,
+            transmission: {
+                sourceDeviceId: sw.id,
+                sourceDeviceName: sw.name,
+                sourcePort: normPort,
+                bpdu,
+                eligible: true,
+                reason: null
+            },
+            reception: {
+                targetDeviceId: neighborDev.id,
+                targetDeviceName: neighborDev.name,
+                targetPort: null,
+                targetDeviceType: 'switch',
+                eligible: false,
+                status: 'dropped',
+                reason: 'peer-port-unmapped',
+                details: null
+            }
+        };
+    }
+
+    // Neighbor is a switch: invoke receiveBpdu()
+    const receptionResult = receiveBpdu(neighborDev, targetPort, bpdu, {
+        connectionId: connId,
+        senderDeviceId: sw.id,
+        senderDeviceName: sw.name,
+        senderPort: normPort
+    });
+
+    return {
+        success: receptionResult.status === 'accepted',
+        connectionId: connId,
+        transmission: {
+            sourceDeviceId: sw.id,
+            sourceDeviceName: sw.name,
+            sourcePort: normPort,
+            bpdu,
+            eligible: true,
+            reason: null
+        },
+        reception: {
+            targetDeviceId: neighborDev.id,
+            targetDeviceName: neighborDev.name,
+            targetPort: targetPort,
+            targetDeviceType: neighborDev.type,
+            ...receptionResult
+        }
+    };
+}
+
 function ensureSwitchVlanState(sw) {
     if (!sw || sw.type !== 'switch') return;
     ensureSwitchStpState(sw);
