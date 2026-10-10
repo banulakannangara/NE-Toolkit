@@ -271,6 +271,7 @@ function resetLab() {
     terminalRuntime.sessions = {};
     terminalRuntime.activeDeviceId = null;
     terminalRuntime.isOpen = false;
+    clearBpduDiagnosticEvents();
 }
 
 // 1. Router creation
@@ -42578,6 +42579,685 @@ runTest('1728. Defensive peer-port resolution: missing peer-port mapping fails d
     // Verify runtime.ports was NOT mutated by allocating a fallback port
     assert.strictEqual(Object.keys(runtime1.ports).length, portCountBefore);
     assert.strictEqual(runtime1.ports[connId], undefined);
+});
+
+// 1729. Bounded BPDU diagnostics: successful exchange records exactly one correctly populated event
+runTest('1729. Bounded BPDU diagnostics: successful exchange records exactly one correctly populated event', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    const initialEvents = getBpduDiagnosticEvents();
+    assert.strictEqual(initialEvents.length, 0);
+
+    const res = transmitBpdu('Switch0', 'Fa0/1');
+    assert.strictEqual(res.success, true);
+
+    const events = getBpduDiagnosticEvents();
+    assert.strictEqual(events.length, 1);
+
+    const evt = events[0];
+    assert.strictEqual(evt.sequence, 1);
+    assert.strictEqual(evt.exchangeId, 'bpdu-1');
+    assert.strictEqual(evt.status, 'accepted');
+    assert.strictEqual(evt.connectionId, res.connectionId);
+    assert.strictEqual(evt.sourceDeviceId, sw0.id);
+    assert.strictEqual(evt.sourceDeviceName, 'Switch0');
+    assert.strictEqual(evt.sourcePort, 'Fa0/1');
+    assert.strictEqual(evt.targetDeviceId, sw1.id);
+    assert.strictEqual(evt.targetDeviceName, 'Switch1');
+    assert.strictEqual(evt.targetDeviceType, 'switch');
+    assert.strictEqual(evt.targetPort, 'Fa0/1');
+    assert.strictEqual(evt.transmissionEligible, true);
+    assert.strictEqual(evt.transmissionReason, null);
+    assert.strictEqual(evt.receptionEligible, true);
+    assert.strictEqual(evt.receptionStatus, 'accepted');
+    assert.strictEqual(evt.receptionReason, null);
+    assert.ok(evt.summary.includes('Switch0:Fa0/1 -> Switch1:Fa0/1: BPDU accepted'));
+});
+
+// 1730. Bounded BPDU diagnostics: ineligible transmission records failure reason without reception block
+runTest('1730. Bounded BPDU diagnostics: ineligible transmission records failure reason without reception block', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    // 1. Root port cannot transmit Configuration BPDUs
+    const resRootPort = transmitBpdu('Switch1', 'Fa0/1');
+    assert.strictEqual(resRootPort.success, false);
+
+    let events = getBpduDiagnosticEvents();
+    assert.strictEqual(events.length, 1);
+    const evt1 = events[0];
+    assert.strictEqual(evt1.sequence, 1);
+    assert.strictEqual(evt1.status, 'transmission-ineligible');
+    assert.strictEqual(evt1.transmissionEligible, false);
+    assert.strictEqual(evt1.transmissionReason, 'port-not-designated');
+    assert.strictEqual(evt1.receptionEligible, false);
+    assert.strictEqual(evt1.receptionStatus, null);
+    assert.strictEqual(evt1.targetDeviceId, null);
+    assert.ok(evt1.summary.includes('Switch1:Fa0/1: BPDU transmission ineligible (port-not-designated)'));
+
+    // 2. Administratively down designated port
+    sw0.switchports = sw0.switchports || {};
+    sw0.switchports['Fa0/1'] = Object.assign({}, sw0.switchports['Fa0/1'], { adminDown: true });
+    recalculateTopologyStp();
+
+    const resAdminDown = transmitBpdu('Switch0', 'Fa0/1');
+    assert.strictEqual(resAdminDown.success, false);
+
+    events = getBpduDiagnosticEvents();
+    assert.strictEqual(events.length, 2);
+    const evt2 = events[1];
+    assert.strictEqual(evt2.sequence, 2);
+    assert.strictEqual(evt2.status, 'transmission-ineligible');
+    assert.strictEqual(evt2.transmissionReason, 'admin-down');
+    assert.ok(evt2.summary.includes('Switch0:Fa0/1: BPDU transmission ineligible (admin-down)'));
+});
+
+// 1731. Bounded BPDU diagnostics: unsupported peer outcomes differentiate PC (ignored) and router (dropped)
+runTest('1731. Bounded BPDU diagnostics: unsupported peer outcomes differentiate PC (ignored) and router (dropped)', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('pc', 300, 100);     // PC0
+    addDevice('router', 100, 300); // Router0
+    const [sw0, pc0, r0] = networkState.devices;
+    sw0.stpPriority = 4096;
+
+    addConnection('Switch0', 'PC0');     // Switch0:Fa0/1 <-> PC0:FastEthernet0
+    addConnection('Switch0', 'Router0'); // Switch0:Fa0/2 <-> Router0:Gig0/0
+    recalculateTopologyStp();
+
+    // 1. Transmit to PC
+    const resPc = transmitBpdu('Switch0', 'Fa0/1');
+    assert.strictEqual(resPc.success, false);
+    assert.strictEqual(resPc.reception.status, 'ignored');
+
+    let events = getBpduDiagnosticEvents();
+    assert.strictEqual(events.length, 1);
+    const evtPc = events[0];
+    assert.strictEqual(evtPc.status, 'ignored');
+    assert.strictEqual(evtPc.targetDeviceId, pc0.id);
+    assert.strictEqual(evtPc.targetDeviceType, 'pc');
+    assert.strictEqual(evtPc.receptionStatus, 'ignored');
+    assert.strictEqual(evtPc.receptionReason, 'endpoint-is-pc');
+    assert.ok(evtPc.summary.includes('ignored (endpoint-is-pc)'));
+
+    // 2. Transmit to Router
+    const resRouter = transmitBpdu('Switch0', 'Fa0/2');
+    assert.strictEqual(resRouter.success, false);
+    assert.strictEqual(resRouter.reception.status, 'dropped');
+
+    events = getBpduDiagnosticEvents();
+    assert.strictEqual(events.length, 2);
+    const evtRouter = events[1];
+    assert.strictEqual(evtRouter.status, 'unsupported-peer');
+    assert.strictEqual(evtRouter.targetDeviceId, r0.id);
+    assert.strictEqual(evtRouter.targetDeviceType, 'router');
+    assert.strictEqual(evtRouter.receptionStatus, 'dropped');
+    assert.strictEqual(evtRouter.receptionReason, 'endpoint-is-router');
+    assert.ok(evtRouter.summary.includes('dropped (endpoint-is-router)'));
+});
+
+// 1732. Bounded BPDU diagnostics: receiver rejection accurately recorded when reproducible through public API
+runTest('1732. Bounded BPDU diagnostics: receiver rejection accurately recorded when reproducible through public API', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    // 1. Receiver interface administratively shut down
+    sw1.switchports = sw1.switchports || {};
+    sw1.switchports['Fa0/1'] = Object.assign({}, sw1.switchports['Fa0/1'], { adminDown: true });
+
+    const resAdmin = transmitBpdu('Switch0', 'Fa0/1');
+    assert.strictEqual(resAdmin.success, false);
+    assert.strictEqual(resAdmin.reception.status, 'dropped');
+    assert.strictEqual(resAdmin.reception.reason, 'admin-down');
+
+    let events = getBpduDiagnosticEvents();
+    assert.strictEqual(events.length, 1);
+    const evtAdmin = events[0];
+    assert.strictEqual(evtAdmin.status, 'receiver-rejected');
+    assert.strictEqual(evtAdmin.receptionStatus, 'dropped');
+    assert.strictEqual(evtAdmin.receptionReason, 'admin-down');
+    assert.ok(evtAdmin.summary.includes('BPDU rejected by receiver (admin-down)'));
+
+    // Restore receiver port
+    delete sw1.switchports['Fa0/1'].adminDown;
+
+    // 2. Receiving switch has STP disabled
+    sw1.stp = sw1.stp || {};
+    sw1.stp.enabled = false;
+
+    const resDisabled = transmitBpdu('Switch0', 'Fa0/1');
+    assert.strictEqual(resDisabled.success, false);
+    assert.strictEqual(resDisabled.reception.status, 'dropped');
+    assert.strictEqual(resDisabled.reception.reason, 'stp-disabled');
+
+    events = getBpduDiagnosticEvents();
+    assert.strictEqual(events.length, 2);
+    const evtDisabled = events[1];
+    assert.strictEqual(evtDisabled.status, 'receiver-rejected');
+    assert.strictEqual(evtDisabled.receptionReason, 'stp-disabled');
+    assert.ok(evtDisabled.summary.includes('BPDU rejected by receiver (stp-disabled)'));
+});
+
+// 1733. Bounded BPDU diagnostics: delivery failure recorded when peer port is unmapped
+runTest('1733. Bounded BPDU diagnostics: delivery failure recorded when peer port is unmapped', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    const runtime1 = networkState.switchRuntime[sw1.id];
+    const connId = Object.keys(runtime1.ports || {})[0];
+    assert.ok(connId);
+
+    // Unmap connection on peer switch
+    delete runtime1.ports[connId];
+
+    const res = transmitBpdu('Switch0', 'Fa0/1');
+    assert.strictEqual(res.success, false);
+
+    const events = getBpduDiagnosticEvents();
+    assert.strictEqual(events.length, 1);
+    const evt = events[0];
+    assert.strictEqual(evt.status, 'delivery-failure');
+    assert.strictEqual(evt.receptionStatus, 'dropped');
+    assert.strictEqual(evt.receptionReason, 'peer-port-unmapped');
+    assert.ok(evt.summary.includes('delivery failure (peer-port-unmapped)'));
+});
+
+// 1734. Bounded BPDU diagnostics: payload rejection normalized to rejected-payload
+runTest('1734. Bounded BPDU diagnostics: payload rejection normalized to rejected-payload', () => {
+    clearBpduDiagnosticEvents();
+
+    // Verify recordBpduDiagnosticEvent directly normalizes payload validation failures
+    const syntheticResult1 = {
+        success: false,
+        connectionId: 'conn-test',
+        transmission: {
+            sourceDeviceId: 'Switch0',
+            sourceDeviceName: 'Switch0',
+            sourcePort: 'Fa0/1',
+            eligible: true,
+            reason: null
+        },
+        reception: {
+            targetDeviceId: 'Switch1',
+            targetDeviceName: 'Switch1',
+            targetPort: 'Fa0/1',
+            targetDeviceType: 'switch',
+            eligible: false,
+            status: 'dropped',
+            reason: 'invalid-root-bridge-id'
+        }
+    };
+
+    const evt1 = recordBpduDiagnosticEvent(syntheticResult1);
+    assert.strictEqual(evt1.status, 'rejected-payload');
+    assert.strictEqual(evt1.receptionReason, 'invalid-root-bridge-id');
+    assert.ok(evt1.summary.includes('invalid payload: invalid-root-bridge-id'));
+
+    const syntheticResult2 = {
+        success: false,
+        connectionId: 'conn-test',
+        transmission: {
+            sourceDeviceId: 'Switch0',
+            sourceDeviceName: 'Switch0',
+            sourcePort: 'Fa0/1',
+            eligible: true,
+            reason: null
+        },
+        reception: {
+            targetDeviceId: 'Switch1',
+            targetDeviceName: 'Switch1',
+            targetPort: 'Fa0/1',
+            targetDeviceType: 'switch',
+            eligible: false,
+            status: 'dropped',
+            reason: 'message-age-exceeds-max-age'
+        }
+    };
+
+    const evt2 = recordBpduDiagnosticEvent(syntheticResult2);
+    assert.strictEqual(evt2.status, 'rejected-payload');
+    assert.strictEqual(evt2.receptionReason, 'message-age-exceeds-max-age');
+    assert.ok(evt2.summary.includes('invalid payload: message-age-exceeds-max-age'));
+});
+
+// 1735. Bounded BPDU diagnostics: monotonic sequence numbering and deterministic ordering
+runTest('1735. Bounded BPDU diagnostics: monotonic sequence numbering and deterministic ordering', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    for (let i = 0; i < 5; i++) {
+        transmitBpdu('Switch0', 'Fa0/1');
+    }
+
+    const events = getBpduDiagnosticEvents();
+    assert.strictEqual(events.length, 5);
+
+    const sequences = events.map(e => e.sequence);
+    const exchangeIds = events.map(e => e.exchangeId);
+
+    assert.deepStrictEqual(sequences, [1, 2, 3, 4, 5]);
+    assert.deepStrictEqual(exchangeIds, ['bpdu-1', 'bpdu-2', 'bpdu-3', 'bpdu-4', 'bpdu-5']);
+});
+
+// 1736. Bounded BPDU diagnostics: bounded storage capacity (50) and FIFO eviction
+runTest('1736. Bounded BPDU diagnostics: bounded storage capacity (50) and FIFO eviction', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    // Transmit 65 BPDUs to exceed maximum capacity of 50
+    for (let i = 0; i < 65; i++) {
+        transmitBpdu('Switch0', 'Fa0/1');
+    }
+
+    const events = getBpduDiagnosticEvents();
+    assert.strictEqual(events.length, 50, 'Buffer capacity must never exceed 50');
+
+    // Earliest 15 events (sequences 1 to 15) must be evicted
+    assert.strictEqual(events[0].sequence, 16);
+    assert.strictEqual(events[0].exchangeId, 'bpdu-16');
+
+    // Latest event must be sequence 65
+    assert.strictEqual(events[49].sequence, 65);
+    assert.strictEqual(events[49].exchangeId, 'bpdu-65');
+
+    // Contiguous sequence preservation
+    for (let i = 0; i < 50; i++) {
+        assert.strictEqual(events[i].sequence, 16 + i);
+    }
+});
+
+// 1737. Bounded BPDU diagnostics: getBpduDiagnosticEvents filtering by device, port, connection, and status
+runTest('1737. Bounded BPDU diagnostics: getBpduDiagnosticEvents filtering by device, port, connection, and status', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('switch', 300, 100); // Switch1
+    addDevice('pc', 100, 300);     // PC0
+    const [sw0, sw1, pc0] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    addConnection('Switch0', 'PC0');     // Fa0/2 <-> FastEthernet0
+    recalculateTopologyStp();
+
+    transmitBpdu('Switch0', 'Fa0/1'); // evt 1: accepted
+    transmitBpdu('Switch0', 'Fa0/2'); // evt 2: ignored (PC)
+    transmitBpdu('Switch1', 'Fa0/1'); // evt 3: transmission-ineligible (root port)
+
+    const allEvents = getBpduDiagnosticEvents();
+    assert.strictEqual(allEvents.length, 3);
+
+    // Filter by deviceId (matches either source or target)
+    const pcEvents = getBpduDiagnosticEvents({ deviceId: 'PC0' });
+    assert.strictEqual(pcEvents.length, 1);
+    assert.strictEqual(pcEvents[0].targetDeviceId, pc0.id);
+
+    const sw1Events = getBpduDiagnosticEvents({ deviceId: 'Switch1' });
+    assert.strictEqual(sw1Events.length, 2); // Event 1 (target) and Event 3 (source)
+
+    // Filter by sourceDeviceId
+    const sw0SourceEvents = getBpduDiagnosticEvents({ sourceDeviceId: 'Switch0' });
+    assert.strictEqual(sw0SourceEvents.length, 2);
+
+    // Filter by targetDeviceId
+    const sw1TargetEvents = getBpduDiagnosticEvents({ targetDeviceId: 'Switch1' });
+    assert.strictEqual(sw1TargetEvents.length, 1);
+
+    // Filter by port
+    const fa02Events = getBpduDiagnosticEvents({ port: 'Fa0/2' });
+    assert.strictEqual(fa02Events.length, 1);
+    assert.strictEqual(fa02Events[0].sourcePort, 'Fa0/2');
+
+    // Filter by status
+    const acceptedEvents = getBpduDiagnosticEvents({ status: 'accepted' });
+    assert.strictEqual(acceptedEvents.length, 1);
+    assert.strictEqual(acceptedEvents[0].sequence, 1);
+
+    const ineligEvents = getBpduDiagnosticEvents({ status: 'transmission-ineligible' });
+    assert.strictEqual(ineligEvents.length, 1);
+    assert.strictEqual(ineligEvents[0].sequence, 3);
+});
+
+// 1738. Bounded BPDU diagnostics: defensive copies prevent mutation of stored history
+runTest('1738. Bounded BPDU diagnostics: defensive copies prevent mutation of stored history', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1');
+    recalculateTopologyStp();
+
+    transmitBpdu('Switch0', 'Fa0/1');
+
+    const copy1 = getBpduDiagnosticEvents();
+    assert.strictEqual(copy1.length, 1);
+
+    // Mutate the returned array and object
+    copy1[0].status = 'CORRUPTED';
+    copy1[0].summary = 'CORRUPTED SUMMARY';
+    copy1.push({ fake: true });
+
+    // Retrieve fresh copy and verify internal store remained pure
+    const copy2 = getBpduDiagnosticEvents();
+    assert.strictEqual(copy2.length, 1);
+    assert.strictEqual(copy2[0].status, 'accepted');
+    assert.ok(copy2[0].summary.includes('BPDU accepted'));
+});
+
+// 1739. Bounded BPDU diagnostics: full lab reset and clearBpduDiagnosticEvents behavior
+runTest('1739. Bounded BPDU diagnostics: full lab reset and clearBpduDiagnosticEvents behavior', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1');
+    recalculateTopologyStp();
+
+    transmitBpdu('Switch0', 'Fa0/1');
+    transmitBpdu('Switch0', 'Fa0/1');
+    assert.strictEqual(getBpduDiagnosticEvents().length, 2);
+
+    // Clear via explicit helper
+    clearBpduDiagnosticEvents();
+    assert.strictEqual(getBpduDiagnosticEvents().length, 0);
+
+    // Sequence resets to 1
+    transmitBpdu('Switch0', 'Fa0/1');
+    const fresh = getBpduDiagnosticEvents();
+    assert.strictEqual(fresh.length, 1);
+    assert.strictEqual(fresh[0].sequence, 1);
+    assert.strictEqual(fresh[0].exchangeId, 'bpdu-1');
+
+    // Clear via resetLab
+    resetLab();
+    assert.strictEqual(getBpduDiagnosticEvents().length, 0);
+    assert.strictEqual(networkState.bpduDiagnostics.nextSequence, 1);
+});
+
+// 1740. Bounded BPDU diagnostics: state isolation across repeated transmissions
+runTest('1740. Bounded BPDU diagnostics: state isolation across repeated transmissions', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1');
+    recalculateTopologyStp();
+
+    // Snapshot state
+    const stp0Snap = JSON.stringify(sw0.stp);
+    const stp1Snap = JSON.stringify(sw1.stp);
+    const devSnap = JSON.stringify(networkState.devices);
+    const connSnap = JSON.stringify(networkState.connections);
+    const histLen = (networkState.history || []).length;
+    const macLen0 = Object.keys(networkState.switchRuntime[sw0.id]?.macTable || {}).length;
+    const macLen1 = Object.keys(networkState.switchRuntime[sw1.id]?.macTable || {}).length;
+    const simEvtLen = (networkState.simulationRuntime?.events || []).length;
+
+    // Transmit 20 BPDUs
+    for (let i = 0; i < 20; i++) {
+        transmitBpdu('Switch0', 'Fa0/1');
+    }
+
+    // Verify complete state immutability
+    assert.strictEqual(JSON.stringify(sw0.stp), stp0Snap, 'sw0.stp must not be mutated');
+    assert.strictEqual(JSON.stringify(sw1.stp), stp1Snap, 'sw1.stp must not be mutated');
+    assert.strictEqual(JSON.stringify(networkState.devices), devSnap, 'devices must not be mutated');
+    assert.strictEqual(JSON.stringify(networkState.connections), connSnap, 'connections must not be mutated');
+    assert.strictEqual((networkState.history || []).length, histLen, 'undo/redo history must not be mutated');
+    assert.strictEqual(Object.keys(networkState.switchRuntime[sw0.id]?.macTable || {}).length, macLen0, 'MAC tables must not be mutated');
+    assert.strictEqual(Object.keys(networkState.switchRuntime[sw1.id]?.macTable || {}).length, macLen1, 'MAC tables must not be mutated');
+    assert.strictEqual((networkState.simulationRuntime?.events || []).length, simEvtLen, 'simulationRuntime.events must not be mutated');
+});
+
+// 1741. Bounded BPDU diagnostics: transmission options and exactly-once recording
+runTest('1741. Bounded BPDU diagnostics: transmission options and exactly-once recording', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1');
+    recalculateTopologyStp();
+
+    // 1. Opt-out of diagnostic recording via recordDiagnostic: false
+    const resOptOut = transmitBpdu('Switch0', 'Fa0/1', { recordDiagnostic: false });
+    assert.strictEqual(resOptOut.success, true);
+    assert.strictEqual(getBpduDiagnosticEvents().length, 0, 'No event should be recorded when recordDiagnostic is false');
+
+    // 2. Opt-in to event attachment via attachEvent: true
+    const resAttach = transmitBpdu('Switch0', 'Fa0/1', { attachEvent: true });
+    assert.strictEqual(resAttach.success, true);
+    assert.ok(resAttach.event, 'res.event must be attached when attachEvent is true');
+    assert.strictEqual(resAttach.event.sequence, 1);
+    assert.strictEqual(resAttach.event.status, 'accepted');
+
+    const storedEvents = getBpduDiagnosticEvents();
+    assert.strictEqual(storedEvents.length, 1, 'Exactly one event must be recorded');
+    assert.strictEqual(storedEvents[0].sequence, 1);
+});
+
+// 1742. Diagnostic lifecycle: clearing topology via undoable clearCanvas does not erase diagnostic history
+runTest('1742. Diagnostic lifecycle: clearing topology via undoable clearCanvas does not erase diagnostic history', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1');
+    recalculateTopologyStp();
+
+    transmitBpdu('Switch0', 'Fa0/1');
+    assert.strictEqual(getBpduDiagnosticEvents().length, 1);
+
+    // Invoke clearCanvas (undoable action in topology editor)
+    clearCanvas();
+    assert.strictEqual(networkState.devices.length, 0, 'Topology devices should be cleared');
+    assert.strictEqual(networkState.connections.length, 0, 'Topology connections should be cleared');
+
+    // Diagnostic history must NOT be silently erased by clearCanvas
+    const eventsAfterClear = getBpduDiagnosticEvents();
+    assert.strictEqual(eventsAfterClear.length, 1, 'Diagnostic history must survive clearCanvas');
+    assert.strictEqual(eventsAfterClear[0].exchangeId, 'bpdu-1');
+
+    // Undo the clear action and verify diagnostic events remain intact
+    undo();
+    assert.strictEqual(networkState.devices.length, 2, 'Topology should be restored after undo');
+    assert.strictEqual(getBpduDiagnosticEvents().length, 1);
+});
+
+// 1743. Diagnostic summary formatter: supports both raw exchange results and flat stored diagnostic records
+runTest('1743. Diagnostic summary formatter: supports both raw exchange results and flat stored diagnostic records', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('switch', 300, 100); // Switch1
+    addDevice('pc', 100, 300);     // PC0
+    const [sw0, sw1, pc0] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    addConnection('Switch0', 'PC0');     // Fa0/2 <-> FastEthernet0
+    recalculateTopologyStp();
+
+    // 1. Accepted exchange
+    const rawAccepted = transmitBpdu('Switch0', 'Fa0/1', { attachEvent: true });
+    const storedAccepted = rawAccepted.event;
+    assert.strictEqual(formatBpduDiagnosticSummary(rawAccepted), 'Switch0:Fa0/1 -> Switch1:Fa0/1: BPDU accepted');
+    assert.strictEqual(formatBpduDiagnosticSummary(storedAccepted), 'Switch0:Fa0/1 -> Switch1:Fa0/1: BPDU accepted');
+
+    // 2. Ineligible transmission
+    const rawIneligible = transmitBpdu('Switch1', 'Fa0/1', { attachEvent: true });
+    const storedIneligible = rawIneligible.event;
+    assert.strictEqual(formatBpduDiagnosticSummary(rawIneligible), 'Switch1:Fa0/1: BPDU transmission ineligible (port-not-designated)');
+    assert.strictEqual(formatBpduDiagnosticSummary(storedIneligible), 'Switch1:Fa0/1: BPDU transmission ineligible (port-not-designated)');
+
+    // 3. Ignored endpoint (PC)
+    const rawIgnored = transmitBpdu('Switch0', 'Fa0/2', { attachEvent: true });
+    const storedIgnored = rawIgnored.event;
+    assert.strictEqual(formatBpduDiagnosticSummary(rawIgnored), 'Switch0:Fa0/2 -> PC0:FastEthernet0: ignored (endpoint-is-pc)');
+    assert.strictEqual(formatBpduDiagnosticSummary(storedIgnored), 'Switch0:Fa0/2 -> PC0:FastEthernet0: ignored (endpoint-is-pc)');
+
+    // 4. Rejected payload
+    const rawPayloadFail = {
+        success: false,
+        connectionId: 'conn-1',
+        transmission: {
+            sourceDeviceId: 'Switch0',
+            sourceDeviceName: 'Switch0',
+            sourcePort: 'Fa0/1',
+            eligible: true,
+            reason: null
+        },
+        reception: {
+            targetDeviceId: 'Switch1',
+            targetDeviceName: 'Switch1',
+            targetPort: 'Fa0/1',
+            targetDeviceType: 'switch',
+            eligible: false,
+            status: 'dropped',
+            reason: 'invalid-root-bridge-id'
+        }
+    };
+    const storedPayloadFail = recordBpduDiagnosticEvent(rawPayloadFail);
+    assert.strictEqual(formatBpduDiagnosticSummary(rawPayloadFail), 'Switch0:Fa0/1 -> Switch1:Fa0/1: BPDU rejected (invalid payload: invalid-root-bridge-id)');
+    assert.strictEqual(formatBpduDiagnosticSummary(storedPayloadFail), 'Switch0:Fa0/1 -> Switch1:Fa0/1: BPDU rejected (invalid payload: invalid-root-bridge-id)');
+
+    // 5. Invalid input
+    assert.strictEqual(formatBpduDiagnosticSummary(null), 'Invalid BPDU event');
+    assert.strictEqual(formatBpduDiagnosticSummary('not an object'), 'Invalid BPDU event');
+});
+
+// 1744. Capacity and store resilience: maxEvents positive integer validation and fallback to 50
+runTest('1744. Capacity and store resilience: maxEvents positive integer validation and fallback to 50', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1');
+    recalculateTopologyStp();
+
+    // Custom valid positive integer capacity
+    networkState.bpduDiagnostics.maxEvents = 3;
+    for (let i = 0; i < 5; i++) {
+        transmitBpdu('Switch0', 'Fa0/1');
+    }
+    assert.strictEqual(getBpduDiagnosticEvents().length, 3, 'Capacity of 3 must be strictly respected');
+    assert.strictEqual(getBpduDiagnosticEvents()[0].sequence, 3);
+    assert.strictEqual(getBpduDiagnosticEvents()[2].sequence, 5);
+
+    // Invalid non-finite values must fall back to 50
+    const invalidCapacities = [Infinity, -Infinity, NaN, 0, -5, 12.5, null, undefined, '100'];
+    invalidCapacities.forEach((invalidCap) => {
+        clearBpduDiagnosticEvents();
+        networkState.bpduDiagnostics.maxEvents = invalidCap;
+
+        for (let i = 0; i < 55; i++) {
+            transmitBpdu('Switch0', 'Fa0/1');
+        }
+        assert.strictEqual(
+            getBpduDiagnosticEvents().length,
+            50,
+            'Invalid maxEvents (' + invalidCap + ') must fall back to default capacity 50'
+        );
+        assert.strictEqual(getBpduDiagnosticEvents()[0].sequence, 6);
+        assert.strictEqual(getBpduDiagnosticEvents()[49].sequence, 55);
+    });
+});
+
+// 1745. Capacity and store resilience: corrupted or missing events array safely recovers
+runTest('1745. Capacity and store resilience: corrupted or missing events array safely recovers', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1');
+    recalculateTopologyStp();
+
+    // 1. events deleted / set to null
+    networkState.bpduDiagnostics.events = null;
+    networkState.bpduDiagnostics.nextSequence = 10;
+
+    // getBpduDiagnosticEvents safely returns []
+    assert.deepStrictEqual(getBpduDiagnosticEvents(), []);
+
+    // recordBpduDiagnosticEvent safely recovers array without losing sequence counter
+    const res1 = transmitBpdu('Switch0', 'Fa0/1');
+    assert.strictEqual(res1.success, true);
+    assert.strictEqual(getBpduDiagnosticEvents().length, 1);
+    assert.strictEqual(getBpduDiagnosticEvents()[0].sequence, 10);
+    assert.strictEqual(getBpduDiagnosticEvents()[0].exchangeId, 'bpdu-10');
+
+    // 2. events set to string / non-array
+    networkState.bpduDiagnostics.events = 'corrupted-string';
+    assert.deepStrictEqual(getBpduDiagnosticEvents(), []);
+
+    const res2 = transmitBpdu('Switch0', 'Fa0/1');
+    assert.strictEqual(res2.success, true);
+    assert.strictEqual(getBpduDiagnosticEvents().length, 1);
+    assert.strictEqual(getBpduDiagnosticEvents()[0].sequence, 11);
+    assert.strictEqual(getBpduDiagnosticEvents()[0].exchangeId, 'bpdu-11');
 });
 
 console.log('----------------------------------------------------');

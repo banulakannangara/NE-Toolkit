@@ -49,7 +49,12 @@ const networkState = {
     connectionTestState: null,
     lastConnectionTestResult: null,
     history: [],
-    future: []
+    future: [],
+    bpduDiagnostics: {
+        events: [],
+        nextSequence: 1,
+        maxEvents: 50
+    }
 };
 
 let dragState = null;
@@ -7623,9 +7628,19 @@ function receiveBpdu(switchOrId, portName, bpdu, context = {}) {
  * @returns {Object} Structured exchange result
  */
 function transmitBpdu(switchOrId, portName, options = {}) {
+    function finalize(res) {
+        if (!options || options.recordDiagnostic !== false) {
+            const diagEvent = recordBpduDiagnosticEvent(res);
+            if (options && options.attachEvent) {
+                res.event = diagEvent;
+            }
+        }
+        return res;
+    }
+
     const sw = getSwitchDevice(switchOrId);
     if (!sw) {
-        return {
+        return finalize({
             success: false,
             connectionId: null,
             transmission: {
@@ -7637,12 +7652,12 @@ function transmitBpdu(switchOrId, portName, options = {}) {
                 reason: 'switch-not-found'
             },
             reception: null
-        };
+        });
     }
 
     const normPort = normalizeSwitchPortName(portName);
     if (!normPort) {
-        return {
+        return finalize({
             success: false,
             connectionId: null,
             transmission: {
@@ -7654,7 +7669,7 @@ function transmitBpdu(switchOrId, portName, options = {}) {
                 reason: 'invalid-port'
             },
             reception: null
-        };
+        });
     }
 
     // Generate outbound BPDU through existing createBpdu() helper
@@ -7679,7 +7694,7 @@ function transmitBpdu(switchOrId, portName, options = {}) {
             }
         }
 
-        return {
+        return finalize({
             success: false,
             connectionId: null,
             transmission: {
@@ -7691,7 +7706,7 @@ function transmitBpdu(switchOrId, portName, options = {}) {
                 reason: ineligReason
             },
             reception: null
-        };
+        });
     }
 
     // Resolve exact active cable connection and adjacent endpoint
@@ -7699,7 +7714,7 @@ function transmitBpdu(switchOrId, portName, options = {}) {
     const connId = Object.keys(runtime.ports || {}).find(cId => runtime.ports[cId] === normPort);
     const conn = connId ? getConnectionById(connId) : null;
     if (!conn) {
-        return {
+        return finalize({
             success: false,
             connectionId: null,
             transmission: {
@@ -7719,13 +7734,13 @@ function transmitBpdu(switchOrId, portName, options = {}) {
                 reason: 'connection-lost',
                 details: null
             }
-        };
+        });
     }
 
     const neighborId = conn.source === sw.id ? conn.target : conn.source;
     const neighborDev = getDeviceById(neighborId);
     if (!neighborDev) {
-        return {
+        return finalize({
             success: false,
             connectionId: connId,
             transmission: {
@@ -7745,7 +7760,7 @@ function transmitBpdu(switchOrId, portName, options = {}) {
                 reason: 'neighbor-not-found',
                 details: null
             }
-        };
+        });
     }
 
     // If neighbor is an end host or router
@@ -7762,7 +7777,7 @@ function transmitBpdu(switchOrId, portName, options = {}) {
             details: null
         };
 
-        return {
+        return finalize({
             success: false,
             connectionId: connId,
             transmission: {
@@ -7774,14 +7789,14 @@ function transmitBpdu(switchOrId, portName, options = {}) {
                 reason: null
             },
             reception: receptionOutcome
-        };
+        });
     }
 
     // Defensive read: non-mutating resolution of pre-assigned switch interface
     const peerRuntime = getSwitchRuntime(neighborDev.id);
     const targetPort = peerRuntime?.ports?.[connId] || null;
     if (!targetPort) {
-        return {
+        return finalize({
             success: false,
             connectionId: connId,
             transmission: {
@@ -7802,7 +7817,7 @@ function transmitBpdu(switchOrId, portName, options = {}) {
                 reason: 'peer-port-unmapped',
                 details: null
             }
-        };
+        });
     }
 
     // Neighbor is a switch: invoke receiveBpdu()
@@ -7813,7 +7828,7 @@ function transmitBpdu(switchOrId, portName, options = {}) {
         senderPort: normPort
     });
 
-    return {
+    return finalize({
         success: receptionResult.status === 'accepted',
         connectionId: connId,
         transmission: {
@@ -7831,7 +7846,229 @@ function transmitBpdu(switchOrId, portName, options = {}) {
             targetDeviceType: neighborDev.type,
             ...receptionResult
         }
+    });
+}
+
+/**
+ * Produces a concise, deterministic human-readable summary string for a BPDU diagnostic event.
+ *
+ * Supports both:
+ * 1. Raw transmitBpdu() exchange results ({ transmission: {...}, reception: {...} })
+ * 2. Flat diagnostic event records ({ transmissionEligible, sourceDeviceName, ... })
+ *
+ * @param {Object} eventOrResult - Diagnostic event or raw exchange result
+ * @returns {string} Concise summary
+ */
+function formatBpduDiagnosticSummary(eventOrResult) {
+    if (!eventOrResult || typeof eventOrResult !== 'object') {
+        return 'Invalid BPDU event';
+    }
+
+    const isRecord = 'transmissionEligible' in eventOrResult;
+
+    const tx = eventOrResult.transmission || {};
+    const txEligible = isRecord ? Boolean(eventOrResult.transmissionEligible) : Boolean(tx.eligible);
+    const txReason = isRecord ? eventOrResult.transmissionReason : tx.reason;
+    const srcName = isRecord
+        ? (eventOrResult.sourceDeviceName || eventOrResult.sourceDeviceId)
+        : (tx.sourceDeviceName || tx.sourceDeviceId);
+    const srcPort = isRecord ? eventOrResult.sourcePort : tx.sourcePort;
+    const src = `${srcName || 'Unknown'}:${srcPort || '?'}`;
+
+    if (!txEligible) {
+        return `${src}: BPDU transmission ineligible (${txReason || 'refused'})`;
+    }
+
+    const rx = eventOrResult.reception || null;
+    const dstName = isRecord
+        ? (eventOrResult.targetDeviceName || eventOrResult.targetDeviceId)
+        : (rx ? (rx.targetDeviceName || rx.targetDeviceId) : null);
+    const dstPort = isRecord ? eventOrResult.targetPort : (rx ? rx.targetPort : null);
+    const dst = `${dstName || 'Unknown'}:${dstPort || '?'}`;
+
+    const rxStatus = isRecord ? eventOrResult.receptionStatus : rx?.status;
+    const rxReason = isRecord ? eventOrResult.receptionReason : rx?.reason;
+
+    if (!rxStatus && (!rx && !isRecord)) {
+        return `${src} -> ${dst}: delivery failure (${eventOrResult.reason || 'no-reception'})`;
+    }
+
+    if (rxStatus === 'accepted') {
+        return `${src} -> ${dst}: BPDU accepted`;
+    }
+    if (rxStatus === 'ignored') {
+        return `${src} -> ${dst}: ignored (${rxReason || 'unsupported-peer'})`;
+    }
+    if (rxStatus === 'dropped') {
+        if (rxReason && (rxReason.startsWith('invalid-') || rxReason.startsWith('contradictory-') || rxReason.startsWith('message-age-') || rxReason.startsWith('payload-'))) {
+            return `${src} -> ${dst}: BPDU rejected (invalid payload: ${rxReason})`;
+        }
+        if (rxReason && rxReason.startsWith('endpoint-is-')) {
+            return `${src} -> ${dst}: dropped (${rxReason})`;
+        }
+        if (rxReason === 'peer-port-unmapped' || rxReason === 'connection-lost' || rxReason === 'neighbor-not-found') {
+            return `${src} -> ${dst}: delivery failure (${rxReason})`;
+        }
+        return `${src} -> ${dst}: BPDU rejected by receiver (${rxReason || 'dropped'})`;
+    }
+
+    if (isRecord && eventOrResult.status === 'delivery-failure') {
+        return `${src} -> ${dst}: delivery failure (${rxReason || 'delivery-failure'})`;
+    }
+
+    return `${src} -> ${dst}: BPDU exchange completed (${eventOrResult.status || 'unknown'})`;
+}
+
+/**
+ * Normalizes and records a BPDU transmission/reception outcome into the bounded diagnostic store.
+ *
+ * RULES:
+ * 1. Appends exactly one record per invocation.
+ * 2. Enforces maximum capacity (FIFO eviction of oldest record).
+ * 3. Assigns a monotonically increasing sequence integer and exchangeId.
+ * 4. Never mutates STP convergence, topology, MAC tables, simulation state, or undo history.
+ * 5. Returns a defensive shallow copy of the recorded event.
+ *
+ * @param {Object} exchangeResult - Outcome returned by transmitBpdu()
+ * @returns {Object} Safe copy of the recorded event
+ */
+function recordBpduDiagnosticEvent(exchangeResult) {
+    if (!networkState.bpduDiagnostics || typeof networkState.bpduDiagnostics !== 'object') {
+        networkState.bpduDiagnostics = {
+            events: [],
+            nextSequence: 1,
+            maxEvents: 50
+        };
+    }
+
+    const store = networkState.bpduDiagnostics;
+    const max = Number.isInteger(store.maxEvents) && store.maxEvents > 0 ? store.maxEvents : 50;
+
+    if (!Array.isArray(store.events)) {
+        store.events = [];
+    }
+
+    const tx = exchangeResult?.transmission || {};
+    const rx = exchangeResult?.reception || null;
+
+    // Determine normalized diagnostic status
+    let status = 'delivery-failure';
+    if (!tx.eligible) {
+        status = 'transmission-ineligible';
+    } else if (!rx) {
+        status = 'delivery-failure';
+    } else if (rx.status === 'accepted') {
+        status = 'accepted';
+    } else if (rx.status === 'ignored') {
+        status = 'ignored';
+    } else if (rx.status === 'dropped') {
+        if (rx.reason && (rx.reason.startsWith('invalid-') || rx.reason.startsWith('contradictory-') || rx.reason.startsWith('message-age-') || rx.reason.startsWith('payload-'))) {
+            status = 'rejected-payload';
+        } else if (rx.reason && rx.reason.startsWith('endpoint-is-')) {
+            status = 'unsupported-peer';
+        } else if (rx.reason === 'peer-port-unmapped' || rx.reason === 'connection-lost' || rx.reason === 'neighbor-not-found') {
+            status = 'delivery-failure';
+        } else {
+            status = 'receiver-rejected';
+        }
+    }
+
+    const seq = store.nextSequence || 1;
+    store.nextSequence = seq + 1;
+
+    const record = {
+        sequence: seq,
+        exchangeId: `bpdu-${seq}`,
+        connectionId: exchangeResult?.connectionId || null,
+        status,
+        sourceDeviceId: tx.sourceDeviceId || null,
+        sourceDeviceName: tx.sourceDeviceName || null,
+        sourcePort: tx.sourcePort || null,
+        targetDeviceId: rx ? (rx.targetDeviceId || null) : null,
+        targetDeviceName: rx ? (rx.targetDeviceName || null) : null,
+        targetDeviceType: rx ? (rx.targetDeviceType || null) : null,
+        targetPort: rx ? (rx.targetPort || null) : null,
+        transmissionEligible: Boolean(tx.eligible),
+        transmissionReason: tx.reason || null,
+        receptionEligible: rx ? Boolean(rx.eligible) : false,
+        receptionStatus: rx ? (rx.status || null) : null,
+        receptionReason: rx ? (rx.reason || null) : null,
+        summary: formatBpduDiagnosticSummary(exchangeResult),
+        timestamp: Date.now()
     };
+
+    store.events.push(record);
+
+    while (store.events.length > max) {
+        store.events.shift();
+    }
+
+    return Object.assign({}, record);
+}
+
+/**
+ * Returns a defensive copy of recorded BPDU diagnostic events, optionally filtered.
+ *
+ * Supported filters:
+ * - deviceId: matches sourceDeviceId, sourceDeviceName, targetDeviceId, or targetDeviceName
+ * - sourceDeviceId: matches sourceDeviceId or sourceDeviceName
+ * - targetDeviceId: matches targetDeviceId or targetDeviceName
+ * - port: matches sourcePort or targetPort
+ * - connectionId: matches connectionId
+ * - status: matches status or receptionStatus
+ *
+ * @param {Object} [filter={}] - Filtering criteria
+ * @returns {Array<Object>} Cloned diagnostic event records in sequence order
+ */
+function getBpduDiagnosticEvents(filter = {}) {
+    const events = Array.isArray(networkState.bpduDiagnostics?.events) ? networkState.bpduDiagnostics.events : [];
+    if (!filter || typeof filter !== 'object') {
+        return events.map(e => Object.assign({}, e));
+    }
+
+    return events.filter(e => {
+        if (filter.deviceId) {
+            const dev = filter.deviceId;
+            const matches = e.sourceDeviceId === dev || e.sourceDeviceName === dev
+                || e.targetDeviceId === dev || e.targetDeviceName === dev;
+            if (!matches) return false;
+        }
+        if (filter.sourceDeviceId) {
+            const dev = filter.sourceDeviceId;
+            if (e.sourceDeviceId !== dev && e.sourceDeviceName !== dev) return false;
+        }
+        if (filter.targetDeviceId) {
+            const dev = filter.targetDeviceId;
+            if (e.targetDeviceId !== dev && e.targetDeviceName !== dev) return false;
+        }
+        if (filter.port) {
+            const p = filter.port;
+            if (e.sourcePort !== p && e.targetPort !== p) return false;
+        }
+        if (filter.connectionId !== undefined) {
+            if (e.connectionId !== filter.connectionId) return false;
+        }
+        if (filter.status !== undefined) {
+            if (e.status !== filter.status && e.receptionStatus !== filter.status) return false;
+        }
+        return true;
+    }).map(e => Object.assign({}, e));
+}
+
+/**
+ * Clears all recorded BPDU diagnostic events and resets the sequence counter to 1.
+ */
+function clearBpduDiagnosticEvents() {
+    if (!networkState.bpduDiagnostics) {
+        networkState.bpduDiagnostics = {
+            events: [],
+            nextSequence: 1,
+            maxEvents: 50
+        };
+    } else {
+        networkState.bpduDiagnostics.events = [];
+        networkState.bpduDiagnostics.nextSequence = 1;
+    }
 }
 
 function ensureSwitchVlanState(sw) {
