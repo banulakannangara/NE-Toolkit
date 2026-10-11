@@ -8439,6 +8439,377 @@ function clearBpduDiagnosticEvents() {
     }
 }
 
+/**
+ * Retrieves the canonical Port ID (${priority}.${portNum}) for a switch port.
+ * Priority is 0-240 (default 128), portNum is >= 1.
+ *
+ * @param {string|Object} switchOrId
+ * @param {string} portName
+ * @returns {string}
+ */
+function getSwitchPortId(switchOrId, portName) {
+    const sw = getSwitchDevice(switchOrId);
+    const normPort = normalizeSwitchPortName(portName) || portName || '';
+    const portNum = parseInt(normPort.replace(/\D/g, ''), 10) || 1;
+    const portPrio = sw?.switchports?.[normPort]?.stpPortPriority !== undefined
+        ? sw.switchports[normPort].stpPortPriority
+        : DEFAULT_PORT_PRIORITY;
+    return `${portPrio}.${portNum}`;
+}
+
+/**
+ * Compares two root path candidates using standard IEEE 802.1D priority vector tie-breaking:
+ * 1. Root Bridge ID (lower is superior)
+ * 2. Accumulated Root Path Cost (lower is superior)
+ * 3. Designated Bridge ID (lower is superior)
+ * 4. Designated Port ID (lower is superior)
+ * 5. Local Port ID (lower is superior; self candidate wins if all prior equal)
+ *
+ * @param {Object} candA
+ * @param {Object} candB
+ * @returns {number} Negative if candA superior, positive if candB superior, 0 if equal
+ */
+function compareRootCandidates(candA, candB) {
+    // 1. Root Bridge ID
+    const rootComp = compareBridgeIds(candA.rootBridgeId, candB.rootBridgeId);
+    if (rootComp !== 0) return rootComp;
+
+    // 2. Accumulated Root Path Cost (numeric)
+    if (candA.rootPathCost !== candB.rootPathCost) {
+        return candA.rootPathCost - candB.rootPathCost;
+    }
+
+    // 3. Designated Bridge ID
+    const desigComp = compareBridgeIds(candA.designatedBridgeId, candB.designatedBridgeId);
+    if (desigComp !== 0) return desigComp;
+
+    // 4. Designated Port ID
+    const desigPortComp = comparePortIds(candA.designatedPortId, candB.designatedPortId);
+    if (desigPortComp !== null && desigPortComp !== 0) return desigPortComp;
+
+    // 5. Local Port ID
+    if (candA.isSelf && !candB.isSelf) return -1;
+    if (!candA.isSelf && candB.isSelf) return 1;
+    const localPortComp = comparePortIds(candA.localPortId, candB.localPortId);
+    if (localPortComp !== null && localPortComp !== 0) return localPortComp;
+
+    return 0;
+}
+
+/**
+ * Pure, deterministic evaluation engine for a switch's local Spanning Tree decisions.
+ * Evaluates best root bridge, root path cost, root port, and per-port proposed roles
+ * based strictly on the switch's local configuration and stored received BPDUs.
+ *
+ * CRITICAL ARCHITECTURAL CONSTRAINTS:
+ * 1. Pure function: does NOT mutate sw.stp, port roles or states, runtime stores,
+ *    received-BPDU snapshots, undo/redo history, or diagnostic counters.
+ * 2. Centralized recalculateTopologyStp() remains the sole forwarding authority.
+ * 3. An isolated switch with no operational connected links elects itself root,
+ *    and its disconnected ports receive the proposed role 'disabled'.
+ * 4. Operational connected ports with no received BPDU receive role 'designated'.
+ * 5. Ports comparing equal to local designated vector yield to role 'alternate' (loop prevention).
+ *
+ * @param {string|Object} switchOrId - Target switch device or ID
+ * @returns {Object|null} Fresh, defensive evaluation result object or null if switch not found
+ */
+function evaluateSwitchStpDecision(switchOrId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return null;
+    ensureSwitchStpState(sw);
+
+    if (sw.stp && sw.stp.enabled === false) {
+        return {
+            deviceId: sw.id,
+            deviceName: sw.name,
+            enabled: false,
+            bridgeId: sw.stp?.bridgeId || null,
+            bridgePriority: sw.stp?.priority !== undefined ? sw.stp.priority : DEFAULT_STP_PRIORITY,
+            rootBridgeId: null,
+            rootPathCost: 0,
+            rootPort: null,
+            isRootBridge: false,
+            ports: {},
+            candidates: []
+        };
+    }
+
+    const localBridgeId = sw.stp.bridgeId || formatBridgeId(sw.stp.priority, sw.mac);
+    const localBridgePriority = sw.stp.priority !== undefined ? sw.stp.priority : DEFAULT_STP_PRIORITY;
+    const runtime = getSwitchRuntime(sw.id);
+
+    // 1. Enumerate all ports on the switch
+    const allPortNames = new Set([
+        ...Object.values(runtime.ports || {}),
+        ...Object.keys(sw.switchports || {}),
+        ...Object.keys(sw.stp?.ports || {}),
+        ...Object.keys(runtime.receivedBpdus || {})
+    ]);
+
+    const sortedPortNames = Array.from(allPortNames).sort((a, b) => {
+        const numA = parseInt(a.replace(/\D/g, ''), 10) || 0;
+        const numB = parseInt(b.replace(/\D/g, ''), 10) || 0;
+        if (numA !== numB) return numA - numB;
+        return a.localeCompare(b);
+    });
+
+    // 2. Self-root candidate
+    const selfCandidate = {
+        portName: null,
+        isSelf: true,
+        rootBridgeId: localBridgeId,
+        rootPathCost: 0,
+        designatedBridgeId: localBridgeId,
+        designatedPortId: '128.1',
+        localPortId: '128.1'
+    };
+
+    const portCandidates = [];
+    const portContexts = {};
+
+    // 3. Inspect each port
+    for (const portName of sortedPortNames) {
+        const operStatus = getInterfaceOperStatus(sw, portName);
+        const isOperUp = operStatus !== 'down';
+        const connId = Object.keys(runtime.ports || {}).find(cId => runtime.ports[cId] === portName);
+        const conn = connId ? getConnectionById(connId) : null;
+        const isConnected = Boolean(conn);
+        const isOperConnected = isOperUp && isConnected;
+
+        const portCost = getSwitchPortCost(sw, portName);
+        const portPrio = sw.switchports?.[portName]?.stpPortPriority !== undefined
+            ? sw.switchports[portName].stpPortPriority
+            : DEFAULT_PORT_PRIORITY;
+        const portId = getSwitchPortId(sw, portName);
+
+        let peerDeviceId = null;
+        let peerPort = null;
+        if (conn) {
+            peerDeviceId = conn.source === sw.id ? conn.target : conn.source;
+            const peerDev = getDeviceById(peerDeviceId);
+            if (peerDev?.type === 'switch') {
+                peerPort = getSwitchPortLabel(peerDev.id, conn.id) || null;
+            }
+        }
+
+        const stored = getSwitchPortReceivedBpdu(sw, portName);
+        const validVector = stored ? normalizeBpduPriorityVector(stored) : null;
+
+        portContexts[portName] = {
+            portName,
+            operStatus,
+            isOperUp,
+            isConnected,
+            isOperConnected,
+            portCost,
+            portPriority: portPrio,
+            portId,
+            peerDeviceId,
+            peerPort,
+            storedBpdu: validVector ? Object.assign({}, stored) : null,
+            hasValidStoredBpdu: Boolean(validVector)
+        };
+
+        // Operational connected ports with valid stored BPDUs are root candidates
+        if (isOperConnected && validVector && typeof portCost === 'number' && portCost > 0) {
+            const accumulatedCost = validVector.rootPathCost + portCost;
+            if (Number.isInteger(accumulatedCost) && accumulatedCost >= 0) {
+                const candidate = {
+                    portName,
+                    isSelf: false,
+                    rootBridgeId: validVector.rootBridgeId,
+                    rootPathCost: accumulatedCost,
+                    designatedBridgeId: validVector.designatedBridgeId,
+                    designatedPortId: validVector.designatedPortId,
+                    localPortId: portId
+                };
+                portCandidates.push(candidate);
+                portContexts[portName].candidate = candidate;
+            }
+        }
+    }
+
+    // 4. Select the best candidate (Root selection)
+    let bestCandidate = selfCandidate;
+    for (const cand of portCandidates) {
+        if (compareRootCandidates(cand, bestCandidate) < 0) {
+            bestCandidate = cand;
+        }
+    }
+
+    const selectedRootBridgeId = bestCandidate.rootBridgeId;
+    const selectedRootCost = bestCandidate.rootPathCost;
+    const selectedRootPort = bestCandidate.portName; // null if self-root
+    const isRootBridge = selectedRootPort === null;
+
+    // 5. Per-port proposed role decisions
+    const proposedPorts = {};
+
+    for (const portName of sortedPortNames) {
+        const ctx = portContexts[portName];
+        let role = 'disabled';
+
+        if (!ctx.isOperConnected) {
+            role = 'disabled';
+        } else if (portName === selectedRootPort) {
+            role = 'root';
+        } else if (!ctx.hasValidStoredBpdu) {
+            role = 'designated';
+        } else {
+            // Non-root operational port with received BPDU:
+            // Compare local designated vector against stored received BPDU
+            const localDesignatedVector = {
+                rootBridgeId: selectedRootBridgeId,
+                rootPathCost: selectedRootCost,
+                designatedBridgeId: localBridgeId,
+                designatedPortId: ctx.portId,
+                senderBridgeId: localBridgeId,
+                senderPortId: ctx.portId
+            };
+
+            const comp = compareBpduPriorityVectors(localDesignatedVector, ctx.storedBpdu);
+            if (comp < 0) {
+                role = 'designated';
+            } else if (comp > 0) {
+                role = 'alternate';
+            } else {
+                // Equality: local designated vector matches received vector (e.g. self-loop / reflection).
+                // Per IEEE 802.1D backup/alternate port behavior, port yields to prevent looping.
+                role = 'alternate';
+            }
+        }
+
+        proposedPorts[portName] = {
+            portName,
+            role,
+            operStatus: ctx.operStatus,
+            connected: ctx.isConnected,
+            peerDeviceId: ctx.peerDeviceId,
+            peerPort: ctx.peerPort,
+            portCost: ctx.portCost,
+            portPriority: ctx.portPriority,
+            portId: ctx.portId,
+            edge: isPortfastEffective(sw, portName),
+            portfast: Boolean(sw.switchports?.[portName]?.portfast),
+            hasReceivedBpdu: ctx.hasValidStoredBpdu
+        };
+    }
+
+    const allCandidatesSummary = [
+        {
+            candidateType: 'self',
+            portName: null,
+            rootBridgeId: selfCandidate.rootBridgeId,
+            rootPathCost: selfCandidate.rootPathCost,
+            designatedBridgeId: selfCandidate.designatedBridgeId,
+            designatedPortId: selfCandidate.designatedPortId,
+            localPortId: selfCandidate.localPortId,
+            selected: isRootBridge
+        },
+        ...portCandidates.map(c => ({
+            candidateType: 'port',
+            portName: c.portName,
+            rootBridgeId: c.rootBridgeId,
+            rootPathCost: c.rootPathCost,
+            designatedBridgeId: c.designatedBridgeId,
+            designatedPortId: c.designatedPortId,
+            localPortId: c.localPortId,
+            selected: c.portName === selectedRootPort
+        }))
+    ];
+
+    return {
+        deviceId: sw.id,
+        deviceName: sw.name,
+        enabled: true,
+        bridgeId: localBridgeId,
+        bridgePriority: localBridgePriority,
+        rootBridgeId: selectedRootBridgeId,
+        rootPathCost: selectedRootCost,
+        rootPort: selectedRootPort,
+        isRootBridge,
+        ports: proposedPorts,
+        candidates: allCandidatesSummary
+    };
+}
+
+/**
+ * Public read-only inspection helper for a switch's local Spanning Tree decision state.
+ *
+ * @param {string|Object} switchOrId
+ * @returns {Object|null}
+ */
+function getSwitchLocalStpDecision(switchOrId) {
+    return evaluateSwitchStpDecision(switchOrId);
+}
+
+/**
+ * Diagnostic helper that compares local decision output with the centralized oracle's current output.
+ * Does NOT mutate either result, does NOT assert equivalence, and does NOT trigger recalculation.
+ *
+ * @param {string|Object} switchOrId
+ * @returns {Object|null} Comparison breakdown
+ */
+function compareStpOracleWithLocalDecision(switchOrId) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return null;
+    ensureSwitchStpState(sw);
+
+    const localDecision = evaluateSwitchStpDecision(sw);
+    if (!localDecision) return null;
+
+    const oracleStp = sw.stp;
+    const rootMatches = (localDecision.rootBridgeId === oracleStp.rootBridgeId);
+    const costMatches = (localDecision.rootPathCost === oracleStp.rootCost);
+    const rootPortMatches = (localDecision.rootPort === oracleStp.rootPort);
+
+    const portComparisons = {};
+    let allPortsMatch = true;
+
+    const allPortNames = new Set([
+        ...Object.keys(oracleStp.ports || {}),
+        ...Object.keys(localDecision.ports || {})
+    ]);
+
+    for (const portName of allPortNames) {
+        const oraclePort = oracleStp.ports?.[portName];
+        const localPort = localDecision.ports?.[portName];
+        const oracleRole = oraclePort?.role || 'disabled';
+        const localRole = localPort?.role || 'disabled';
+        const matches = (oracleRole === localRole);
+        if (!matches) allPortsMatch = false;
+
+        portComparisons[portName] = {
+            oracleRole,
+            localRole,
+            matches
+        };
+    }
+
+    const matchesOracle = rootMatches && costMatches && rootPortMatches && allPortsMatch;
+
+    return {
+        deviceId: sw.id,
+        deviceName: sw.name,
+        matchesOracle,
+        rootMatches,
+        costMatches,
+        rootPortMatches,
+        allPortsMatch,
+        oracle: {
+            rootBridgeId: oracleStp.rootBridgeId,
+            rootCost: oracleStp.rootCost,
+            rootPort: oracleStp.rootPort
+        },
+        local: {
+            rootBridgeId: localDecision.rootBridgeId,
+            rootCost: localDecision.rootPathCost,
+            rootPort: localDecision.rootPort
+        },
+        ports: portComparisons
+    };
+}
+
 function ensureSwitchVlanState(sw) {
     if (!sw || sw.type !== 'switch') return;
     ensureSwitchStpState(sw);

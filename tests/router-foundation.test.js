@@ -43830,6 +43830,529 @@ runTest('1761. Diagnostic integration: bounded diagnostic event recording contin
     assert.strictEqual(getBpduDiagnosticEvents()[1].sequence, 2);
 });
 
+// 1762. Local STP decision: isolated switch elects itself root; disconnected ports are disabled
+runTest('1762. Local STP decision: isolated switch elects itself root; disconnected ports are disabled', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    const sw0 = networkState.devices[0];
+    setSwitchStpPriority(sw0, 32768);
+    sw0.switchports['Fa0/1'] = { port: 'Fa0/1', name: 'Fa0/1', mode: 'access', accessVlan: 1 };
+    recalculateTopologyStp();
+
+    const decision = evaluateSwitchStpDecision('Switch0');
+    assert.ok(decision !== null, 'Decision object must not be null');
+    assert.strictEqual(decision.isRootBridge, true, 'Isolated switch must elect itself as root bridge');
+    assert.strictEqual(decision.rootBridgeId, sw0.stp.bridgeId, 'Root Bridge ID must match local bridge ID');
+    assert.strictEqual(decision.rootPathCost, 0, 'Root path cost must be zero');
+    assert.strictEqual(decision.rootPort, null, 'Root port must be null on root bridge');
+
+    // Disconnected ports must have proposed role 'disabled'
+    assert.ok(decision.ports['Fa0/1'] !== undefined);
+    assert.strictEqual(decision.ports['Fa0/1'].role, 'disabled', 'Disconnected port must be proposed as disabled');
+    assert.strictEqual(decision.ports['Fa0/1'].connected, false);
+});
+
+// 1763. Local STP decision: valid superior received BPDU selects non-root switch root
+runTest('1763. Local STP decision: valid superior received BPDU selects non-root switch root', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    // Transmit/receive valid superior BPDU from Switch0 to Switch1
+    const bpdu = createBpdu('Switch0', 'Fa0/1');
+    receiveBpdu('Switch1', 'Fa0/1', bpdu);
+
+    const decision = evaluateSwitchStpDecision('Switch1');
+    assert.strictEqual(decision.isRootBridge, false);
+    assert.strictEqual(decision.rootBridgeId, sw0.stp.bridgeId, 'Switch1 must select Switch0 as Root Bridge');
+    assert.strictEqual(decision.rootPathCost, 19, 'Accumulated root cost must be 0 + 19');
+    assert.strictEqual(decision.rootPort, 'Fa0/1', 'Root port must be Fa0/1');
+    assert.strictEqual(decision.ports['Fa0/1'].role, 'root', 'Fa0/1 proposed role must be root');
+});
+
+// 1764. Local STP decision: Root Bridge ID tie-breaker (priority and MAC)
+runTest('1764. Local STP decision: Root Bridge ID tie-breaker (priority and MAC)', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    addDevice('switch', 100, 300); // Switch2
+    const [sw0, sw1, sw2] = networkState.devices;
+    sw0.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    addConnection('Switch0', 'Switch2'); // Fa0/2 <-> Fa0/1
+    recalculateTopologyStp();
+
+    // Send BPDU on Fa0/1 with lower Root Priority (4096)
+    const bpduLowPrio = Object.assign({}, createBpdu('Switch0', 'Fa0/1'), {
+        rootBridgeId: '4096.00:aa:aa:aa:aa:aa',
+        rootPathCost: 0,
+        senderBridgeId: '4096.00:aa:aa:aa:aa:aa',
+        senderPortId: '128.1'
+    });
+    // Send BPDU on Fa0/2 with higher Root Priority (8192)
+    const bpduHighPrio = Object.assign({}, createBpdu('Switch0', 'Fa0/2'), {
+        rootBridgeId: '8192.00:aa:aa:aa:aa:aa',
+        rootPathCost: 0,
+        senderBridgeId: '8192.00:aa:aa:aa:aa:aa',
+        senderPortId: '128.1'
+    });
+
+    receiveBpdu('Switch0', 'Fa0/1', bpduLowPrio);
+    receiveBpdu('Switch0', 'Fa0/2', bpduHighPrio);
+
+    const decision = evaluateSwitchStpDecision('Switch0');
+    assert.strictEqual(decision.rootBridgeId, '4096.00:aa:aa:aa:aa:aa');
+    assert.strictEqual(decision.rootPort, 'Fa0/1', 'Lower root priority candidate must win');
+
+    // MAC tie-breaker: equal priority, lower MAC
+    const bpduMacWinner = Object.assign({}, bpduLowPrio, {
+        rootBridgeId: '4096.00:11:11:11:11:01'
+    });
+    const bpduMacLoser = Object.assign({}, bpduLowPrio, {
+        rootBridgeId: '4096.00:11:11:11:11:02'
+    });
+    receiveBpdu('Switch0', 'Fa0/2', bpduMacWinner); // Better MAC on Fa0/2
+    receiveBpdu('Switch0', 'Fa0/1', bpduMacLoser);  // Worse MAC on Fa0/1
+
+    const decisionMac = evaluateSwitchStpDecision('Switch0');
+    assert.strictEqual(decisionMac.rootPort, 'Fa0/2', 'Lower root MAC address candidate must win');
+});
+
+// 1765. Local STP decision: accumulated root path cost tie-breaker
+runTest('1765. Local STP decision: accumulated root path cost tie-breaker', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    addDevice('switch', 100, 300); // Switch2
+    const [sw0] = networkState.devices;
+    sw0.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1
+    addConnection('Switch0', 'Switch2'); // Fa0/2
+    recalculateTopologyStp();
+
+    // Same Root ID, but Fa0/1 has root cost 10 and Fa0/2 has root cost 20
+    const bpduCost10 = Object.assign({}, createBpdu('Switch0', 'Fa0/1'), {
+        rootBridgeId: '4096.00:00:00:00:00:01',
+        rootPathCost: 10,
+        senderBridgeId: '4096.00:00:00:00:00:01',
+        senderPortId: '128.1'
+    });
+    const bpduCost20 = Object.assign({}, createBpdu('Switch0', 'Fa0/2'), {
+        rootBridgeId: '4096.00:00:00:00:00:01',
+        rootPathCost: 20,
+        senderBridgeId: '4096.00:00:00:00:00:01',
+        senderPortId: '128.1'
+    });
+
+    receiveBpdu('Switch0', 'Fa0/1', bpduCost10);
+    receiveBpdu('Switch0', 'Fa0/2', bpduCost20);
+
+    const decision = evaluateSwitchStpDecision('Switch0');
+    assert.strictEqual(decision.rootPathCost, 29, 'Accumulated cost must be 10 + 19');
+    assert.strictEqual(decision.rootPort, 'Fa0/1', 'Lower accumulated root path cost must win');
+});
+
+// 1766. Local STP decision: Designated Bridge ID tie-breaker
+runTest('1766. Local STP decision: Designated Bridge ID tie-breaker', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    addDevice('switch', 100, 300); // Switch2
+    const [sw0] = networkState.devices;
+    sw0.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1
+    addConnection('Switch0', 'Switch2'); // Fa0/2
+    recalculateTopologyStp();
+
+    // Equal Root and equal Cost (0), but different Designated Bridge IDs
+    const bpduDesigLow = Object.assign({}, createBpdu('Switch0', 'Fa0/1'), {
+        rootBridgeId: '4096.00:00:00:00:00:01',
+        rootPathCost: 0,
+        senderBridgeId: '8192.00:aa:aa:aa:aa:01',
+        senderPortId: '128.1'
+    });
+    const bpduDesigHigh = Object.assign({}, createBpdu('Switch0', 'Fa0/2'), {
+        rootBridgeId: '4096.00:00:00:00:00:01',
+        rootPathCost: 0,
+        senderBridgeId: '16384.00:aa:aa:aa:aa:01',
+        senderPortId: '128.1'
+    });
+
+    receiveBpdu('Switch0', 'Fa0/1', bpduDesigLow);
+    receiveBpdu('Switch0', 'Fa0/2', bpduDesigHigh);
+
+    const decision = evaluateSwitchStpDecision('Switch0');
+    assert.strictEqual(decision.rootPort, 'Fa0/1', 'Lower designated bridge ID candidate must win');
+});
+
+// 1767. Local STP decision: Designated Port ID tie-breaker with numeric semantics
+runTest('1767. Local STP decision: Designated Port ID tie-breaker with numeric semantics', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0] = networkState.devices;
+    sw0.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    addConnection('Switch0', 'Switch1'); // Fa0/2 <-> Fa0/2
+    recalculateTopologyStp();
+
+    // Parallel links to same upstream switch (equal Root, Cost, Designated Bridge)
+    // Fa0/1 receives from designated port 128.10, Fa0/2 receives from designated port 128.2
+    const bpduPort10 = Object.assign({}, createBpdu('Switch0', 'Fa0/1'), {
+        rootBridgeId: '4096.00:00:00:00:00:01',
+        rootPathCost: 0,
+        senderBridgeId: '8192.00:00:00:00:00:01',
+        senderPortId: '128.10'
+    });
+    const bpduPort2 = Object.assign({}, createBpdu('Switch0', 'Fa0/2'), {
+        rootBridgeId: '4096.00:00:00:00:00:01',
+        rootPathCost: 0,
+        senderBridgeId: '8192.00:00:00:00:00:01',
+        senderPortId: '128.2'
+    });
+
+    receiveBpdu('Switch0', 'Fa0/1', bpduPort10);
+    receiveBpdu('Switch0', 'Fa0/2', bpduPort2);
+
+    const decision = evaluateSwitchStpDecision('Switch0');
+    assert.strictEqual(decision.rootPort, 'Fa0/2', 'Designated port 128.2 must beat 128.10 by numeric comparison');
+});
+
+// 1768. Local STP decision: Local Port ID tie-breaker for equal parallel-link candidates
+runTest('1768. Local STP decision: Local Port ID tie-breaker for equal parallel-link candidates', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0] = networkState.devices;
+    sw0.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    addConnection('Switch0', 'Switch1'); // Fa0/2 <-> Fa0/2
+    recalculateTopologyStp();
+
+    // Both ports receive IDENTICAL remote vectors (e.g. from same upstream designated port)
+    const identicalBpdu = Object.assign({}, createBpdu('Switch0', 'Fa0/1'), {
+        rootBridgeId: '4096.00:00:00:00:00:01',
+        rootPathCost: 0,
+        senderBridgeId: '8192.00:00:00:00:00:01',
+        senderPortId: '128.1'
+    });
+
+    receiveBpdu('Switch0', 'Fa0/1', identicalBpdu);
+    receiveBpdu('Switch0', 'Fa0/2', identicalBpdu);
+
+    const decision = evaluateSwitchStpDecision('Switch0');
+    assert.strictEqual(decision.rootPort, 'Fa0/1', 'Local Fa0/1 (128.1) must beat Fa0/2 (128.2) on local port tie-breaker');
+
+    // If local port priority is lower on Fa0/2 (priority 64), Fa0/2 must win
+    setSwitchPortStpPriority(sw0, 'Fa0/2', 64);
+    const decisionCustomPrio = evaluateSwitchStpDecision('Switch0');
+    assert.strictEqual(decisionCustomPrio.rootPort, 'Fa0/2', 'Local port priority 64 must beat 128');
+});
+
+// 1769. Local STP decision: configured receiving-port path cost is accumulated exactly once
+runTest('1769. Local STP decision: configured receiving-port path cost is accumulated exactly once', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1
+    setSwitchPortStpCost(sw1, 'Fa0/1', 50);
+    recalculateTopologyStp();
+
+    const bpdu = Object.assign({}, createBpdu('Switch0', 'Fa0/1'), {
+        rootBridgeId: '4096.00:00:00:00:00:01',
+        rootPathCost: 10
+    });
+    receiveBpdu('Switch1', 'Fa0/1', bpdu);
+
+    const decision1 = evaluateSwitchStpDecision('Switch1');
+    assert.strictEqual(decision1.rootPathCost, 60, 'Root path cost must be 10 + 50 = 60');
+
+    // Repeated evaluations do NOT compound cost accumulation
+    const decision2 = evaluateSwitchStpDecision('Switch1');
+    assert.strictEqual(decision2.rootPathCost, 60, 'Cost accumulation must remain 60 across repeated calls');
+});
+
+// 1770. Local STP decision: designated role when local vector is superior
+runTest('1770. Local STP decision: designated role when local vector is superior', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root)
+    addDevice('switch', 300, 100); // Switch1
+    addDevice('switch', 500, 100); // Switch2
+    const [sw0, sw1, sw2] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 8192;
+    sw2.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    addConnection('Switch1', 'Switch2'); // Fa0/2 <-> Fa0/1
+    recalculateTopologyStp();
+
+    // Switch1 receives root BPDU on Fa0/1 -> cost 19
+    receiveBpdu('Switch1', 'Fa0/1', createBpdu('Switch0', 'Fa0/1'));
+
+    // On Fa0/2, Switch1 receives an inferior BPDU from Switch2 (cost 100)
+    const inferiorBpdu = Object.assign({}, createBpdu('Switch0', 'Fa0/1'), {
+        rootBridgeId: sw0.stp.bridgeId,
+        rootPathCost: 100,
+        senderBridgeId: sw2.stp.bridgeId,
+        senderPortId: '128.1'
+    });
+    receiveBpdu('Switch1', 'Fa0/2', inferiorBpdu);
+
+    const decision = evaluateSwitchStpDecision('Switch1');
+    assert.strictEqual(decision.rootPort, 'Fa0/1');
+    assert.strictEqual(decision.ports['Fa0/2'].role, 'designated', 'Fa0/2 must be designated when local vector (cost 19) is superior to received vector (cost 100)');
+});
+
+// 1771. Local STP decision: alternate role when received vector is superior
+runTest('1771. Local STP decision: alternate role when received vector is superior', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    addDevice('switch', 300, 300); // Switch2
+    const [sw0, sw1, sw2] = networkState.devices;
+    setSwitchStpPriority(sw0, 4096);
+    setSwitchStpPriority(sw1, 32768);
+    setSwitchStpPriority(sw2, 8192);
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    addConnection('Switch1', 'Switch2'); // Fa0/2 <-> Fa0/1
+    recalculateTopologyStp();
+
+    // Switch1 has root on Fa0/1 (cost 19, local designated on Fa0/2 would be cost 19, bridge 32768)
+    receiveBpdu('Switch1', 'Fa0/1', createBpdu('Switch0', 'Fa0/1'));
+
+    // On Fa0/2, Switch1 receives a superior BPDU from Switch2 (cost 19, bridge 8192)
+    const superiorNeighborBpdu = Object.assign({}, createBpdu('Switch0', 'Fa0/1'), {
+        rootBridgeId: sw0.stp.bridgeId,
+        rootPathCost: 19,
+        senderBridgeId: sw2.stp.bridgeId,
+        senderPortId: '128.1'
+    });
+    receiveBpdu('Switch1', 'Fa0/2', superiorNeighborBpdu);
+
+    const decision = evaluateSwitchStpDecision('Switch1');
+    assert.strictEqual(decision.rootPort, 'Fa0/1');
+    assert.strictEqual(decision.ports['Fa0/2'].role, 'alternate', 'Fa0/2 must be alternate when neighbor designated vector is superior');
+});
+
+// 1772. Local STP decision: deterministic handling of equal vectors
+runTest('1772. Local STP decision: deterministic handling of equal vectors', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    addDevice('switch', 500, 100); // Switch2
+    const [sw0, sw1, sw2] = networkState.devices;
+    setSwitchStpPriority(sw0, 4096);
+    setSwitchStpPriority(sw1, 32768);
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1
+    addConnection('Switch1', 'Switch2'); // Fa0/2 <-> Fa0/1
+    recalculateTopologyStp();
+
+    receiveBpdu('Switch1', 'Fa0/1', createBpdu('Switch0', 'Fa0/1'));
+
+    // Inject BPDU on Fa0/2 identical to Switch1's own designated vector on Fa0/2
+    const selfLoopBpdu = Object.assign({}, createBpdu('Switch0', 'Fa0/1'), {
+        rootBridgeId: sw0.stp.bridgeId,
+        rootPathCost: 19,
+        senderBridgeId: sw1.stp.bridgeId,
+        senderPortId: '128.2'
+    });
+    receiveBpdu('Switch1', 'Fa0/2', selfLoopBpdu);
+
+    const decision = evaluateSwitchStpDecision('Switch1');
+    assert.strictEqual(decision.ports['Fa0/2'].role, 'alternate', 'Port receiving equal vector must yield to alternate to prevent self-looping');
+});
+
+// 1773. Local STP decision: disabled and disconnected ports are excluded from root selection
+runTest('1773. Local STP decision: disabled and disconnected ports are excluded from root selection', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1
+    recalculateTopologyStp();
+
+    receiveBpdu('Switch1', 'Fa0/1', createBpdu('Switch0', 'Fa0/1'));
+
+    // Admin shut down Fa0/1 on Switch1
+    executeCliCommand('Switch1', 'enable');
+    executeCliCommand('Switch1', 'configure terminal');
+    executeCliCommand('Switch1', 'interface Fa0/1');
+    executeCliCommand('Switch1', 'shutdown');
+
+    const decision = evaluateSwitchStpDecision('Switch1');
+    assert.strictEqual(decision.isRootBridge, true, 'Down port must not be chosen as root port; switch falls back to self-root');
+    assert.strictEqual(decision.rootPort, null);
+    assert.strictEqual(decision.ports['Fa0/1'].role, 'disabled');
+});
+
+// 1774. Local STP decision: invalid or missing received-BPDU data is safely rejected
+runTest('1774. Local STP decision: invalid or missing received-BPDU data is safely rejected', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1
+    recalculateTopologyStp();
+
+    // Corrupt runtime stored BPDU with malformed vector
+    const runtime1 = networkState.switchRuntime[sw1.id];
+    runtime1.receivedBpdus['Fa0/1'] = { rootBridgeId: 'invalid', rootPathCost: -999 };
+
+    // Evaluator must not throw and must reject malformed candidate
+    const decision = evaluateSwitchStpDecision('Switch1');
+    assert.ok(decision !== null);
+    assert.strictEqual(decision.isRootBridge, true, 'Malformed BPDU candidate must be ignored; falls back to self-root');
+    assert.strictEqual(decision.ports['Fa0/1'].hasReceivedBpdu, false);
+});
+
+// 1775. Local STP decision: evaluation does not mutate sw.stp or received-BPDU snapshots
+runTest('1775. Local STP decision: evaluation does not mutate sw.stp or received-BPDU snapshots', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    addConnection('Switch0', 'Switch1'); // Fa0/1
+    recalculateTopologyStp();
+
+    receiveBpdu('Switch1', 'Fa0/1', createBpdu('Switch0', 'Fa0/1'));
+
+    const [sw0, sw1] = networkState.devices;
+    const stpSnapBefore = JSON.stringify(sw1.stp);
+    const rxSnapBefore = JSON.stringify(getSwitchPortReceivedBpdu('Switch1', 'Fa0/1'));
+
+    // Execute multiple decision queries
+    evaluateSwitchStpDecision('Switch1');
+    getSwitchLocalStpDecision('Switch1');
+    evaluateSwitchStpDecision(sw1);
+
+    const stpSnapAfter = JSON.stringify(sw1.stp);
+    const rxSnapAfter = JSON.stringify(getSwitchPortReceivedBpdu('Switch1', 'Fa0/1'));
+
+    assert.strictEqual(stpSnapAfter, stpSnapBefore, 'sw.stp must be 100% immutable across decision queries');
+    assert.strictEqual(rxSnapAfter, rxSnapBefore, 'stored BPDU must remain completely immutable');
+});
+
+// 1776. Local STP decision: serialization invariants remain unchanged
+runTest('1776. Local STP decision: serialization invariants remain unchanged', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    addConnection('Switch0', 'Switch1');
+    recalculateTopologyStp();
+
+    const devSnapBefore = JSON.stringify(networkState.devices);
+    evaluateSwitchStpDecision('Switch0');
+    evaluateSwitchStpDecision('Switch1');
+    const devSnapAfter = JSON.stringify(networkState.devices);
+
+    assert.strictEqual(devSnapAfter, devSnapBefore, 'networkState.devices JSON serialization must not be altered');
+});
+
+// 1777. Local STP decision: undo/redo history is not modified by evaluation
+runTest('1777. Local STP decision: undo/redo history is not modified by evaluation', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    addConnection('Switch0', 'Switch1'); // creates history entry
+    const histLenBefore = networkState.history.length;
+
+    evaluateSwitchStpDecision('Switch0');
+    evaluateSwitchStpDecision('Switch1');
+
+    assert.strictEqual(networkState.history.length, histLenBefore, 'Evaluation must not push history entries');
+});
+
+// 1778. Local STP decision: PortFast behavior is unchanged
+runTest('1778. Local STP decision: PortFast behavior is unchanged', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('pc', 300, 100);     // PC0
+    addConnection('Switch0', 'PC0'); // Fa0/1 <-> Eth0
+    const sw = networkState.devices[0];
+
+    setSwitchPortPortfast(sw, 'Fa0/1', true);
+    recalculateTopologyStp();
+
+    const decision = evaluateSwitchStpDecision('Switch0');
+    assert.strictEqual(decision.ports['Fa0/1'].role, 'designated');
+    assert.strictEqual(decision.ports['Fa0/1'].portfast, true);
+    assert.strictEqual(decision.ports['Fa0/1'].edge, true);
+});
+
+// 1779. Local STP decision: frame forwarding remains identical to existing centralized baseline
+runTest('1779. Local STP decision: frame forwarding remains identical to existing centralized baseline', () => {
+    resetLab();
+    // Triangle topology: Sw0 (Root 4096), Sw1 (32768), Sw2 (8192)
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    addDevice('switch', 200, 300);
+    const [sw0, sw1, sw2] = networkState.devices;
+    setSwitchStpPriority(sw0, 4096);
+    setSwitchStpPriority(sw1, 32768);
+    setSwitchStpPriority(sw2, 8192);
+
+    addConnection('Switch0', 'Switch1');
+    addConnection('Switch0', 'Switch2');
+    addConnection('Switch1', 'Switch2');
+    recalculateTopologyStp();
+
+    // Verify Sw1 Fa0/2 is alternate blocking under centralized oracle
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].role, 'alternate');
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].state, 'blocking');
+
+    // Run decision engine
+    const dec = evaluateSwitchStpDecision('Switch1');
+    assert.ok(dec !== null);
+
+    // Live forwarding states must remain 100% under centralized oracle authority
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].role, 'alternate');
+    assert.strictEqual(sw1.stp.ports['Fa0/2'].state, 'blocking');
+});
+
+// 1780. Local STP decision: existing BPDU diagnostics and bounded event storage remain unchanged
+runTest('1780. Local STP decision: existing BPDU diagnostics and bounded event storage remain unchanged', () => {
+    resetLab();
+    addDevice('switch', 100, 100);
+    addDevice('switch', 300, 100);
+    addConnection('Switch0', 'Switch1');
+    recalculateTopologyStp();
+
+    clearBpduDiagnosticEvents();
+    assert.strictEqual(getBpduDiagnosticEvents().length, 0);
+
+    // Decision evaluation records zero diagnostic events
+    evaluateSwitchStpDecision('Switch0');
+    getSwitchLocalStpDecision('Switch1');
+    assert.strictEqual(getBpduDiagnosticEvents().length, 0, 'Evaluating decisions must not record diagnostic events');
+
+    // Oracle comparison helper works cleanly and non-destructively
+    const comp = compareStpOracleWithLocalDecision('Switch0');
+    assert.ok(comp !== null);
+    assert.strictEqual(comp.deviceId, 'Switch0');
+    assert.strictEqual(comp.oracle.rootBridgeId, comp.local.rootBridgeId);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
