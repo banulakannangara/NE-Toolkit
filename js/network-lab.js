@@ -6619,11 +6619,15 @@ function getSwitchRuntime(switchId) {
         networkState.switchRuntime[switchId] = {
             ports: {},
             macTable: [],
-            staticRoutes: []
+            staticRoutes: [],
+            receivedBpdus: {}
         };
     }
     if (!Array.isArray(networkState.switchRuntime[switchId].staticRoutes)) {
         networkState.switchRuntime[switchId].staticRoutes = [];
+    }
+    if (!networkState.switchRuntime[switchId].receivedBpdus || typeof networkState.switchRuntime[switchId].receivedBpdus !== 'object') {
+        networkState.switchRuntime[switchId].receivedBpdus = {};
     }
     return networkState.switchRuntime[switchId];
 }
@@ -7212,6 +7216,17 @@ function recalculateTopologyStp() {
                     };
                 }
             });
+
+            // Synchronize per-port received BPDU information and clear stale state for down/disconnected interfaces
+            allPortNames.forEach(portName => {
+                const isDown = getInterfaceOperStatus(sw, portName) === 'down';
+                const connId = Object.keys(runtime.ports || {}).find(cId => runtime.ports[cId] === portName);
+                if (isDown || !connId) {
+                    clearSwitchPortReceivedBpdu(sw, portName);
+                } else {
+                    attachPortReceivedBpdu(sw, portName);
+                }
+            });
         });
     });
 }
@@ -7438,6 +7453,278 @@ function validateBpduPayload(bpdu) {
 }
 
 /**
+ * Parses a canonical Port ID string (${priority}.${portNumber}) into numeric components.
+ * Priority is 0-255 (default 128), portNumber is >= 1.
+ *
+ * @param {string} portId
+ * @returns {{ priority: number, portNum: number }|null}
+ */
+function parsePortId(portId) {
+    if (!portId || typeof portId !== 'string') return null;
+    const parts = portId.split('.');
+    if (parts.length !== 2) return null;
+    const prio = parseInt(parts[0], 10);
+    const portNum = parseInt(parts[1], 10);
+    if (isNaN(prio) || prio < 0 || prio > 255 || String(prio) !== parts[0]) return null;
+    if (isNaN(portNum) || portNum < 1 || String(portNum) !== parts[1]) return null;
+    return { priority: prio, portNum };
+}
+
+/**
+ * Compares two Port ID strings (${priority}.${portNumber}) preserving numeric semantics.
+ *
+ * @param {string} pidA
+ * @param {string} pidB
+ * @returns {number|null} Negative if pidA < pidB (superior), positive if pidA > pidB (inferior), 0 if equal, null if malformed
+ */
+function comparePortIds(pidA, pidB) {
+    const a = parsePortId(pidA);
+    const b = parsePortId(pidB);
+    if (!a || !b) return null;
+    if (a.priority !== b.priority) {
+        return a.priority - b.priority;
+    }
+    return a.portNum - b.portNum;
+}
+
+/**
+ * Validates and extracts a normalized IEEE 802.1D Spanning Tree priority vector
+ * from a BPDU object or vector representation.
+ *
+ * Vector components in evaluation order:
+ * 1. Root Bridge ID (rootBridgeId)
+ * 2. Root Path Cost (rootPathCost)
+ * 3. Designated / Sender Bridge ID (senderBridgeId / designatedBridgeId)
+ * 4. Designated / Sender Port ID (senderPortId / designatedPortId)
+ *
+ * Ignores all non-vector fields (messageAge, maxAge, flags, timestamps).
+ *
+ * @param {Object} input
+ * @returns {Object|null} Normalized priority vector or null if malformed
+ */
+function normalizeBpduPriorityVector(input) {
+    if (!input || typeof input !== 'object') return null;
+
+    const rootBridgeId = input.rootBridgeId;
+    if (!isValidBridgeIdString(rootBridgeId)) return null;
+
+    const rootPathCost = input.rootPathCost;
+    if (typeof rootPathCost !== 'number' || isNaN(rootPathCost) || rootPathCost < 0 || !Number.isInteger(rootPathCost)) {
+        return null;
+    }
+
+    const senderBridgeId = input.senderBridgeId !== undefined ? input.senderBridgeId : input.designatedBridgeId;
+    if (!isValidBridgeIdString(senderBridgeId)) return null;
+
+    const senderPortId = input.senderPortId !== undefined ? input.senderPortId : input.designatedPortId;
+    if (!isValidPortIdString(senderPortId)) return null;
+
+    return {
+        rootBridgeId,
+        rootPathCost,
+        designatedBridgeId: senderBridgeId,
+        designatedPortId: senderPortId,
+        senderBridgeId,
+        senderPortId
+    };
+}
+
+/**
+ * Validates whether an object represents a well-formed IEEE 802.1D Spanning Tree priority vector.
+ *
+ * @param {Object} input
+ * @returns {boolean}
+ */
+function isValidPriorityVector(input) {
+    return normalizeBpduPriorityVector(input) !== null;
+}
+
+/**
+ * Pure, deterministic comparator for IEEE 802.1D Spanning Tree BPDU priority vectors.
+ *
+ * Compares strictly in hierarchical order:
+ * 1. Root Bridge ID (lower is superior)
+ * 2. Root Path Cost (lower is superior)
+ * 3. Designated / Sender Bridge ID (lower is superior)
+ * 4. Designated / Sender Port ID (lower is superior, numeric priority then port number)
+ *
+ * Documented return values:
+ * - Negative (< 0): vectorA is superior to vectorB
+ * - Zero (0): vectorA and vectorB are equivalent
+ * - Positive (> 0): vectorB is superior to vectorA (vectorA is inferior)
+ * - null: one or both vectors are malformed
+ *
+ * Pure function: does not mutate any device, port, or simulation state.
+ * Ignores all message age, timestamps, timers, and flags.
+ *
+ * @param {Object} vectorA - First BPDU or priority vector
+ * @param {Object} vectorB - Second BPDU or priority vector
+ * @returns {number|null} Relative ordering (negative: superior, 0: equal, positive: inferior) or null if malformed
+ */
+function compareBpduPriorityVectors(vectorA, vectorB) {
+    const vA = normalizeBpduPriorityVector(vectorA);
+    const vB = normalizeBpduPriorityVector(vectorB);
+    if (!vA || !vB) {
+        return null;
+    }
+
+    // 1. Root Bridge ID
+    const rootComp = compareBridgeIds(vA.rootBridgeId, vB.rootBridgeId);
+    if (rootComp !== 0) {
+        return rootComp;
+    }
+
+    // 2. Root Path Cost
+    if (vA.rootPathCost !== vB.rootPathCost) {
+        return vA.rootPathCost - vB.rootPathCost;
+    }
+
+    // 3. Designated / Sender Bridge ID
+    const bridgeComp = compareBridgeIds(vA.designatedBridgeId, vB.designatedBridgeId);
+    if (bridgeComp !== 0) {
+        return bridgeComp;
+    }
+
+    // 4. Designated / Sender Port ID (numeric priority then numeric portNumber)
+    const portComp = comparePortIds(vA.designatedPortId, vB.designatedPortId);
+    if (portComp !== 0) {
+        return portComp;
+    }
+
+    return 0;
+}
+
+/**
+ * Creates an immutable snapshot of an accepted Configuration BPDU and its normalized priority vector.
+ *
+ * The stored snapshot contains:
+ * - Normalized priority vector: rootBridgeId, rootPathCost, senderBridgeId/designatedBridgeId, senderPortId/designatedPortId
+ * - Message timers: messageAge, maxAge, helloTime, forwardDelay
+ * - Flags: topologyChange, topologyChangeAck, tc, tca
+ * - Interface metadata: portName, classification, storedAt
+ *
+ * @param {Object} bpdu - Accepted BPDU payload
+ * @param {string} classification - Acceptance classification ('superior' | 'repeated')
+ * @param {string} portName - Receiving port name
+ * @param {Object} [context={}] - Optional receipt context
+ * @returns {Object} Immutable stored BPDU snapshot
+ */
+function createStoredBpduSnapshot(bpdu, classification, portName, context = {}) {
+    const normVector = normalizeBpduPriorityVector(bpdu);
+    const snapshot = {
+        rootBridgeId: normVector.rootBridgeId,
+        rootPathCost: normVector.rootPathCost,
+        senderBridgeId: normVector.senderBridgeId,
+        senderPortId: normVector.senderPortId,
+        designatedBridgeId: normVector.designatedBridgeId,
+        designatedPortId: normVector.designatedPortId,
+        priorityVector: Object.freeze({
+            rootBridgeId: normVector.rootBridgeId,
+            rootPathCost: normVector.rootPathCost,
+            designatedBridgeId: normVector.designatedBridgeId,
+            designatedPortId: normVector.designatedPortId,
+            senderBridgeId: normVector.senderBridgeId,
+            senderPortId: normVector.senderPortId
+        }),
+        messageAge: bpdu.messageAge,
+        maxAge: bpdu.maxAge,
+        helloTime: bpdu.helloTime,
+        forwardDelay: bpdu.forwardDelay,
+        flags: Object.freeze(Object.assign({}, bpdu.flags)),
+        portName: portName,
+        classification: classification,
+        storedAt: typeof context.receivedAt === 'number' ? context.receivedAt : (typeof Date !== 'undefined' ? Date.now() : 0)
+    };
+    return Object.freeze(snapshot);
+}
+
+/**
+ * Retrieves the stored Configuration BPDU snapshot for a given switch port.
+ *
+ * @param {string|Object} switchOrId
+ * @param {string} portName
+ * @returns {Object|null} Defensive copy/reference of stored BPDU or null if none
+ */
+function getSwitchPortReceivedBpdu(switchOrId, portName) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return null;
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) return null;
+    const runtime = getSwitchRuntime(sw.id);
+    if (!runtime.receivedBpdus) {
+        runtime.receivedBpdus = {};
+    }
+    return runtime.receivedBpdus[normPort] || sw.stp?.ports?.[normPort]?.receivedBpdu || null;
+}
+
+/**
+ * Stores an accepted Configuration BPDU snapshot on a switch port.
+ * Updates both runtime.receivedBpdus and attaches a non-enumerable property
+ * on sw.stp.ports[portName] to preserve JSON serialization invariants.
+ *
+ * @param {string|Object} switchOrId
+ * @param {string} portName
+ * @param {Object} snapshot
+ */
+function storeSwitchPortReceivedBpdu(switchOrId, portName, snapshot) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return;
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) return;
+    const runtime = getSwitchRuntime(sw.id);
+    if (!runtime.receivedBpdus) {
+        runtime.receivedBpdus = {};
+    }
+    runtime.receivedBpdus[normPort] = snapshot;
+    attachPortReceivedBpdu(sw, normPort);
+}
+
+/**
+ * Attaches the stored received BPDU snapshot to sw.stp.ports[portName] as a non-enumerable property.
+ *
+ * @param {Object} sw
+ * @param {string} portName
+ */
+function attachPortReceivedBpdu(sw, portName) {
+    if (!sw?.stp?.ports?.[portName]) return;
+    const runtime = getSwitchRuntime(sw.id);
+    const storedRx = runtime.receivedBpdus?.[portName] || null;
+    Object.defineProperty(sw.stp.ports[portName], 'receivedBpdu', {
+        value: storedRx,
+        writable: true,
+        configurable: true,
+        enumerable: false
+    });
+    Object.defineProperty(sw.stp.ports[portName], 'storedBpdu', {
+        value: storedRx,
+        writable: true,
+        configurable: true,
+        enumerable: false
+    });
+}
+
+/**
+ * Clears the stored received BPDU information from a switch port.
+ *
+ * @param {string|Object} switchOrId
+ * @param {string} portName
+ */
+function clearSwitchPortReceivedBpdu(switchOrId, portName) {
+    const sw = getSwitchDevice(switchOrId);
+    if (!sw) return;
+    const normPort = normalizeSwitchPortName(portName);
+    if (!normPort) return;
+    const runtime = getSwitchRuntime(sw.id);
+    if (runtime.receivedBpdus && runtime.receivedBpdus[normPort]) {
+        delete runtime.receivedBpdus[normPort];
+    }
+    if (sw.stp?.ports?.[normPort]) {
+        sw.stp.ports[normPort].receivedBpdu = null;
+        sw.stp.ports[normPort].storedBpdu = null;
+    }
+}
+
+/**
  * Validates and processes the link-level reception of an incoming IEEE 802.1D Configuration BPDU
  * on a specified switch port.
  *
@@ -7449,6 +7736,11 @@ function validateBpduPayload(bpdu) {
  * 3. Validates BPDU payload structure, types, and value ranges thoroughly.
  * 4. Critical restriction: Does NOT modify sw.stp.rootBridgeId, STP port roles or states,
  *    topology connections, switchport config, MAC tables, or undo history.
+ * 5. Deterministic priority-vector comparison against stored received BPDU:
+ *    - First valid BPDU stored and classified as 'superior'.
+ *    - Strictly better incoming priority vector replaces stored BPDU and is classified as 'superior'.
+ *    - Equal priority vector is classified as 'repeated' (message age / timers do not change priority).
+ *    - Inferior vector is classified as 'inferior' and does not overwrite superior stored information.
  *
  * @param {string|Object} switchOrId - Target switch device or device ID/name
  * @param {string} portName - Target interface name (e.g., 'Fa0/1')
@@ -7583,12 +7875,35 @@ function receiveBpdu(switchOrId, portName, bpdu, context = {}) {
         };
     }
 
+    // Interface state and payload are strictly valid!
+    // Evaluate priority vector against stored per-port information:
+    const incomingVector = normalizeBpduPriorityVector(bpdu);
+    const existingStored = getSwitchPortReceivedBpdu(sw, normPort);
+
+    let classification = 'superior';
+    if (!existingStored) {
+        classification = 'superior';
+        const snapshot = createStoredBpduSnapshot(bpdu, 'superior', normPort, context);
+        storeSwitchPortReceivedBpdu(sw, normPort, snapshot);
+    } else {
+        const comp = compareBpduPriorityVectors(incomingVector, existingStored);
+        if (comp < 0) {
+            classification = 'superior';
+            const snapshot = createStoredBpduSnapshot(bpdu, 'superior', normPort, context);
+            storeSwitchPortReceivedBpdu(sw, normPort, snapshot);
+        } else if (comp === 0) {
+            classification = 'repeated';
+        } else {
+            classification = 'inferior';
+        }
+    }
+
     // Port role information for details
     const stpPort = sw.stp?.ports?.[normPort] || null;
     const localRole = stpPort?.role || 'disabled';
     const localState = stpPort?.state || 'blocking';
 
-    return {
+    const result = {
         eligible: true,
         status: 'accepted',
         reason: null,
@@ -7606,6 +7921,38 @@ function receiveBpdu(switchOrId, portName, bpdu, context = {}) {
             portfastEffective: isPortfastEffective(sw, normPort)
         }
     };
+
+    Object.defineProperty(result, 'classification', {
+        value: classification,
+        writable: true,
+        configurable: true,
+        enumerable: false
+    });
+    Object.defineProperty(result, 'vectorComparison', {
+        value: classification,
+        writable: true,
+        configurable: true,
+        enumerable: false
+    });
+    Object.defineProperty(result, 'storedBpdu', {
+        get: () => getSwitchPortReceivedBpdu(sw, normPort),
+        configurable: true,
+        enumerable: false
+    });
+    Object.defineProperty(result.details, 'classification', {
+        value: classification,
+        writable: true,
+        configurable: true,
+        enumerable: false
+    });
+    Object.defineProperty(result.details, 'vectorComparison', {
+        value: classification,
+        writable: true,
+        configurable: true,
+        enumerable: false
+    });
+
+    return result;
 }
 
 /**
@@ -7828,6 +8175,33 @@ function transmitBpdu(switchOrId, portName, options = {}) {
         senderPort: normPort
     });
 
+    const resReception = {
+        targetDeviceId: neighborDev.id,
+        targetDeviceName: neighborDev.name,
+        targetPort: targetPort,
+        targetDeviceType: neighborDev.type,
+        ...receptionResult
+    };
+    if (receptionResult.classification) {
+        Object.defineProperty(resReception, 'classification', {
+            value: receptionResult.classification,
+            writable: true,
+            configurable: true,
+            enumerable: false
+        });
+        Object.defineProperty(resReception, 'vectorComparison', {
+            value: receptionResult.classification,
+            writable: true,
+            configurable: true,
+            enumerable: false
+        });
+        Object.defineProperty(resReception, 'storedBpdu', {
+            get: () => getSwitchPortReceivedBpdu(neighborDev, targetPort),
+            configurable: true,
+            enumerable: false
+        });
+    }
+
     return finalize({
         success: receptionResult.status === 'accepted',
         connectionId: connId,
@@ -7839,13 +8213,7 @@ function transmitBpdu(switchOrId, portName, options = {}) {
             eligible: true,
             reason: null
         },
-        reception: {
-            targetDeviceId: neighborDev.id,
-            targetDeviceName: neighborDev.name,
-            targetPort: targetPort,
-            targetDeviceType: neighborDev.type,
-            ...receptionResult
-        }
+        reception: resReception
     });
 }
 
@@ -8853,6 +9221,7 @@ function setSwitchPortOperState(dev, portName, action) {
             cfg.adminDown = true;
             sec.errDisabled = false;
             cfg.status = 'down';
+            clearSwitchPortReceivedBpdu(sw, normPort);
             recalculateTopologyStp();
             return {
                 success: true,
@@ -8892,6 +9261,7 @@ function setSwitchPortOperState(dev, portName, action) {
         case 'VIOLATION_SHUTDOWN': {
             sec.errDisabled = true;
             cfg.status = 'down';
+            clearSwitchPortReceivedBpdu(sw, normPort);
             sec.secureMacs = sec.secureMacs.filter(e => e.type !== 'dynamic');
             if (networkState.switchRuntime?.[sw.id]?.macTable) {
                 networkState.switchRuntime[sw.id].macTable = networkState.switchRuntime[sw.id].macTable.filter(
@@ -12071,9 +12441,20 @@ function assignPortsForConnection(connection) {
 }
 
 function releasePortAssignmentsForConnection(connectionId) {
-    Object.values(networkState.switchRuntime).forEach((runtime) => {
-        if (Object.prototype.hasOwnProperty.call(runtime.ports, connectionId)) {
+    Object.entries(networkState.switchRuntime || {}).forEach(([switchId, runtime]) => {
+        if (runtime && runtime.ports && Object.prototype.hasOwnProperty.call(runtime.ports, connectionId)) {
+            const portName = runtime.ports[connectionId];
             delete runtime.ports[connectionId];
+            if (portName) {
+                if (runtime.receivedBpdus && runtime.receivedBpdus[portName]) {
+                    delete runtime.receivedBpdus[portName];
+                }
+                const sw = getSwitchDevice(switchId);
+                if (sw?.stp?.ports?.[portName]) {
+                    sw.stp.ports[portName].receivedBpdu = null;
+                    sw.stp.ports[portName].storedBpdu = null;
+                }
+            }
         }
     });
     if (networkState.routerRuntime) {

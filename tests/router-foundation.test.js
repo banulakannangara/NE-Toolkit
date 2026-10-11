@@ -43260,6 +43260,576 @@ runTest('1745. Capacity and store resilience: corrupted or missing events array 
     assert.strictEqual(getBpduDiagnosticEvents()[0].exchangeId, 'bpdu-11');
 });
 
+// 1746. Priority vector comparator: Root Bridge ID tie-breaker (priority and MAC address)
+runTest('1746. Priority vector comparator: Root Bridge ID tie-breaker (priority and MAC address)', () => {
+    // Priority tie-breaker: lower priority value is superior
+    const vecRootLowPrio = {
+        rootBridgeId: '4096.00:11:22:33:44:55',
+        rootPathCost: 10,
+        senderBridgeId: '32768.00:aa:bb:cc:dd:ee',
+        senderPortId: '128.1'
+    };
+    const vecRootHighPrio = {
+        rootBridgeId: '8192.00:11:22:33:44:55',
+        rootPathCost: 10,
+        senderBridgeId: '32768.00:aa:bb:cc:dd:ee',
+        senderPortId: '128.1'
+    };
+
+    assert.ok(compareBpduPriorityVectors(vecRootLowPrio, vecRootHighPrio) < 0, 'Lower root priority must be superior');
+    assert.ok(compareBpduPriorityVectors(vecRootHighPrio, vecRootLowPrio) > 0, 'Higher root priority must be inferior');
+
+    // MAC address tie-breaker: equal priority, lower MAC is superior
+    const vecRootLowMac = {
+        rootBridgeId: '32768.00:11:22:33:44:01',
+        rootPathCost: 10,
+        senderBridgeId: '32768.00:aa:bb:cc:dd:ee',
+        senderPortId: '128.1'
+    };
+    const vecRootHighMac = {
+        rootBridgeId: '32768.00:11:22:33:44:02',
+        rootPathCost: 10,
+        senderBridgeId: '32768.00:aa:bb:cc:dd:ee',
+        senderPortId: '128.1'
+    };
+
+    assert.ok(compareBpduPriorityVectors(vecRootLowMac, vecRootHighMac) < 0, 'Lower root MAC address must be superior');
+    assert.ok(compareBpduPriorityVectors(vecRootHighMac, vecRootLowMac) > 0, 'Higher root MAC address must be inferior');
+});
+
+// 1747. Priority vector comparator: Root Path Cost tie-breaker with numeric semantics
+runTest('1747. Priority vector comparator: Root Path Cost tie-breaker with numeric semantics', () => {
+    const base = {
+        rootBridgeId: '32768.00:11:22:33:44:55',
+        senderBridgeId: '32768.00:aa:bb:cc:dd:ee',
+        senderPortId: '128.1'
+    };
+
+    const vecCost0 = Object.assign({}, base, { rootPathCost: 0 });
+    const vecCost19 = Object.assign({}, base, { rootPathCost: 19 });
+
+    assert.strictEqual(compareBpduPriorityVectors(vecCost0, vecCost19), -19, 'Zero cost must be superior to 19');
+    assert.strictEqual(compareBpduPriorityVectors(vecCost19, vecCost0), 19, 'Cost 19 must be inferior to 0');
+
+    // Numeric semantics: cost 4 vs 19 (lexicographically "19" < "4", but numerically 4 < 19)
+    const vecCost4 = Object.assign({}, base, { rootPathCost: 4 });
+    assert.strictEqual(compareBpduPriorityVectors(vecCost4, vecCost19), -15, 'Cost 4 must be numerically superior to 19');
+    assert.strictEqual(compareBpduPriorityVectors(vecCost19, vecCost4), 15);
+
+    // High cost boundary
+    const vecCostMax = Object.assign({}, base, { rootPathCost: 200000000 });
+    assert.ok(compareBpduPriorityVectors(vecCost19, vecCostMax) < 0, 'Cost 19 must be superior to 200,000,000');
+});
+
+// 1748. Priority vector comparator: Designated Bridge ID tie-breaker (priority and MAC address)
+runTest('1748. Priority vector comparator: Designated Bridge ID tie-breaker (priority and MAC address)', () => {
+    const base = {
+        rootBridgeId: '4096.00:11:22:33:44:55',
+        rootPathCost: 19,
+        senderPortId: '128.1'
+    };
+
+    // Priority tie-breaker
+    const vecDesigLowPrio = Object.assign({}, base, { senderBridgeId: '4096.00:aa:bb:cc:dd:ee' });
+    const vecDesigHighPrio = Object.assign({}, base, { senderBridgeId: '32768.00:aa:bb:cc:dd:ee' });
+    assert.ok(compareBpduPriorityVectors(vecDesigLowPrio, vecDesigHighPrio) < 0, 'Lower sender bridge priority must be superior');
+    assert.ok(compareBpduPriorityVectors(vecDesigHighPrio, vecDesigLowPrio) > 0);
+
+    // MAC address tie-breaker
+    const vecDesigLowMac = Object.assign({}, base, { senderBridgeId: '32768.00:aa:bb:cc:dd:01' });
+    const vecDesigHighMac = Object.assign({}, base, { senderBridgeId: '32768.00:aa:bb:cc:dd:02' });
+    assert.ok(compareBpduPriorityVectors(vecDesigLowMac, vecDesigHighMac) < 0, 'Lower sender bridge MAC must be superior');
+    assert.ok(compareBpduPriorityVectors(vecDesigHighMac, vecDesigLowMac) > 0);
+
+    // designatedBridgeId alias compatibility
+    const vecAliasA = { rootBridgeId: '4096.00:11:22:33:44:55', rootPathCost: 19, designatedBridgeId: '4096.00:aa:bb:cc:dd:ee', designatedPortId: '128.1' };
+    const vecAliasB = { rootBridgeId: '4096.00:11:22:33:44:55', rootPathCost: 19, designatedBridgeId: '32768.00:aa:bb:cc:dd:ee', designatedPortId: '128.1' };
+    assert.ok(compareBpduPriorityVectors(vecAliasA, vecAliasB) < 0, 'designatedBridgeId alias must work identically');
+});
+
+// 1749. Priority vector comparator: Designated Port ID tie-breaker with numeric semantics
+runTest('1749. Priority vector comparator: Designated Port ID tie-breaker with numeric semantics', () => {
+    const base = {
+        rootBridgeId: '4096.00:11:22:33:44:55',
+        rootPathCost: 19,
+        senderBridgeId: '32768.00:aa:bb:cc:dd:ee'
+    };
+
+    // Port priority tie-breaker (lower priority value is superior)
+    const vecPortPrio64 = Object.assign({}, base, { senderPortId: '64.1' });
+    const vecPortPrio128 = Object.assign({}, base, { senderPortId: '128.1' });
+    assert.strictEqual(compareBpduPriorityVectors(vecPortPrio64, vecPortPrio128), -64, 'Port priority 64 must be superior to 128');
+    assert.strictEqual(compareBpduPriorityVectors(vecPortPrio128, vecPortPrio64), 64);
+
+    // Port number tie-breaker (lower port number is superior)
+    const vecPortNum1 = Object.assign({}, base, { senderPortId: '128.1' });
+    const vecPortNum2 = Object.assign({}, base, { senderPortId: '128.2' });
+    assert.strictEqual(compareBpduPriorityVectors(vecPortNum1, vecPortNum2), -1, 'Port 1 must be superior to Port 2');
+    assert.strictEqual(compareBpduPriorityVectors(vecPortNum2, vecPortNum1), 1);
+
+    // Strict numeric ordering: port 2 vs port 10 (lexicographically "128.10" < "128.2", but numerically 2 < 10)
+    const vecPortNum10 = Object.assign({}, base, { senderPortId: '128.10' });
+    assert.strictEqual(compareBpduPriorityVectors(vecPortNum2, vecPortNum10), -8, 'Port 2 must be numerically superior to Port 10');
+    assert.strictEqual(compareBpduPriorityVectors(vecPortNum10, vecPortNum2), 8);
+
+    // designatedPortId alias compatibility
+    const vecAlias1 = Object.assign({}, base, { designatedPortId: '128.1' });
+    const vecAlias2 = Object.assign({}, base, { designatedPortId: '128.2' });
+    assert.strictEqual(compareBpduPriorityVectors(vecAlias1, vecAlias2), -1);
+});
+
+// 1750. Priority vector comparator: equal vectors return 0 and ignore non-vector fields
+runTest('1750. Priority vector comparator: equal vectors return 0 and ignore non-vector fields', () => {
+    const vecA = {
+        rootBridgeId: '4096.00:11:22:33:44:55',
+        rootPathCost: 19,
+        senderBridgeId: '32768.00:aa:bb:cc:dd:ee',
+        senderPortId: '128.1',
+        messageAge: 0,
+        maxAge: 20,
+        helloTime: 2,
+        forwardDelay: 15,
+        flags: { topologyChange: false, topologyChangeAck: false }
+    };
+    const vecB = {
+        rootBridgeId: '4096.00:11:22:33:44:55',
+        rootPathCost: 19,
+        senderBridgeId: '32768.00:aa:bb:cc:dd:ee',
+        senderPortId: '128.1',
+        messageAge: 10,
+        maxAge: 40,
+        helloTime: 5,
+        forwardDelay: 30,
+        flags: { topologyChange: true, tc: true, topologyChangeAck: true, tca: true }
+    };
+
+    assert.strictEqual(compareBpduPriorityVectors(vecA, vecB), 0, 'Equal vectors with different timers and flags must evaluate to 0');
+    assert.strictEqual(compareBpduPriorityVectors(vecB, vecA), 0);
+});
+
+// 1751. Priority vector comparator: malformed vector handling rejects safely without mutation
+runTest('1751. Priority vector comparator: malformed vector handling rejects safely without mutation', () => {
+    const valid = {
+        rootBridgeId: '4096.00:11:22:33:44:55',
+        rootPathCost: 0,
+        senderBridgeId: '32768.00:aa:bb:cc:dd:ee',
+        senderPortId: '128.1'
+    };
+
+    // Non-object inputs
+    assert.strictEqual(compareBpduPriorityVectors(null, valid), null);
+    assert.strictEqual(compareBpduPriorityVectors(valid, undefined), null);
+    assert.strictEqual(compareBpduPriorityVectors('invalid', valid), null);
+    assert.strictEqual(compareBpduPriorityVectors(123, valid), null);
+
+    // Malformed rootBridgeId
+    assert.strictEqual(compareBpduPriorityVectors(Object.assign({}, valid, { rootBridgeId: '' }), valid), null);
+    assert.strictEqual(compareBpduPriorityVectors(Object.assign({}, valid, { rootBridgeId: 'not-a-bid' }), valid), null);
+    assert.strictEqual(compareBpduPriorityVectors(Object.assign({}, valid, { rootBridgeId: '999999.00:11:22:33:44:55' }), valid), null);
+
+    // Malformed rootPathCost
+    assert.strictEqual(compareBpduPriorityVectors(Object.assign({}, valid, { rootPathCost: -1 }), valid), null);
+    assert.strictEqual(compareBpduPriorityVectors(Object.assign({}, valid, { rootPathCost: 1.5 }), valid), null);
+    assert.strictEqual(compareBpduPriorityVectors(Object.assign({}, valid, { rootPathCost: '0' }), valid), null);
+    assert.strictEqual(compareBpduPriorityVectors(Object.assign({}, valid, { rootPathCost: NaN }), valid), null);
+
+    // Malformed senderBridgeId
+    assert.strictEqual(compareBpduPriorityVectors(Object.assign({}, valid, { senderBridgeId: null }), valid), null);
+    assert.strictEqual(compareBpduPriorityVectors(Object.assign({}, valid, { senderBridgeId: 'invalid-mac' }), valid), null);
+
+    // Malformed senderPortId
+    assert.strictEqual(compareBpduPriorityVectors(Object.assign({}, valid, { senderPortId: 'invalid' }), valid), null);
+    assert.strictEqual(compareBpduPriorityVectors(Object.assign({}, valid, { senderPortId: '128.0' }), valid), null);
+    assert.strictEqual(compareBpduPriorityVectors(Object.assign({}, valid, { senderPortId: '999.1' }), valid), null);
+
+    // isValidPriorityVector helper
+    assert.strictEqual(isValidPriorityVector(valid), true);
+    assert.strictEqual(isValidPriorityVector(null), false);
+    assert.strictEqual(isValidPriorityVector({ rootBridgeId: 'bad' }), false);
+});
+
+// 1752. Per-port store: first valid BPDU received on port is stored and classified as superior
+runTest('1752. Per-port store: first valid BPDU received on port is stored and classified as superior', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root Bridge)
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    // Initial state: no BPDU received yet on Switch1 Fa0/1
+    assert.strictEqual(getSwitchPortReceivedBpdu('Switch1', 'Fa0/1'), null);
+
+    const bpdu = createBpdu('Switch0', 'Fa0/1');
+    const rx = receiveBpdu('Switch1', 'Fa0/1', bpdu);
+
+    assert.strictEqual(rx.status, 'accepted');
+    assert.strictEqual(rx.classification, 'superior');
+    assert.strictEqual(rx.vectorComparison, 'superior');
+
+    const stored = getSwitchPortReceivedBpdu('Switch1', 'Fa0/1');
+    assert.ok(stored, 'Stored BPDU snapshot must exist on Switch1 Fa0/1');
+    assert.strictEqual(stored.rootBridgeId, sw0.stp.bridgeId);
+    assert.strictEqual(stored.rootPathCost, 0);
+    assert.strictEqual(stored.senderBridgeId, sw0.stp.bridgeId);
+    assert.strictEqual(stored.senderPortId, '128.1');
+    assert.strictEqual(stored.classification, 'superior');
+
+    // Also verify non-enumerable property on sw.stp.ports
+    assert.strictEqual(sw1.stp.ports['Fa0/1'].receivedBpdu.rootBridgeId, sw0.stp.bridgeId);
+    assert.strictEqual(sw1.stp.ports['Fa0/1'].storedBpdu.rootBridgeId, sw0.stp.bridgeId);
+});
+
+// 1753. Per-port store: superior incoming vector replaces stored information
+runTest('1753. Per-port store: superior incoming vector replaces stored information', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    // Store an initial inferior BPDU (root priority 32768)
+    const inferiorBpdu = Object.assign({}, createBpdu('Switch0', 'Fa0/1'), {
+        rootBridgeId: '32768.00:aa:bb:cc:dd:ee',
+        rootPathCost: 19,
+        senderBridgeId: '32768.00:aa:bb:cc:dd:ee',
+        senderPortId: '128.1'
+    });
+    const rx1 = receiveBpdu('Switch1', 'Fa0/1', inferiorBpdu);
+    assert.strictEqual(rx1.classification, 'superior');
+    assert.strictEqual(getSwitchPortReceivedBpdu('Switch1', 'Fa0/1').rootBridgeId, '32768.00:aa:bb:cc:dd:ee');
+
+    // Send a strictly better BPDU (root priority 4096)
+    const superiorBpdu = Object.assign({}, createBpdu('Switch0', 'Fa0/1'), {
+        rootBridgeId: '4096.00:11:22:33:44:55',
+        rootPathCost: 0,
+        senderBridgeId: '4096.00:11:22:33:44:55',
+        senderPortId: '128.1'
+    });
+    const rx2 = receiveBpdu('Switch1', 'Fa0/1', superiorBpdu);
+    assert.strictEqual(rx2.classification, 'superior');
+    assert.strictEqual(rx2.vectorComparison, 'superior');
+
+    // Verify stored information was replaced by superior vector
+    const stored = getSwitchPortReceivedBpdu('Switch1', 'Fa0/1');
+    assert.strictEqual(stored.rootBridgeId, '4096.00:11:22:33:44:55');
+    assert.strictEqual(stored.rootPathCost, 0);
+    assert.strictEqual(stored.senderBridgeId, '4096.00:11:22:33:44:55');
+});
+
+// 1754. Per-port store: equal vector classified as repeated without altered timestamp or age affecting comparison
+runTest('1754. Per-port store: equal vector classified as repeated without altered timestamp or age affecting comparison', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    const initialBpdu = createBpdu('Switch0', 'Fa0/1');
+    const rx1 = receiveBpdu('Switch1', 'Fa0/1', initialBpdu);
+    assert.strictEqual(rx1.classification, 'superior');
+
+    // Send repeated BPDU with identical priority vector but altered messageAge
+    const repeatedBpdu = Object.assign({}, initialBpdu, { messageAge: 5 });
+    const rx2 = receiveBpdu('Switch1', 'Fa0/1', repeatedBpdu);
+    assert.strictEqual(rx2.status, 'accepted');
+    assert.strictEqual(rx2.classification, 'repeated');
+    assert.strictEqual(rx2.vectorComparison, 'repeated');
+
+    // Stored priority vector remains identical
+    const stored = getSwitchPortReceivedBpdu('Switch1', 'Fa0/1');
+    assert.strictEqual(stored.rootBridgeId, sw0.stp.bridgeId);
+    assert.strictEqual(stored.rootPathCost, 0);
+    assert.strictEqual(stored.senderBridgeId, sw0.stp.bridgeId);
+    assert.strictEqual(stored.senderPortId, '128.1');
+});
+
+// 1755. Per-port store: inferior incoming vector is classified as inferior and does not overwrite superior information
+runTest('1755. Per-port store: inferior incoming vector is classified as inferior and does not overwrite superior information', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    // Store superior BPDU first
+    const superiorBpdu = Object.assign({}, createBpdu('Switch0', 'Fa0/1'), {
+        rootBridgeId: '4096.00:11:22:33:44:55',
+        rootPathCost: 0,
+        senderBridgeId: '4096.00:11:22:33:44:55',
+        senderPortId: '128.1'
+    });
+    receiveBpdu('Switch1', 'Fa0/1', superiorBpdu);
+
+    // Send inferior BPDU (worse root priority and worse cost)
+    const inferiorBpdu = Object.assign({}, createBpdu('Switch0', 'Fa0/1'), {
+        rootBridgeId: '32768.00:99:99:99:99:99',
+        rootPathCost: 100,
+        senderBridgeId: '32768.00:99:99:99:99:99',
+        senderPortId: '128.1'
+    });
+    const rxInferior = receiveBpdu('Switch1', 'Fa0/1', inferiorBpdu);
+
+    assert.strictEqual(rxInferior.status, 'accepted');
+    assert.strictEqual(rxInferior.classification, 'inferior');
+    assert.strictEqual(rxInferior.vectorComparison, 'inferior');
+
+    // Superior stored information MUST NOT be overwritten
+    const stored = getSwitchPortReceivedBpdu('Switch1', 'Fa0/1');
+    assert.strictEqual(stored.rootBridgeId, '4096.00:11:22:33:44:55', 'Superior stored information must be preserved');
+    assert.strictEqual(stored.rootPathCost, 0);
+    assert.strictEqual(stored.senderBridgeId, '4096.00:11:22:33:44:55');
+});
+
+// 1756. Store resilience: malformed and rejected BPDUs do not corrupt existing stored information
+runTest('1756. Store resilience: malformed and rejected BPDUs do not corrupt existing stored information', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    const validBpdu = createBpdu('Switch0', 'Fa0/1');
+    receiveBpdu('Switch1', 'Fa0/1', validBpdu);
+
+    const storedBefore = Object.assign({}, getSwitchPortReceivedBpdu('Switch1', 'Fa0/1'));
+
+    // Attempt invalid BPDUs across multiple rejection categories
+    const badPayloads = [
+        null,
+        'string',
+        Object.assign({}, validBpdu, { protocolId: 99 }),
+        Object.assign({}, validBpdu, { rootBridgeId: 'bad-bid' }),
+        Object.assign({}, validBpdu, { rootPathCost: -5 }),
+        Object.assign({}, validBpdu, { senderPortId: 'invalid' }),
+        Object.assign({}, validBpdu, { messageAge: 25, maxAge: 20 })
+    ];
+
+    badPayloads.forEach(bad => {
+        const res = receiveBpdu('Switch1', 'Fa0/1', bad);
+        assert.strictEqual(res.status, 'dropped');
+    });
+
+    // Stored information must remain completely intact and uncorrupted
+    const storedAfter = getSwitchPortReceivedBpdu('Switch1', 'Fa0/1');
+    assert.strictEqual(storedAfter.rootBridgeId, storedBefore.rootBridgeId);
+    assert.strictEqual(storedAfter.rootPathCost, storedBefore.rootPathCost);
+    assert.strictEqual(storedAfter.senderBridgeId, storedBefore.senderBridgeId);
+    assert.strictEqual(storedAfter.senderPortId, storedBefore.senderPortId);
+});
+
+// 1757. Lifecycle safety: cable disconnect clears stale per-port stored BPDU while preserving switchport configuration
+runTest('1757. Lifecycle safety: cable disconnect clears stale per-port stored BPDU while preserving switchport configuration', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    const conn = networkState.connections[0];
+
+    // Configure switchport settings on Switch1 Fa0/1
+    createSwitchVlan(sw1, 10, 'Sales');
+    setSwitchPortAccessVlan(sw1, 'Fa0/1', 10);
+    setSwitchPortStpCost(sw1, 'Fa0/1', 50);
+    setSwitchPortStpPriority(sw1, 'Fa0/1', 64);
+    setSwitchPortPortfast(sw1, 'Fa0/1', true);
+
+    recalculateTopologyStp();
+
+    // Receive BPDU and verify storage
+    receiveBpdu('Switch1', 'Fa0/1', createBpdu('Switch0', 'Fa0/1'));
+    assert.ok(getSwitchPortReceivedBpdu('Switch1', 'Fa0/1') !== null);
+
+    // Disconnect cable
+    deleteConnection(conn.id);
+
+    // Stored BPDU must be cleared
+    assert.strictEqual(getSwitchPortReceivedBpdu('Switch1', 'Fa0/1'), null);
+    assert.strictEqual(sw1.stp.ports['Fa0/1'].receivedBpdu, null);
+
+    // Switchport configuration must be completely preserved
+    const cfg = sw1.switchports['Fa0/1'];
+    assert.strictEqual(cfg.accessVlan, 10);
+    assert.strictEqual(cfg.stpCost, 50);
+    assert.strictEqual(cfg.stpPortPriority, 64);
+    assert.strictEqual(cfg.portfast, true);
+});
+
+// 1758. Lifecycle safety: administrative shutdown clears stale received BPDU while no shutdown re-enables with clean store
+runTest('1758. Lifecycle safety: administrative shutdown clears stale received BPDU while no shutdown re-enables with clean store', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    receiveBpdu('Switch1', 'Fa0/1', createBpdu('Switch0', 'Fa0/1'));
+    assert.ok(getSwitchPortReceivedBpdu('Switch1', 'Fa0/1') !== null);
+
+    // Administrative shutdown
+    executeCliCommand('Switch1', 'enable');
+    executeCliCommand('Switch1', 'configure terminal');
+    executeCliCommand('Switch1', 'interface Fa0/1');
+    executeCliCommand('Switch1', 'shutdown');
+
+    assert.strictEqual(getSwitchPortReceivedBpdu('Switch1', 'Fa0/1'), null, 'Administrative shutdown must clear stale received BPDU');
+    assert.strictEqual(sw1.stp.ports['Fa0/1'].receivedBpdu, null);
+
+    // No shutdown restores operational eligibility with clean store (null) until new BPDU arrives
+    executeCliCommand('Switch1', 'no shutdown');
+    assert.strictEqual(getSwitchPortReceivedBpdu('Switch1', 'Fa0/1'), null, 'Port re-enabled must have clean store');
+
+    // Receiving new BPDU stores cleanly
+    const rxFresh = receiveBpdu('Switch1', 'Fa0/1', createBpdu('Switch0', 'Fa0/1'));
+    assert.strictEqual(rxFresh.status, 'accepted');
+    assert.strictEqual(rxFresh.classification, 'superior');
+    assert.ok(getSwitchPortReceivedBpdu('Switch1', 'Fa0/1') !== null);
+});
+
+// 1759. Lifecycle safety: undo and redo preserve and restore stored BPDU state correctly across history steps
+runTest('1759. Lifecycle safety: undo and redo preserve and restore stored BPDU state correctly across history steps', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    receiveBpdu('Switch1', 'Fa0/1', createBpdu('Switch0', 'Fa0/1'));
+    assert.ok(getSwitchPortReceivedBpdu('Switch1', 'Fa0/1') !== null);
+
+    // Disconnect cable via deleteConnection (pushes history)
+    const connId = networkState.connections[0].id;
+    deleteConnection(connId);
+
+    assert.strictEqual(getSwitchPortReceivedBpdu('Switch1', 'Fa0/1'), null);
+
+    // Undo disconnect: connection and stored BPDU must be restored
+    undo();
+    const sw1Restored = networkState.devices.find(d => d.id === sw1.id);
+    assert.ok(getSwitchPortReceivedBpdu(sw1Restored, 'Fa0/1') !== null, 'Undo must restore stored BPDU');
+    assert.strictEqual(getSwitchPortReceivedBpdu(sw1Restored, 'Fa0/1').rootBridgeId, sw0.stp.bridgeId);
+
+    // Redo disconnect: stored BPDU must be cleared again
+    redo();
+    assert.strictEqual(getSwitchPortReceivedBpdu('Switch1', 'Fa0/1'), null, 'Redo must clear stored BPDU');
+});
+
+// 1760. Safety invariants: PortFast, alternate blocking states, and data-plane forwarding remain unchanged alongside per-port BPDU store
+runTest('1760. Safety invariants: PortFast, alternate blocking states, and data-plane forwarding remain unchanged alongside per-port BPDU store', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0 (Root Bridge)
+    addDevice('switch', 300, 100); // Switch1
+    addDevice('switch', 200, 300); // Switch2
+    addDevice('pc', 100, 300);     // PC0
+    const [sw0, sw1, sw2, pc0] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+    sw2.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Sw0:Fa0/1 <-> Sw1:Fa0/1
+    addConnection('Switch0', 'Switch2'); // Sw0:Fa0/2 <-> Sw2:Fa0/1
+    addConnection('Switch1', 'Switch2'); // Sw1:Fa0/2 <-> Sw2:Fa0/2
+    addConnection('Switch0', 'PC0');     // Sw0:Fa0/3 <-> PC0:eth0
+
+    setSwitchPortPortfast('Switch0', 'Fa0/3', true);
+    recalculateTopologyStp();
+
+    // Verify baseline invariants before exchange
+    assert.strictEqual(sw0.stp.ports['Fa0/3'].edge, true);
+    assert.strictEqual(isPortfastEffective(sw0, 'Fa0/3'), true);
+
+    const blockingPortsBefore = [
+        sw0.stp.ports['Fa0/1']?.state, sw0.stp.ports['Fa0/2']?.state,
+        sw1.stp.ports['Fa0/1']?.state, sw1.stp.ports['Fa0/2']?.state,
+        sw2.stp.ports['Fa0/1']?.state, sw2.stp.ports['Fa0/2']?.state
+    ].filter(s => s === 'blocking').length;
+    assert.strictEqual(blockingPortsBefore, 1, 'Exactly one redundant link must be blocked');
+
+    // Transmit BPDUs across topology
+    transmitBpdu('Switch0', 'Fa0/1');
+    transmitBpdu('Switch0', 'Fa0/2');
+    transmitBpdu('Switch0', 'Fa0/3'); // Toward PC (ignored)
+
+    // Verify per-port stores populated on switch peers
+    assert.ok(getSwitchPortReceivedBpdu('Switch1', 'Fa0/1') !== null);
+    assert.ok(getSwitchPortReceivedBpdu('Switch2', 'Fa0/1') !== null);
+
+    // Verify all STP forwarding and PortFast invariants strictly preserved
+    const blockingPortsAfter = [
+        sw0.stp.ports['Fa0/1']?.state, sw0.stp.ports['Fa0/2']?.state,
+        sw1.stp.ports['Fa0/1']?.state, sw1.stp.ports['Fa0/2']?.state,
+        sw2.stp.ports['Fa0/1']?.state, sw2.stp.ports['Fa0/2']?.state
+    ].filter(s => s === 'blocking').length;
+    assert.strictEqual(blockingPortsAfter, 1, 'Redundant link blocking count must be unchanged');
+    assert.strictEqual(sw0.stp.ports['Fa0/3'].edge, true);
+    assert.strictEqual(isPortfastEffective(sw0, 'Fa0/3'), true);
+});
+
+// 1761. Diagnostic integration: bounded diagnostic event recording continues to record single accepted exchange with per-port store active
+runTest('1761. Diagnostic integration: bounded diagnostic event recording continues to record single accepted exchange with per-port store active', () => {
+    resetLab();
+    addDevice('switch', 100, 100); // Switch0
+    addDevice('switch', 300, 100); // Switch1
+    const [sw0, sw1] = networkState.devices;
+    sw0.stpPriority = 4096;
+    sw1.stpPriority = 32768;
+
+    addConnection('Switch0', 'Switch1'); // Fa0/1 <-> Fa0/1
+    recalculateTopologyStp();
+
+    clearBpduDiagnosticEvents();
+
+    const res = transmitBpdu('Switch0', 'Fa0/1');
+    assert.strictEqual(res.success, true);
+
+    // Exactly one diagnostic event recorded
+    const events = getBpduDiagnosticEvents();
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].sequence, 1);
+    assert.strictEqual(events[0].status, 'accepted');
+    assert.ok(events[0].summary.includes('Switch0:Fa0/1 -> Switch1:Fa0/1: BPDU accepted'));
+
+    // Per-port store is populated simultaneously
+    const stored = getSwitchPortReceivedBpdu('Switch1', 'Fa0/1');
+    assert.ok(stored !== null);
+    assert.strictEqual(stored.rootBridgeId, sw0.stp.bridgeId);
+
+    // Repeated transmission records second diagnostic event without duplicate per-port stores
+    transmitBpdu('Switch0', 'Fa0/1');
+    assert.strictEqual(getBpduDiagnosticEvents().length, 2);
+    assert.strictEqual(getBpduDiagnosticEvents()[1].sequence, 2);
+});
+
 console.log('----------------------------------------------------');
 console.log('Total tests: ' + (testsPassed + testsFailed) + ' | Passed: ' + testsPassed + ' | Failed: ' + testsFailed);
 if (testsFailed > 0) {
